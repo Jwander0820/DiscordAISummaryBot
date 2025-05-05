@@ -2,27 +2,52 @@ from datetime import datetime, timezone, timedelta
 import logging
 import os
 import sqlite3
-
+import psycopg2
 import discord
 import google.generativeai as genai
 from discord.ext import commands
 from dotenv import load_dotenv  # Import dotenv
 
-# --- SQLite 初始化 ---
-# 建立或連線到 local 檔案 digest.db
-conn = sqlite3.connect("digest.db")
+load_dotenv()
+
+# # --- SQLite 初始化 ---
+# # 建立或連線到 local 檔案 digest.db
+# conn = sqlite3.connect("digest.db")
+# cursor = conn.cursor()
+# # 建立 summaries 資料表
+# cursor.execute("""
+# CREATE TABLE IF NOT EXISTS summaries (
+#     id          INTEGER PRIMARY KEY AUTOINCREMENT,
+#     channel_id  TEXT,
+#     user_id     TEXT,
+#     command     TEXT,
+#     question    TEXT,
+#     prompt      TEXT,
+#     summary     TEXT,
+#     call_time   TEXT
+# );
+# """)
+# conn.commit()
+
+# --- PostgreSQL 初始化 ---
+DATABASE_URL = os.environ.get("DATABASE_URL")
+if not DATABASE_URL:
+    raise Exception("DATABASE_URL not set")
+
+conn = psycopg2.connect(DATABASE_URL)
 cursor = conn.cursor()
-# 建立 summaries 資料表
+
+# 建立資料表
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS summaries (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    channel_id  TEXT,
-    user_id     TEXT,
-    command     TEXT,
-    question    TEXT,
-    prompt      TEXT,
-    summary     TEXT,
-    call_time   TEXT
+    id SERIAL PRIMARY KEY,
+    channel_id TEXT,
+    user_id TEXT,
+    command TEXT,
+    question TEXT,
+    prompt TEXT,
+    summary TEXT,
+    call_time TIMESTAMP
 );
 """)
 conn.commit()
@@ -31,7 +56,6 @@ GUILD_ID = 1255783788097835018  # 把這裡換成你的伺服器 ID
 
 # --- Load Environment Variables ---
 # Load variables from ..env file in the current directory
-load_dotenv()
 logger = logging.getLogger('discord_digest_bot')  # Define logger early for .env var logging
 
 # --- Configuration ---
@@ -150,7 +174,7 @@ async def summarize_messages(messages: list[discord.Message], prompt_scope: str 
         channel_id = messages[0].channel.name
         user_id = messages[0].author.global_name
         cursor.execute(
-            "INSERT INTO summaries(channel_id, call_time, prompt, summary, command, user_id) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO summaries(channel_id, call_time, prompt, summary, command, user_id) VALUES (%s, %s, %s, %s, %s, %s)",
             (str(channel_id), call_time, message_text, summary_text, f"{prompt_scope}總結", user_id)
         )
         conn.commit()
@@ -386,9 +410,8 @@ async def ask_about_conversation(interaction: discord.Interaction, 想問些什�
         # 寫入DB
         cursor.execute(
             """
-            INSERT INTO summaries(
-              channel_id, user_id, command, question, prompt, summary, call_time
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO summaries (channel_id, user_id, command, question, prompt, summary, call_time)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 str(channel.name),  # channel_id
