@@ -374,6 +374,8 @@ if __name__ == "__main__":
         logger.warning("Gemini API Key not found. Bot will run without summarization features.")
         logger.info("Starting bot (summarization disabled)...")
         bot.run(BOT_TOKEN)
+    elif os.environ.get("DISABLE_DISCORD_BOT") == "1":
+        logger.info("DISABLE_DISCORD_BOT is set. Skipping bot startup.")
     else:
         logger.info("Starting bot...")
         bot.run(BOT_TOKEN)
