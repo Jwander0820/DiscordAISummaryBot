@@ -110,6 +110,7 @@ async def summarize_messages(messages: list[discord.Message], prompt_scope: str 
     :return: Summary text.
     """
     logger.info(f"Summarizing {len(messages)} messages...")
+    TZ_8 = timezone(timedelta(hours=8))
 
     if not gemini_model:
         logger.warning("Gemini model not initialized or API key is missing/invalid.")
@@ -118,10 +119,11 @@ async def summarize_messages(messages: list[discord.Message], prompt_scope: str 
     if not messages:
         return "No recent non-bot messages found to summarize."
 
-    # Combine message text
-    message_text = "\n".join(
-        [f"[{msg.created_at.strftime('%H:%M')}] {msg.author.display_name}: {msg.content}" for msg in reversed(messages)]
-    )
+    # 組裝對話格式
+    message_text = "\n".join([
+        f"[{msg.created_at.astimezone(TZ_8).strftime('%H:%M')}] [id:{msg.author.name}] {msg.author.display_name}: {msg.content}"
+        for msg in reversed(messages)
+    ])
 
     # Construct dynamic prompt
     prompt = f"""請以繁體中文總結{prompt_scope}內以下Discord聊天消息的關鍵主題與重要資訊。
@@ -162,7 +164,7 @@ async def summarize_messages(messages: list[discord.Message], prompt_scope: str 
 
 # --- Slash Command Definition ---
 @bot.tree.command(name="聊那麼多誰看的完", description="總結頻道中的24小時內1000則訊息")
-async def summarize(interaction: discord.Interaction):
+async def summarize(interaction: discord.Interaction, len_msg: int = 1000):
     """Slash command to trigger the summarization."""
     channel = interaction.channel
     if not isinstance(channel, discord.TextChannel):
@@ -180,10 +182,10 @@ async def summarize(interaction: discord.Interaction):
         logger.info(f"Fetching messages from channel '{channel.name}' (ID: {channel.id}) since {time_since}")
         messages = []
         # Limit fetch to avoid exceeding rate limits or memory, increase if needed
-        async for message in channel.history(limit=1200, after=time_since, oldest_first=False):
+        async for message in channel.history(limit=int(len_msg*1.1), after=time_since, oldest_first=False):
             if not message.author.bot:  # Ignore bot messages
                 messages.append(message)
-            if len(messages) >= 1000:  # Stop fetching after 1000 non-bot messages to limit prompt size
+            if len(messages) >= len_msg:  # Stop fetching after 1000 non-bot messages to limit prompt size
                 logger.info("Reached message limit (1000) for summarization.")
                 break
 
@@ -213,9 +215,57 @@ async def summarize(interaction: discord.Interaction):
         logger.error(f"An unexpected error occurred during summarization command: {e}", exc_info=True)
         await interaction.followup.send(f"An unexpected error occurred: {e}", ephemeral=True)
 
+@bot.tree.command(name="整理廢話的魔法", description="總結頻道中的1小時內所有訊息")
+async def magic_summarize(interaction: discord.Interaction, len_msg: int = 5000):
+    """Slash command to trigger the summarization."""
+    channel = interaction.channel
+    if not isinstance(channel, discord.TextChannel):
+        await interaction.response.send_message("This command can only be used in text channels.", ephemeral=True)
+        return
+
+    # Defer response as summarization can take time
+    await interaction.response.defer(ephemeral=False)  # Acknowledge interaction, visible to others
+
+    try:
+        # 1 小時前的 UTC 時間
+        time_since = datetime.now(timezone.utc) - timedelta(hours=1)
+        logger.info(f"Fetching messages from channel '{channel.name}' since {time_since.isoformat()}")
+
+        messages = []
+        # Limit fetch to avoid exceeding rate limits or memory, increase if needed
+        async for message in channel.history(limit=len_msg, after=time_since, oldest_first=False):
+            if not message.author.bot:  # Ignore bot messages
+                messages.append(message)
+
+        logger.info(f"Fetched {len(messages)} non-bot messages in last hour.")
+
+        # Generate summary
+        summary_text = await summarize_messages(messages, prompt_scope="過去一小時")
+
+        # Send the summary
+        if len(summary_text) > 1900:  # Discord message limit is 2000 chars
+            # Try sending in chunks or just truncate
+            logger.warning(f"Summary length ({len(summary_text)}) exceeds Discord limit. Truncating.")
+            summary_text = summary_text[:1900] + "...（已截斷）"
+        elif not summary_text:
+            summary_text = "找不到有效內容，無法生成摘要。"
+
+        await interaction.followup.send(f"＜(´⌯  ̫⌯`)＞ {summary_text}")
+        logger.info(f"Sent 1h summary to channel '{channel.name}'")
+
+    except discord.Forbidden:
+        logger.error(
+            f"Permission error: Bot lacks permissions to read history or send messages in channel '{channel.name}' (ID: {channel.id})")
+        await interaction.followup.send(
+            "Error: I don't have the necessary permissions to read message history or send messages in this channel.",
+            ephemeral=True)
+    except Exception as e:
+        logger.error(f"An unexpected error occurred during summarization command: {e}", exc_info=True)
+        await interaction.followup.send(f"An unexpected error occurred: {e}", ephemeral=True)
+
 
 @bot.tree.command(name="命運探知之魔眼", description="總結頻道中七天內一萬則訊息的精華(實驗性)")
-async def deep_summary(interaction: discord.Interaction):
+async def deep_summary(interaction: discord.Interaction, len_msg:int = 10000):
     """Slash command to summarize the last 7 days of messages (up to 10,000)."""
     channel = interaction.channel
     if not isinstance(channel, discord.TextChannel):
@@ -231,10 +281,10 @@ async def deep_summary(interaction: discord.Interaction):
         logger.info(
             f"Fetching messages (7d, max 10000) from channel '{channel.name}' (ID: {channel.id}) since {time_since}")
         messages = []
-        async for message in channel.history(limit=11000, after=time_since, oldest_first=False):
+        async for message in channel.history(limit=int(len_msg*1.1), after=time_since, oldest_first=False):
             if not message.author.bot:
                 messages.append(message)
-            if len(messages) >= 10000:
+            if len(messages) >= len_msg:
                 logger.info("Reached message limit (10000) for deep summary.")
                 break
 
@@ -260,16 +310,17 @@ async def deep_summary(interaction: discord.Interaction):
         await interaction.followup.send(f"發生錯誤：{e}", ephemeral=True)
 
 
-@bot.tree.command(name="你要不要聽聽看你現在在講什麼", description="取得24小時內最近300則訊息，根據你問的問題回覆(實驗性)")
-async def ask_about_conversation(interaction: discord.Interaction, 想問些什麼: str):
+@bot.tree.command(name="你要不要聽聽看你現在在講什麼", description="取得24小時內最近500則訊息，根據你問的問題回覆(實驗性)")
+async def ask_about_conversation(interaction: discord.Interaction, 想問些什麼: str, len_msg: int = 500):
     """
-    讓使用者根據最近 300 則對話內容提問，Gemini 幫忙回答。
+    讓使用者根據最近 500 則對話內容提問，Gemini 幫忙回答。
     """
     question = 想問些什麼
     channel = interaction.channel
     if not isinstance(channel, discord.TextChannel):
         await interaction.response.send_message("此指令僅能用於文字頻道", ephemeral=True)
         return
+    TZ_8 = timezone(timedelta(hours=8))
 
     await interaction.response.defer(ephemeral=False)
 
@@ -277,10 +328,13 @@ async def ask_about_conversation(interaction: discord.Interaction, 想問些什�
         # Calculate the time 24 hours ago
         time_since = datetime.now(timezone.utc) - timedelta(days=1)
         messages = []
-        async for message in channel.history(limit=350, after=time_since, oldest_first=False):  # 多抓一些保險
+        async for message in channel.history(limit=int(len_msg*1.1), after=time_since, oldest_first=False):  # 多抓一些保險
+            # print(f"id: {message.author.id}")
+            # print(f"name: {message.author.name}")
+            # print(f"display_name: {message.author.display_name}")
             if not message.author.bot:
                 messages.append(message)
-            if len(messages) >= 300:
+            if len(messages) >= len_msg:
                 break
 
         if not messages:
@@ -291,11 +345,11 @@ async def ask_about_conversation(interaction: discord.Interaction, 想問些什�
 
         # 組裝對話格式
         message_text = "\n".join([
-            f"[{msg.created_at.strftime('%H:%M')}] {msg.author.display_name}: {msg.content}"
+            f"[{msg.created_at.astimezone(TZ_8).strftime('%H:%M')}] [id:{msg.author.name}] {msg.author.display_name}: {msg.content}"
             for msg in reversed(messages)
         ])
 
-        prompt = f"""你是 Discord 頻道中的觀察者，以下是24小時內最近的 300 則對話紀錄，請根據這些內容回答使用者的問題。
+        prompt = f"""你是 Discord 頻道中的觀察者，以下是24小時內最近的 500 則對話紀錄，請根據這些內容回答使用者的問題。
 
 聊天紀錄:
 {message_text}
