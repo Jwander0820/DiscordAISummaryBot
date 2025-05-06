@@ -187,8 +187,8 @@ async def summarize_messages(messages: list[discord.Message], prompt_scope: str 
 
 
 # --- Slash Command Definition ---
-@bot.tree.command(name="聊那麼多誰看的完", description="總結頻道中的24小時內1000則訊息")
-async def summarize(interaction: discord.Interaction, len_msg: int = 1000):
+@bot.tree.command(name="聊那麼多誰看的完", description="總結頻道中的24小時內2000則訊息")
+async def summarize(interaction: discord.Interaction, len_msg: int = 2000):
     """Slash command to trigger the summarization."""
     channel = interaction.channel
     if not isinstance(channel, discord.TextChannel):
@@ -209,8 +209,8 @@ async def summarize(interaction: discord.Interaction, len_msg: int = 1000):
         async for message in channel.history(limit=int(len_msg*1.1), after=time_since, oldest_first=False):
             if not message.author.bot:  # Ignore bot messages
                 messages.append(message)
-            if len(messages) >= len_msg:  # Stop fetching after 1000 non-bot messages to limit prompt size
-                logger.info("Reached message limit (1000) for summarization.")
+            if len(messages) >= len_msg:  # Stop fetching after 2000 non-bot messages to limit prompt size
+                logger.info("Reached message limit (2000) for summarization.")
                 break
 
         logger.info(f"Fetched {len(messages)} non-bot messages for summarization.")
@@ -334,10 +334,10 @@ async def deep_summary(interaction: discord.Interaction, len_msg:int = 10000):
         await interaction.followup.send(f"發生錯誤：{e}", ephemeral=True)
 
 
-@bot.tree.command(name="你要不要聽聽看你現在在講什麼", description="取得24小時內最近500則訊息，根據你問的問題回覆(實驗性)")
-async def ask_about_conversation(interaction: discord.Interaction, 想問些什麼: str, len_msg: int = 500):
+@bot.tree.command(name="你要不要聽聽看你現在在講什麼", description="取得24小時內最近1000則訊息，根據你問的問題回覆(實驗性)")
+async def ask_about_conversation(interaction: discord.Interaction, 想問些什麼: str, len_msg: int = 1000):
     """
-    讓使用者根據最近 500 則對話內容提問，Gemini 幫忙回答。
+    讓使用者根據最近 1000 則對話內容提問，Gemini 幫忙回答。
     """
     question = 想問些什麼
     channel = interaction.channel
@@ -373,7 +373,7 @@ async def ask_about_conversation(interaction: discord.Interaction, 想問些什�
             for msg in reversed(messages)
         ])
 
-        prompt = f"""你是 Discord 頻道中的觀察者，以下是24小時內最近的 500 則對話紀錄，請根據這些內容回答使用者的問題。
+        prompt = f"""你是 Discord 頻道中的觀察者，以下是24小時內最近的 1000 則對話紀錄，請根據這些內容回答使用者的問題。
 
 聊天紀錄:
 {message_text}
