@@ -8,55 +8,82 @@ import google.generativeai as genai
 from discord.ext import commands
 from dotenv import load_dotenv  # Import dotenv
 
+# 載入 .env
 load_dotenv()
 
-# # --- SQLite 初始化 ---
-# # 建立或連線到 local 檔案 digest.db
-# conn = sqlite3.connect("digest.db")
-# cursor = conn.cursor()
-# # 建立 summaries 資料表
-# cursor.execute("""
-# CREATE TABLE IF NOT EXISTS summaries (
-#     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-#     channel_id  TEXT,
-#     user_id     TEXT,
-#     command     TEXT,
-#     question    TEXT,
-#     prompt      TEXT,
-#     summary     TEXT,
-#     call_time   TEXT
-# );
-# """)
-# conn.commit()
+# --- Load Environment Variables ---
+# Load variables from .env file in the current directory
+logger = logging.getLogger('discord_digest_bot')  # Define logger early for .env var logging
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s:%(levelname)s:%(name)s: %(message)s')
+formatter = logging.Formatter('%(asctime)s:%(levelname)s:%(name)s: %(message)s')
+file_handler = logging.FileHandler('bot.log', encoding='utf-8')
+file_handler.setLevel(logging.INFO)
+file_handler.setFormatter(formatter)
+logger.addHandler(file_handler)
 
-# --- PostgreSQL 初始化 ---
-DATABASE_URL = os.environ.get("DATABASE_URL")
-if not DATABASE_URL:
-    raise Exception("DATABASE_URL not set")
+# --- 讀取 DB 設定 ---
+DB_TYPE = os.getenv('DB_TYPE', 'sqlite').lower()
+if DB_TYPE not in ('sqlite', 'postgres'):
+    logger.error(f"不支援的 DB_TYPE: {DB_TYPE}，預設改用 sqlite")
+    DB_TYPE = 'sqlite'
 
-conn = psycopg2.connect(DATABASE_URL)
-cursor = conn.cursor()
+DB_ENABLED = True  # 全域開關：只有在成功連上並建表後才寫入
 
-# 建立資料表
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS summaries (
-    id SERIAL PRIMARY KEY,
-    channel_id TEXT,
-    user_id TEXT,
-    command TEXT,
-    question TEXT,
-    prompt TEXT,
-    summary TEXT,
-    call_time TIMESTAMP
-);
-""")
-conn.commit()
+if DB_TYPE == 'postgres':
+    # --- PostgreSQL 初始化 ---
+    DATABASE_URL = os.getenv('DATABASE_URL')
+    if not DATABASE_URL:
+        logger.error("使用 PostgreSQL 時，必須設定 DATABASE_URL，停用 DB 寫入")
+        DB_ENABLED = False
+    else:
+        try:
+            conn = psycopg2.connect(DATABASE_URL, connect_timeout=5)
+            cursor = conn.cursor()
+            cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS summaries (
+                        id SERIAL PRIMARY KEY,
+                        channel_id TEXT,
+                        user_id TEXT,
+                        command TEXT,
+                        question TEXT,
+                        prompt TEXT,
+                        summary TEXT,
+                        call_time TIMESTAMPTZ
+                    );
+                    """)
+            conn.commit()
+            placeholder = "%s"
+            logger.info("✅ PostgreSQL 連線及建表成功")
+        except Exception as e:
+            logger.error(f"❌ PostgreSQL 初始化失敗，已停用 DB 寫入: {e}", exc_info=True)
+            DB_ENABLED = False
+else:
+    # SQLite 初始化
+    SQLITE_PATH = os.getenv('SQLITE_PATH', 'summaries.db')
+    try:
+        conn = sqlite3.connect(SQLITE_PATH)
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS summaries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_id TEXT,
+                user_id TEXT,
+                command TEXT,
+                question TEXT,
+                prompt TEXT,
+                summary TEXT,
+                call_time TEXT
+            );
+            """)
+        conn.commit()
+        placeholder = "?"
+        logger.info(f"✅ SQLite 連線及建表成功 ({SQLITE_PATH})")
+    except Exception as e:
+        logger.error(f"❌ SQLite 初始化失敗，已停用 DB 寫入: {e}", exc_info=True)
+        DB_ENABLED = False
 
 GUILD_ID = 1255783788097835018  # 把這裡換成你的伺服器 ID
-
-# --- Load Environment Variables ---
-# Load variables from ..env file in the current directory
-logger = logging.getLogger('discord_digest_bot')  # Define logger early for .env var logging
 
 # --- Configuration ---
 # Get Bot Token from environment variable
@@ -96,15 +123,6 @@ intents = discord.Intents.default()
 intents.message_content = True  # Required to read message content
 intents.messages = True  # Required to fetch message history
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s:%(levelname)s:%(name)s: %(message)s')
-formatter = logging.Formatter('%(asctime)s:%(levelname)s:%(name)s: %(message)s')
-file_handler = logging.FileHandler('bot.log', encoding='utf-8')
-file_handler.setLevel(logging.INFO)
-file_handler.setFormatter(formatter)
-
-logger.addHandler(file_handler)
-
 # Initialize the bot
 bot = commands.Bot(command_prefix="!", intents=intents)  # Using slash commands is preferred for modern bots
 
@@ -133,6 +151,17 @@ async def summarize_messages(messages: list[discord.Message], prompt_scope: str 
     :param prompt_scope: A string describing the time range or context (e.g. "過去24小時", "過去七天").
     :return: Summary text.
     """
+    # 一進來就 ACK，保證不逾時
+    try:
+        await interaction.response.defer(ephemeral=False)
+    except discord.errors.NotFound:
+        logger.warning("summarize: defer 失敗，可能已回應或逾時")
+
+    # 剩下全都用 followup.send()…
+    if not isinstance(interaction.channel, discord.TextChannel):
+        return await interaction.followup.send(
+            "此指令僅能用於文字頻道", ephemeral=True
+        )
     logger.info(f"Summarizing {len(messages)} messages...")
     TZ_8 = timezone(timedelta(hours=8))
 
@@ -173,11 +202,19 @@ async def summarize_messages(messages: list[discord.Message], prompt_scope: str 
         call_time = datetime.now(tz).isoformat()
         channel_id = messages[0].channel.name
         user_id = messages[0].author.global_name
-        cursor.execute(
-            "INSERT INTO summaries(channel_id, call_time, prompt, summary, command, user_id) VALUES (%s, %s, %s, %s, %s, %s)",
-            (str(channel_id), call_time, message_text, summary_text, f"{prompt_scope}總結", user_id)
-        )
-        conn.commit()
+        # 組 record
+        record = {
+            "channel_id": str(channel_id),
+            "user_id": user_id,
+            "command": f"{prompt_scope}總結",
+            "prompt": message_text,
+            "summary": summary_text,
+            "call_time": call_time
+        }
+
+        # 呼叫通用寫入
+        insert_summary(record)
+
         logger.info("Summary saved successfully.")
         return summary_text.strip()
 
@@ -190,13 +227,17 @@ async def summarize_messages(messages: list[discord.Message], prompt_scope: str 
 @bot.tree.command(name="聊那麼多誰看的完", description="總結頻道中的24小時內2000則訊息")
 async def summarize(interaction: discord.Interaction, len_msg: int = 2000):
     """Slash command to trigger the summarization."""
-    channel = interaction.channel
-    if not isinstance(channel, discord.TextChannel):
-        await interaction.response.send_message("This command can only be used in text channels.", ephemeral=True)
-        return
+    # 1️. 先 defer
+    try:
+        await interaction.response.defer(ephemeral=False)
+    except discord.errors.NotFound:
+        logger.warning("ask_about_conversation: defer 失敗")
 
-    # Defer response as summarization can take time
-    await interaction.response.defer(ephemeral=False)  # Acknowledge interaction, visible to others
+    # 2. 型別檢查都用 followup 回
+    if not isinstance(interaction.channel, discord.TextChannel):
+        return await interaction.followup.send("此指令僅能用於文字頻道", ephemeral=True)
+
+    channel = interaction.channel
 
     try:
         # Calculate the time 24 hours ago
@@ -242,13 +283,17 @@ async def summarize(interaction: discord.Interaction, len_msg: int = 2000):
 @bot.tree.command(name="整理廢話的魔法", description="總結頻道中的1小時內所有訊息")
 async def magic_summarize(interaction: discord.Interaction, len_msg: int = 5000):
     """Slash command to trigger the summarization."""
-    channel = interaction.channel
-    if not isinstance(channel, discord.TextChannel):
-        await interaction.response.send_message("This command can only be used in text channels.", ephemeral=True)
-        return
+    # 1️. 先 defer
+    try:
+        await interaction.response.defer(ephemeral=False)
+    except discord.errors.NotFound:
+        logger.warning("ask_about_conversation: defer 失敗")
 
-    # Defer response as summarization can take time
-    await interaction.response.defer(ephemeral=False)  # Acknowledge interaction, visible to others
+    # 2. 型別檢查都用 followup 回
+    if not isinstance(interaction.channel, discord.TextChannel):
+        return await interaction.followup.send("此指令僅能用於文字頻道", ephemeral=True)
+
+    channel = interaction.channel
 
     try:
         # 1 小時前的 UTC 時間
@@ -291,12 +336,17 @@ async def magic_summarize(interaction: discord.Interaction, len_msg: int = 5000)
 @bot.tree.command(name="命運探知之魔眼", description="總結頻道中七天內一萬則訊息的精華(實驗性)")
 async def deep_summary(interaction: discord.Interaction, len_msg:int = 10000):
     """Slash command to summarize the last 7 days of messages (up to 10,000)."""
-    channel = interaction.channel
-    if not isinstance(channel, discord.TextChannel):
-        await interaction.response.send_message("此指令僅能用於文字頻道", ephemeral=True)
-        return
+    # 1️. 先 defer
+    try:
+        await interaction.response.defer(ephemeral=False)
+    except discord.errors.NotFound:
+        logger.warning("ask_about_conversation: defer 失敗")
 
-    await interaction.response.defer(ephemeral=False)
+    # 2. 型別檢查都用 followup 回
+    if not isinstance(interaction.channel, discord.TextChannel):
+        return await interaction.followup.send("此指令僅能用於文字頻道", ephemeral=True)
+
+    channel = interaction.channel
 
     try:
         # 計算過去 7 天時間點
@@ -339,14 +389,19 @@ async def ask_about_conversation(interaction: discord.Interaction, 想問些什�
     """
     讓使用者根據最近 1000 則對話內容提問，Gemini 幫忙回答。
     """
+    # 1️. 先 defer
+    try:
+        await interaction.response.defer(ephemeral=False)
+    except discord.errors.NotFound:
+        logger.warning("ask_about_conversation: defer 失敗, 可能已逾時或已回應過")
+
+    # 2. 型別檢查都用 followup 回
+    if not isinstance(interaction.channel, discord.TextChannel):
+        return await interaction.followup.send("此指令僅能用於文字頻道", ephemeral=True)
+
     question = 想問些什麼
     channel = interaction.channel
-    if not isinstance(channel, discord.TextChannel):
-        await interaction.response.send_message("此指令僅能用於文字頻道", ephemeral=True)
-        return
     TZ_8 = timezone(timedelta(hours=8))
-
-    await interaction.response.defer(ephemeral=False)
 
     try:
         # Calculate the time 24 hours ago
@@ -408,22 +463,20 @@ async def ask_about_conversation(interaction: discord.Interaction, 想問些什�
         tz = timezone(timedelta(hours=8))
         call_time = datetime.now(tz).isoformat()
         # 寫入DB
-        cursor.execute(
-            """
-            INSERT INTO summaries (channel_id, user_id, command, question, prompt, summary, call_time)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-            """,
-            (
-                str(channel.name),  # channel_id
-                str(interaction.user.global_name),  # user_id
-                "你要不要聽聽看你現在在講什麼",  # command
-                question,  # question
-                message_text,  # prompt
-                answer,  # summary
-                call_time  # call_time (GMT+8)
-            )
-        )
-        conn.commit()
+        # 組 record
+        record = {
+            "channel_id": str(channel.name),
+            "user_id": str(interaction.user.global_name),
+            "command": "你要不要聽聽看你現在在講什麼",
+            "question": question,
+            "prompt": message_text,
+            "summary": answer,
+            "call_time": call_time
+        }
+
+        # 呼叫通用寫入
+        insert_summary(record)
+
         await interaction.followup.send(reply_content)
 
     except Exception as e:
@@ -442,6 +495,28 @@ def replit_run_bot():
         logger.info("Starting bot...")
         bot.run(BOT_TOKEN)
 
+def insert_summary(record: dict):
+    """
+    通用的 INSERT，根據 DB_TYPE 自動切佔位符、並 commit。
+    record 的 key 對應資料表欄位，value 就是要寫的值。
+    """
+    if not DB_ENABLED:
+        logger.warning("insert_summary: DB_DISABLED，跳過寫入")
+        return
+
+    cols = list(record.keys())
+    vals = list(record.values())
+
+    # 假設 record 有 7 欄
+    phs = ",".join([placeholder] * len(cols))
+    sql = f"INSERT INTO summaries ({','.join(cols)}) VALUES ({phs});"
+
+    try:
+        cursor.execute(sql, vals)
+        conn.commit()
+        logger.info("✅ summaries 寫入成功")
+    except Exception as e:
+        logger.error(f"❌ summaries 寫入失敗: {e}", exc_info=True)
 
 # --- Run the Bot ---
 if __name__ == "__main__":
