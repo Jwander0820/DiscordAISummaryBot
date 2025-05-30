@@ -151,17 +151,6 @@ async def summarize_messages(messages: list[discord.Message], prompt_scope: str 
     :param prompt_scope: A string describing the time range or context (e.g. "過去24小時", "過去七天").
     :return: Summary text.
     """
-    # 一進來就 ACK，保證不逾時
-    try:
-        await interaction.response.defer(ephemeral=False)
-    except discord.errors.NotFound:
-        logger.warning("summarize: defer 失敗，可能已回應或逾時")
-
-    # 剩下全都用 followup.send()…
-    if not isinstance(interaction.channel, discord.TextChannel):
-        return await interaction.followup.send(
-            "此指令僅能用於文字頻道", ephemeral=True
-        )
     logger.info(f"Summarizing {len(messages)} messages...")
     TZ_8 = timezone(timedelta(hours=8))
 
@@ -207,6 +196,7 @@ async def summarize_messages(messages: list[discord.Message], prompt_scope: str 
             "channel_id": str(channel_id),
             "user_id": user_id,
             "command": f"{prompt_scope}總結",
+            "question": "",
             "prompt": message_text,
             "summary": summary_text,
             "call_time": call_time
@@ -227,17 +217,13 @@ async def summarize_messages(messages: list[discord.Message], prompt_scope: str 
 @bot.tree.command(name="聊那麼多誰看的完", description="總結頻道中的24小時內2000則訊息")
 async def summarize(interaction: discord.Interaction, len_msg: int = 2000):
     """Slash command to trigger the summarization."""
-    # 1️. 先 defer
-    try:
-        await interaction.response.defer(ephemeral=False)
-    except discord.errors.NotFound:
-        logger.warning("ask_about_conversation: defer 失敗")
-
-    # 2. 型別檢查都用 followup 回
-    if not isinstance(interaction.channel, discord.TextChannel):
-        return await interaction.followup.send("此指令僅能用於文字頻道", ephemeral=True)
-
     channel = interaction.channel
+    if not isinstance(channel, discord.TextChannel):
+        await interaction.response.send_message("This command can only be used in text channels.", ephemeral=True)
+        return
+
+    # Defer response as summarization can take time
+    await interaction.response.defer(ephemeral=False)  # Acknowledge interaction, visible to others
 
     try:
         # Calculate the time 24 hours ago
@@ -283,17 +269,13 @@ async def summarize(interaction: discord.Interaction, len_msg: int = 2000):
 @bot.tree.command(name="整理廢話的魔法", description="總結頻道中的1小時內所有訊息")
 async def magic_summarize(interaction: discord.Interaction, len_msg: int = 5000):
     """Slash command to trigger the summarization."""
-    # 1️. 先 defer
-    try:
-        await interaction.response.defer(ephemeral=False)
-    except discord.errors.NotFound:
-        logger.warning("ask_about_conversation: defer 失敗")
-
-    # 2. 型別檢查都用 followup 回
-    if not isinstance(interaction.channel, discord.TextChannel):
-        return await interaction.followup.send("此指令僅能用於文字頻道", ephemeral=True)
-
     channel = interaction.channel
+    if not isinstance(channel, discord.TextChannel):
+        await interaction.response.send_message("This command can only be used in text channels.", ephemeral=True)
+        return
+
+    # Defer response as summarization can take time
+    await interaction.response.defer(ephemeral=False)  # Acknowledge interaction, visible to others
 
     try:
         # 1 小時前的 UTC 時間
@@ -336,17 +318,12 @@ async def magic_summarize(interaction: discord.Interaction, len_msg: int = 5000)
 @bot.tree.command(name="命運探知之魔眼", description="總結頻道中七天內一萬則訊息的精華(實驗性)")
 async def deep_summary(interaction: discord.Interaction, len_msg:int = 10000):
     """Slash command to summarize the last 7 days of messages (up to 10,000)."""
-    # 1️. 先 defer
-    try:
-        await interaction.response.defer(ephemeral=False)
-    except discord.errors.NotFound:
-        logger.warning("ask_about_conversation: defer 失敗")
-
-    # 2. 型別檢查都用 followup 回
-    if not isinstance(interaction.channel, discord.TextChannel):
-        return await interaction.followup.send("此指令僅能用於文字頻道", ephemeral=True)
-
     channel = interaction.channel
+    if not isinstance(channel, discord.TextChannel):
+        await interaction.response.send_message("此指令僅能用於文字頻道", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=False)
 
     try:
         # 計算過去 7 天時間點
@@ -389,19 +366,14 @@ async def ask_about_conversation(interaction: discord.Interaction, 想問些什�
     """
     讓使用者根據最近 1000 則對話內容提問，Gemini 幫忙回答。
     """
-    # 1️. 先 defer
-    try:
-        await interaction.response.defer(ephemeral=False)
-    except discord.errors.NotFound:
-        logger.warning("ask_about_conversation: defer 失敗, 可能已逾時或已回應過")
-
-    # 2. 型別檢查都用 followup 回
-    if not isinstance(interaction.channel, discord.TextChannel):
-        return await interaction.followup.send("此指令僅能用於文字頻道", ephemeral=True)
-
     question = 想問些什麼
     channel = interaction.channel
+    if not isinstance(channel, discord.TextChannel):
+        await interaction.response.send_message("此指令僅能用於文字頻道", ephemeral=True)
+        return
     TZ_8 = timezone(timedelta(hours=8))
+
+    await interaction.response.defer(ephemeral=False)
 
     try:
         # Calculate the time 24 hours ago
