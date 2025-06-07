@@ -6,11 +6,12 @@ import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 
+# Load environment variables before importing modules that depend on them
+load_dotenv()
+
 from . import database
 from .gemini_client import gemini_model
 from .commands import register as register_commands
-
-load_dotenv()
 
 logger = logging.getLogger('discord_digest_bot')
 logging.basicConfig(level=logging.INFO,
