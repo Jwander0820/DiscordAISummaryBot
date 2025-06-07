@@ -165,6 +165,15 @@ def register(bot: commands.Bot):
 """
             logger.info(f"Sending user question prompt to Gemini (length: {len(prompt)} chars)")
             from .gemini_client import gemini_model
+            if not gemini_model:
+                logger.warning("Gemini model not initialized or API key missing."
+                               )
+                await interaction.followup.send(
+                    "Summarization feature is unavailable (missing API key).",
+                    ephemeral=True,
+                )
+                return
+
             response = await gemini_model.generate_content_async(prompt)
             if not response.parts:
                 await interaction.followup.send("AI 無法提供回應（可能被內容審核攔截）。")
