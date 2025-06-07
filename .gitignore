@@ -1,0 +1,65 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+.env/
+.venv/
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Environment variables
+.env
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+
+# Logs
+*.log
+bot.log
+
+# macOS
+.DS_Store
+
+# SQLite database (如有)
+*.sqlite
+*.sqlite3
+digest.db
+
+# Python egg info
+*.egg-info/
+dist/
+build/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+coverage.xml
+.cache/
+pytest_cache/
+
+# MyPy
+.mypy_cache/
+
+# Pytest
+.pytest_cache/
+
+# Render deploy artifacts (if any)
+render.yaml
+
+# Other
+*.png
+*.jpg
+*.db
+*.json
