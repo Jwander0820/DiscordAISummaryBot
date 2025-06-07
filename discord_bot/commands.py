@@ -2,9 +2,11 @@ from datetime import datetime, timezone, timedelta
 import logging
 import discord
 from discord.ext import commands
+import random
 
 from .summarizer import summarize_messages
 from .database import insert_summary
+from .local_llm_client import query_local_llm
 
 logger = logging.getLogger('discord_digest_bot')
 
@@ -21,7 +23,7 @@ def register(bot: commands.Bot):
         try:
             time_since = datetime.now(timezone.utc) - timedelta(days=1)
             messages = []
-            async for message in channel.history(limit=int(len_msg*1.1), after=time_since, oldest_first=False):
+            async for message in channel.history(limit=int(len_msg * 1.1), after=time_since, oldest_first=False):
                 if not message.author.bot:
                     messages.append(message)
                 if len(messages) >= len_msg:
@@ -97,7 +99,7 @@ def register(bot: commands.Bot):
             logger.info(
                 f"Fetching messages (7d, max 10000) from channel '{channel.name}' (ID: {channel.id}) since {time_since}")
             messages = []
-            async for message in channel.history(limit=int(len_msg*1.1), after=time_since, oldest_first=False):
+            async for message in channel.history(limit=int(len_msg * 1.1), after=time_since, oldest_first=False):
                 if not message.author.bot:
                     messages.append(message)
                 if len(messages) >= len_msg:
@@ -123,7 +125,8 @@ def register(bot: commands.Bot):
             logger.error(f"Unexpected error in /命運探知之魔眼: {e}", exc_info=True)
             await interaction.followup.send(f"發生錯誤：{e}", ephemeral=True)
 
-    @bot.tree.command(name="你要不要聽聽看你現在在講什麼", description="取得24小時內最近1000則訊息，根據你問的問題回覆(實驗性)")
+    @bot.tree.command(name="你要不要聽聽看你現在在講什麼",
+                      description="取得24小時內最近1000則訊息，根據你問的問題回覆(實驗性)")
     async def ask_about_conversation(interaction: discord.Interaction, 想問些什麼: str, len_msg: int = 1000):
         question = 想問些什麼
         channel = interaction.channel
@@ -136,7 +139,7 @@ def register(bot: commands.Bot):
         try:
             time_since = datetime.now(timezone.utc) - timedelta(days=1)
             messages = []
-            async for message in channel.history(limit=int(len_msg*1.1), after=time_since, oldest_first=False):
+            async for message in channel.history(limit=int(len_msg * 1.1), after=time_since, oldest_first=False):
                 if not message.author.bot:
                     messages.append(message)
                 if len(messages) >= len_msg:
@@ -205,3 +208,95 @@ def register(bot: commands.Bot):
             logger.error(f"Error in ask_about_conversation: {e}", exc_info=True)
             await interaction.followup.send(f"發生錯誤：{e}", ephemeral=True)
 
+    @bot.tree.command(name="測試d-mail", description="測試機器人連線狀態，應該不會改變世界線，應該啦...")
+    async def send_test_dmail(interaction: discord.Interaction):
+        """Send a simple confirmation message to verify the bot is alive."""
+        # 世界線變動率探測儀隨機檢定
+        worldline = round(random.uniform(0.000001, 1.000000), 6)
+        threshold = 1 - 0.01048596  # 世界線變動門檻
+        crossed = worldline > threshold
+        cross_worldline_text = f"世界線變動率探測儀檢定值: {worldline}"
+        # 訊息內容
+        if crossed:
+            reply_content = (
+                f"⚠️ 世界線變動偵測！抵達新的世界線座標：1.048596！\n"
+                f"一切都是命運石之門的選擇。\n"
+            )
+        else:
+            reply_content = (f"D-Mail 送達，世界線沒有改變，目前座標為：{worldline}")
+
+        await interaction.response.send_message(reply_content, ephemeral=False)
+
+        logger.info(
+            f"Test D-Mail sent by {interaction.user.global_name} in channel '{interaction.channel.name}' → 世界線座標:{cross_worldline_text}"
+        )
+
+        tz = timezone(timedelta(hours=8))
+        call_time = datetime.now(tz).isoformat()
+        record = {
+            "channel_id": str(interaction.channel.name),
+            "user_id": str(interaction.user.global_name),
+            "command": "測試d-mail",
+            "question": "",
+            "prompt": cross_worldline_text,
+            "summary": reply_content,
+            "call_time": call_time,
+        }
+        insert_summary(record)
+
+    @bot.tree.command(name="解答之書", description="取樣最近20則訊息，向本地 LLM 詢問")
+    async def answer_book(interaction: discord.Interaction, 問題: str):
+        channel = interaction.channel
+        if not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message("此指令僅能用於文字頻道", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=False)
+        TZ_8 = timezone(timedelta(hours=8))
+        try:
+            messages = []
+            async for msg in channel.history(limit=50, oldest_first=False):
+                messages.append(msg)
+                if len(messages) >= 20:
+                    break
+
+            if not messages:
+                await interaction.followup.send("找不到最近的訊息。")
+                return
+
+            history = "\n".join([
+                f"[{m.created_at.astimezone(TZ_8).strftime('%H:%M')}] {m.author.display_name}: {m.content}"
+                for m in reversed(messages)
+            ])
+
+            prompt = f"""以下是此頻道最近的 20 則對話：\n{history}\n\n使用者問題：{問題}\n可以根據對話內容與使用者聊天，並以繁體中文回答。"""
+            logger.info(f"Sending prompt to local LLM (length: {len(prompt)} chars)")
+
+            answer = await query_local_llm(prompt)
+
+            if len(answer) > 1900:
+                answer = answer[:1900] + "...（已截斷）"
+
+            reply = f"{interaction.user.mention} 問了：{問題}\n\n{answer}"
+
+            tz = timezone(timedelta(hours=8))
+            call_time = datetime.now(tz).isoformat()
+            record = {
+                "channel_id": str(channel.name),
+                "user_id": str(interaction.user.global_name),
+                "command": "解答之書",
+                "question": 問題,
+                "prompt": prompt,
+                "summary": answer,
+                "call_time": call_time,
+            }
+            insert_summary(record)
+
+            if answer.startswith("Error contacting local LLM"):  # 終止問答
+                await interaction.followup.send("AI 罷工了捏 _(:з」∠)\_", ephemeral=True)
+                return
+
+            await interaction.followup.send(reply)
+        except Exception as e:
+            logger.error(f"Error in answer_book: {e}", exc_info=True)
+            await interaction.followup.send(f"發生錯誤：{e}", ephemeral=True)

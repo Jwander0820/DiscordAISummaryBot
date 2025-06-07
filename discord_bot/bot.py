@@ -25,7 +25,7 @@ logger.addHandler(file_handler)
 # Initialize database
 database.init_db()
 
-GUILD_ID = 1255783788097835018  # 把這裡換成你的伺服器 ID
+GUILD_ID = os.environ.get('DISCORD_GUILD_ID')  # 把這裡換成你的伺服器 ID
 
 BOT_TOKEN = os.environ.get('DISCORD_BOT_TOKEN')
 if not BOT_TOKEN:
