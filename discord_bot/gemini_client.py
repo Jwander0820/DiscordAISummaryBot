@@ -12,7 +12,7 @@ if not GEMINI_API_KEY:
 else:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
-        gemini_model = genai.GenerativeModel("gemini-2.0-flash")
+        gemini_model = genai.GenerativeModel("gemini-2.5-flash-preview-05-20")
         logger.info(f"Initialized Gemini Model: {gemini_model.model_name}")
     except Exception as e:
         logger.error(f"Error initializing Gemini model: {e}. Summarization might fail.")
