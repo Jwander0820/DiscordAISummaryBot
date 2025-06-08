@@ -43,7 +43,12 @@ async def on_ready():
     logger.info(f'{bot.user.name} has connected to Discord!')
     logger.info("Attempting to sync slash commands...")
     try:
+        # 全域註冊
         synced = await bot.tree.sync()
+        # 只同步到特定伺服器（GUILD），立即生效，更新指令使用
+        # guild = discord.Object(id=GUILD_ID)
+        # synced = await bot.tree.sync(guild=guild)
+
         logger.info(f"Synced {len(synced)} slash commands.")
     except Exception as e:
         logger.error(f"Failed to sync slash commands: {e}")

@@ -3,6 +3,7 @@ import logging
 import discord
 from discord.ext import commands
 import random
+import os
 
 from .summarizer import summarize_messages
 from .database import insert_summary
@@ -210,12 +211,24 @@ def register(bot: commands.Bot):
 
     @bot.tree.command(name="測試d-mail", description="測試機器人連線狀態，應該不會改變世界線，應該啦...")
     async def send_test_dmail(interaction: discord.Interaction):
-        """Send a simple confirmation message to verify the bot is alive."""
+        """
+        機器人測試，世界線檢定指令，支援 .env 特權設定。
+        """
+        # 從 .env 載入設定
+        default_prob = float(os.getenv("WORLDLINE_PROB_DEFAULT", "0.01048596"))
+        admin_prob = float(os.getenv("WORLDLINE_PROB_ADMIN", "0.3"))
+        admin_ids_raw = os.getenv("WORLDLINE_ADMIN_IDS", "")
+        admin_ids = set(int(uid.strip()) for uid in admin_ids_raw.split(",") if uid.strip().isdigit())
+
+        # 檢查是否為特權使用者
+        is_admin = interaction.user.id in admin_ids
+        threshold = 1 - (admin_prob if is_admin else default_prob)
+
         # 世界線變動率探測儀隨機檢定
         worldline = round(random.uniform(0.000001, 1.000000), 6)
-        threshold = 1 - 0.01048596  # 世界線變動門檻
         crossed = worldline > threshold
         cross_worldline_text = f"世界線變動率探測儀檢定值: {worldline}"
+
         # 訊息內容
         if crossed:
             reply_content = (
@@ -228,7 +241,7 @@ def register(bot: commands.Bot):
         await interaction.response.send_message(reply_content, ephemeral=False)
 
         logger.info(
-            f"Test D-Mail sent by {interaction.user.global_name} in channel '{interaction.channel.name}' → 世界線座標:{cross_worldline_text}"
+            f"Test D-Mail sent by {interaction.user.global_name} in channel '{interaction.channel.name}' → 世界線座標:{worldline}, admin: {is_admin}"
         )
 
         tz = timezone(timedelta(hours=8))
@@ -272,7 +285,7 @@ def register(bot: commands.Bot):
             prompt = f"""以下是此頻道最近的 20 則對話：\n{history}\n\n使用者問題：{問題}\n可以根據對話內容與使用者聊天，並以繁體中文回答。"""
             logger.info(f"Sending prompt to local LLM (length: {len(prompt)} chars)")
 
-            answer = await query_local_llm(prompt)
+            answer = await query_local_llm(prompt, role="basic")
 
             if len(answer) > 1900:
                 answer = answer[:1900] + "...（已截斷）"
@@ -300,3 +313,78 @@ def register(bot: commands.Bot):
         except Exception as e:
             logger.error(f"Error in answer_book: {e}", exc_info=True)
             await interaction.followup.send(f"發生錯誤：{e}", ephemeral=True)
+
+    @bot.tree.command(name="el_psy_kongroo", description="一切都是命運石之門的選擇！")
+    async def el_psy_kongroo(interaction: discord.Interaction, 問題: str):
+        channel = interaction.channel
+        if not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message("此指令僅能用於文字頻道", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=False)  # 改以webhook處理回答，不需要此行效果
+        TZ_8 = timezone(timedelta(hours=8))
+        try:
+            messages = []
+            async for msg in channel.history(limit=50, oldest_first=False):
+                messages.append(msg)
+                if len(messages) >= 20:
+                    break
+
+            if not messages:
+                await interaction.followup.send("找不到最近的訊息。")
+                return
+
+            history = "\n".join([
+                f"[{m.created_at.astimezone(TZ_8).strftime('%H:%M')}] {m.author.display_name}: {m.content}"
+                for m in reversed(messages)
+            ])
+
+            prompt = f"""以下是此頻道最近的 20 則對話：\n{history}\n\n使用者問題：{問題}\n可以根據對話內容與使用者聊天，並以繁體中文回答，可適度帶入命運石之門風格語感。"""
+            logger.info(f"Sending prompt to local LLM (length: {len(prompt)} chars)")
+
+            answer = await query_local_llm(prompt, role="kurisu")
+
+            if len(answer) > 1900:
+                answer = answer[:1900] + "...（已截斷）"
+
+            reply = f"{interaction.user.mention} 問了：{問題}\n\n{answer}"
+
+            tz = timezone(timedelta(hours=8))
+            call_time = datetime.now(tz).isoformat()
+            record = {
+                "channel_id": str(channel.name),
+                "user_id": str(interaction.user.global_name),
+                "command": "el_psy_kongroo",
+                "question": 問題,
+                "prompt": prompt,
+                "summary": answer,
+                "call_time": call_time,
+            }
+            insert_summary(record)
+
+            if answer.startswith("Error contacting local LLM"):  # 終止問答
+                await interaction.followup.send("Amadeus 罷工了捏 _(:з」∠)\_", ephemeral=True)
+                return
+
+            # await interaction.followup.send(reply)
+            await send_as_amadeus(channel, reply)  # webhook偽裝角色
+            # 安靜刪除 loading 訊息，SERN 消失
+            await interaction.delete_original_response()
+
+        except Exception as e:
+            logger.error(f"Error in answer_book: {e}", exc_info=True)
+            await interaction.followup.send(f"發生錯誤：{e}", ephemeral=True)
+
+    async def send_as_amadeus(channel: discord.TextChannel, content: str):
+        avatar_url = "https://media.discordapp.net/attachments/1381222087305334817/1381222173267595415/Amadeus.png?ex=6846bae3&is=68456963&hm=b87d6c225f4989fa27304c596a1280895b89a11f2fbfa09d5f7c4ae78f91ff45&=&format=webp&quality=lossless&width=1362&height=1362"
+        webhooks = await channel.webhooks()
+        webhook = discord.utils.get(webhooks, name="Amadeus")
+
+        if webhook is None:
+            webhook = await channel.create_webhook(name="Amadeus")
+
+        await webhook.send(
+            content,
+            username="Amadeus",
+            avatar_url=avatar_url
+        )

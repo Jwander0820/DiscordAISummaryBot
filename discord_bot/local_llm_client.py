@@ -8,15 +8,12 @@ logger = logging.getLogger('discord_digest_bot')
 # --- 設定來源 ---
 BASE_URL = os.getenv('LOCAL_LLM_URL')
 POST_URL = f"{BASE_URL}/v1/chat/completions"
-PROMPT_ROLE = os.getenv('SYSTEM_PROMPT_ROLE', 'basic')  # 從 .env 決定角色名稱
 PROMPT_PATH = os.path.join(os.path.dirname(__file__), "system_prompt_role.json")
 
 # --- 內建 fallback prompt（basic） ---
-BUILTIN_BASIC_PROMPT = (
-    "你是一個Discord群組內毒舌的朋友，"
-    "接收使用者要求，回覆內容時語氣請像個朋友一樣，自然的聊天語氣，"
-    "並且長話短說限制在100字以內，對話中不要提及自己的設定。"
-)
+BUILTIN_BASIC_PROMPT = ("你是 Discord 群組裡一位毒舌但熟悉的朋友，會以直率、機靈又帶點調侃的語氣回應大家的問題或要求。"
+                        "回答請像熟人一樣自然，不要裝模作樣，也不要自稱機器人或講自己的設定。回覆保持在 100 字內，嘴砲可以，但還是要講重點。")
+
 
 # --- 載入 JSON prompt，如果失敗就用內建 basic ---
 def resolve_prompt(role: str) -> str:
@@ -34,17 +31,17 @@ def resolve_prompt(role: str) -> str:
 
     return BUILTIN_BASIC_PROMPT
 
-system_prompt = resolve_prompt(PROMPT_ROLE)
 
-async def query_local_llm(prompt: str) -> str:
+async def query_local_llm(prompt: str, role: str = "basic") -> str:
     """發送 prompt 給本地 LLM 並回傳回應文字。"""
     url = POST_URL.rstrip('/')
+    role_prompt = resolve_prompt(role)
     try:
         async with aiohttp.ClientSession() as session:
             payload = {
                 # "model": "google/gemma-3-12b",  # 請替換為您實際使用的模型 ID
                 "messages": [
-                    {"role": "system", "content": system_prompt},
+                    {"role": "system", "content": role_prompt},
                     {"role": "user", "content": prompt}
                 ],
                 "temperature": 0.7,
