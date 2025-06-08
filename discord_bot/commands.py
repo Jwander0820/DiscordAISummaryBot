@@ -6,8 +6,11 @@ import random
 import os
 
 from .summarizer import summarize_messages
+from .summarizer import call_cloud_llm
 from .database import insert_summary
 from .local_llm_client import query_local_llm
+from .gemini_client import gemini_model
+from .gemini_client import role_model
 
 logger = logging.getLogger('discord_digest_bot')
 
@@ -156,19 +159,25 @@ def register(bot: commands.Bot):
                 for msg in reversed(messages)
             ])
 
-            prompt = f"""你是 Discord 頻道中的觀察者，以下是24小時內最近的 1000 則對話紀錄，請根據這些內容回答使用者的問題。
+            contents = [
+                {
+                    "role": "model",
+                    "parts": ["你是 Discord 頻道的觀察者，會用詼諧風格根據歷史訊息回答問題。請用繁體中文簡潔地作答。"]
+                },
+                {
+                    "role": "user",
+                    "parts": [
+                        f"""以下是過去 24 小時最近的 {len(messages)} 則對話：
 
-聊天紀錄:
-{message_text}
-
-使用者的提問：
-{question}
-
-請用繁體中文回答，風格可以幽默，但務必根據對話內容作答。
-回答：
-"""
-            logger.info(f"Sending user question prompt to Gemini (length: {len(prompt)} chars)")
-            from .gemini_client import gemini_model
+                        {message_text}
+            
+                        使用者的提問：
+                        {question}
+            
+                        請回答："""]
+                }
+            ]
+            logger.info(f"Sending user question prompt to Gemini (length: {len(contents[1]['parts'][0])} chars)")
             if not gemini_model:
                 logger.warning("Gemini model not initialized or API key missing."
                                )
@@ -178,7 +187,7 @@ def register(bot: commands.Bot):
                 )
                 return
 
-            response = await gemini_model.generate_content_async(prompt)
+            response = await gemini_model.generate_content_async(contents=contents)
             if not response.parts:
                 await interaction.followup.send("AI 無法提供回應（可能被內容審核攔截）。")
                 return
@@ -216,7 +225,7 @@ def register(bot: commands.Bot):
         """
         # 從 .env 載入設定
         default_prob = float(os.getenv("WORLDLINE_PROB_DEFAULT", "0.01048596"))
-        admin_prob = float(os.getenv("WORLDLINE_PROB_ADMIN", "0.3"))
+        admin_prob = float(os.getenv("WORLDLINE_PROB_ADMIN", "0.1"))
         admin_ids_raw = os.getenv("WORLDLINE_ADMIN_IDS", "")
         admin_ids = set(int(uid.strip()) for uid in admin_ids_raw.split(",") if uid.strip().isdigit())
 
@@ -259,6 +268,7 @@ def register(bot: commands.Bot):
 
     @bot.tree.command(name="解答之書", description="取樣最近20則訊息，向本地 LLM 詢問")
     async def answer_book(interaction: discord.Interaction, 問題: str):
+        role_mode = os.getenv("ROLE_MODE", "local")
         channel = interaction.channel
         if not isinstance(channel, discord.TextChannel):
             await interaction.response.send_message("此指令僅能用於文字頻道", ephemeral=True)
@@ -283,9 +293,12 @@ def register(bot: commands.Bot):
             ])
 
             prompt = f"""以下是此頻道最近的 20 則對話：\n{history}\n\n使用者問題：{問題}\n可以根據對話內容與使用者聊天，並以繁體中文回答。"""
-            logger.info(f"Sending prompt to local LLM (length: {len(prompt)} chars)")
+            logger.info(f"Sending prompt to {role_mode} LLM (length: {len(prompt)} chars)")
 
-            answer = await query_local_llm(prompt, role="basic")
+            if role_mode == "local":
+                answer = await query_local_llm(prompt, role="basic")
+            else:
+                answer = await call_cloud_llm(prompt, role="basic")
 
             if len(answer) > 1900:
                 answer = answer[:1900] + "...（已截斷）"
@@ -316,6 +329,7 @@ def register(bot: commands.Bot):
 
     @bot.tree.command(name="el_psy_kongroo", description="一切都是命運石之門的選擇！")
     async def el_psy_kongroo(interaction: discord.Interaction, 問題: str):
+        role_mode = os.getenv("ROLE_MODE", "local")
         channel = interaction.channel
         if not isinstance(channel, discord.TextChannel):
             await interaction.response.send_message("此指令僅能用於文字頻道", ephemeral=True)
@@ -340,9 +354,12 @@ def register(bot: commands.Bot):
             ])
 
             prompt = f"""以下是此頻道最近的 20 則對話：\n{history}\n\n使用者問題：{問題}\n可以根據對話內容與使用者聊天，並以繁體中文回答，可適度帶入命運石之門風格語感。"""
-            logger.info(f"Sending prompt to local LLM (length: {len(prompt)} chars)")
+            logger.info(f"Sending prompt to {role_mode} LLM (length: {len(prompt)} chars)")
 
-            answer = await query_local_llm(prompt, role="kurisu")
+            if role_mode == "local":
+                answer = await query_local_llm(prompt, role="kurisu")
+            else:
+                answer = await call_cloud_llm(prompt, role="kurisu")
 
             if len(answer) > 1900:
                 answer = answer[:1900] + "...（已截斷）"
