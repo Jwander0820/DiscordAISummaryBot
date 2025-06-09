@@ -5,3 +5,8 @@ flask
 gunicorn
 psycopg2-binary
 aiohttp
+google_auth_oauthlib
+google-api-python-client
+google-auth-httplib2
+# 以下為 file_cache 相容性所需
+oauth2client<4.0.0

@@ -2,12 +2,17 @@ from datetime import datetime, timezone, timedelta
 from google.generativeai.types import GenerationConfig
 import discord
 import logging
+import os
 from .gemini_client import gemini_model
 from .gemini_client import role_model
 from .database import insert_summary
 from .local_llm_client import resolve_prompt
+from .gmail_utils import send_sarn_notify, send_error_notify
+from dotenv import load_dotenv
 
+load_dotenv()
 logger = logging.getLogger('discord_digest_bot')
+GMAIL_SEND_TO = os.getenv("GMAIL_SEND_TO")
 
 
 async def summarize_messages(messages: list[discord.Message], prompt_scope: str = "過去24小時") -> str:
@@ -77,10 +82,26 @@ async def summarize_messages(messages: list[discord.Message], prompt_scope: str 
         insert_summary(record)
 
         logger.info("Summary saved successfully.")
+
+        # 發信通知
+        if GMAIL_SEND_TO:
+            try:
+                msg_id = send_sarn_notify(record, GMAIL_SEND_TO)
+                logger.info(f"SERN Notify sent, messageId={msg_id}")
+            except Exception as e:
+                logger.error(f"發信失敗：{e}")
+
         return summary_text.strip()
 
     except Exception as e:
         logger.error(f"Error generating summary: {e}", exc_info=True)
+        # 發錯誤通知信
+        if GMAIL_SEND_TO:
+            try:
+                msg_id = send_error_notify(e, record, GMAIL_SEND_TO)
+                logger.info(f"Error notify sent, messageId={msg_id}")
+            except Exception as mail_err:
+                logger.error(f"Failed to send error email: {mail_err}", exc_info=True)
         return f"Error during summarization: {e}"
 
 
