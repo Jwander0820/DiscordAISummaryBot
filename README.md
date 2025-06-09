@@ -35,4 +35,11 @@ DB_TYPE=sqlite
 
 # LLM 調用模式："local" 或 "cloud" (僅在部分指令作用)
 ROLE_MODE=local
+
+# Gmail 設定
+GMAIL_CLIENT_SECRET_PATH=client_secret.json
+GMAIL_CLIENT_ID=gmail_client_id
+GMAIL_CLIENT_SECRET=gmail_client_secret
+GMAIL_REFRESH_TOKEN=token.pickle_refresh_token
+GMAIL_SEND_TO=gmail_send_to@gmail.com
 ```
