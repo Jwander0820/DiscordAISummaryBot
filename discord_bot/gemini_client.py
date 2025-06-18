@@ -17,7 +17,7 @@ else:
         gemini_model = genai.GenerativeModel("gemini-2.5-flash-preview-05-20")
         logger.info(f"Initialized Gemini Model: {gemini_model.model_name}")
 
-        role_model = genai.GenerativeModel("gemini-2.0-flash-lite")
+        role_model = genai.GenerativeModel("gemini-2.5-flash-lite-preview-06-17")
         logger.info(f"Initialized Gemma Model: {role_model.model_name}")
     except Exception as e:
         logger.error(f"Error initializing Gemini model: {e}. Summarization might fail.")
