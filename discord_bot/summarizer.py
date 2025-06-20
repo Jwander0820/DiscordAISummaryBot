@@ -20,6 +20,18 @@ async def summarize_messages(messages: list[discord.Message], prompt_scope: str 
     logger.info(f"Summarizing {len(messages)} messages...")
     TZ_8 = timezone(timedelta(hours=8))
 
+    # 先組好共用的 record skeleton，確保 exception 裡也有 record
+    record = {
+        "channel_id": messages[0].channel.name if messages else None,
+        "user_id": messages[0].author.global_name if messages else None,
+        "command": f"{prompt_scope}總結",
+        "question": "",
+        "prompt": "",
+        "summary": None,
+        "call_time": datetime.now(TZ_8).isoformat(),
+    }
+
+
     if not gemini_model:
         logger.warning("Gemini model not initialized or API key is missing/invalid.")
         return "Error: Summarization feature is not available."
@@ -31,7 +43,7 @@ async def summarize_messages(messages: list[discord.Message], prompt_scope: str 
         f"[{msg.created_at.astimezone(TZ_8).strftime('%H:%M')}] [id:{msg.author.name}] {msg.author.display_name}: {msg.content}"
         for msg in reversed(messages)
     ])
-
+    record["prompt"] = message_text
     # 建立角色導向內容
     contents = [
         {
@@ -59,26 +71,13 @@ async def summarize_messages(messages: list[discord.Message], prompt_scope: str 
     try:
         response = await gemini_model.generate_content_async(contents=contents)
 
-        if not response.parts:
-            if response.prompt_feedback and response.prompt_feedback.block_reason:
-                return f"Summarization blocked due to policy: {response.prompt_feedback.block_reason}"
-            return "Summarization failed: No response from Gemini."
+        # 先攔截被封鎖的情況
+        if not response.candidates:
+            reason = getattr(response.prompt_feedback, "block_reason", "UNKNOWN")
+            return f"Summarization blocked by policy: {reason}"
 
         summary_text = response.text
-        tz = timezone(timedelta(hours=8))
-        call_time = datetime.now(tz).isoformat()
-        channel_id = messages[0].channel.name
-        user_id = messages[0].author.global_name
-        record = {
-            "channel_id": str(channel_id),
-            "user_id": user_id,
-            "command": f"{prompt_scope}總結",
-            "question": "",
-            "prompt": message_text,
-            "summary": summary_text,
-            "call_time": call_time,
-        }
-
+        record["summary"] = summary_text
         insert_summary(record)
 
         logger.info("Summary saved successfully.")
