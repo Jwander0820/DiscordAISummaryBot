@@ -4,7 +4,7 @@ Discord AI 總結討論機器人
 
 # 🔧 環境變數設定
 
-請於專案根目錄建立 `.env` 檔案，並填入以下變數，切勿將實際金鑰上傳到公開倉庫：
+請於專案根目錄或discord_bot內建立 `.env` 檔案，並填入以下變數，切勿將實際金鑰上傳到公開倉庫：
 
 ```env
 # Discord Bot Token，用於連接 Discord API
@@ -42,4 +42,5 @@ GMAIL_CLIENT_ID=gmail_client_id
 GMAIL_CLIENT_SECRET=gmail_client_secret
 GMAIL_REFRESH_TOKEN=token.pickle_refresh_token
 GMAIL_SEND_TO=gmail_send_to@gmail.com
+GMAIL_REFRESH_TOKEN_ISSUED_AT='YYYY-MM-DDTHH:MM:SS+08:00'
 ```

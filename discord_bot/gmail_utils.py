@@ -6,7 +6,7 @@ import base64
 import mimetypes
 from typing import Union
 from datetime import datetime, timezone, timedelta
-from dotenv import load_dotenv
+from dotenv import load_dotenv, set_key
 from email import encoders
 from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
@@ -25,13 +25,13 @@ load_dotenv()
 SCOPES = ['https://www.googleapis.com/auth/gmail.send']
 
 
-def generate_gmail_env_tokens(port: int = 8080) -> None:
+def generate_gmail_env_tokens(port: int = 8080, env_path: str = '.env') -> None:
     """
     第一次執行，啟動 OAuth 認證：
       1. 用 client_secret.json 走 run_local_server() 取得憑證並存成 token.pickle
       2. 從 token.pickle 取出 refresh_token
       3. 從 client_secret.json 取出 client_id / client_secret
-      4. 印出三行可貼入 .env 的設定
+      4. 將三行 GMAIL_CLIENT_ID/SECRET/REFRESH_TOKEN 以及發行時間 GMAIL_REFRESH_TOKEN_ISSUED_AT 寫回 .env
     執行後，請將輸出貼到你的 .env：
       GMAIL_CLIENT_ID=...
       GMAIL_CLIENT_SECRET=...
@@ -58,11 +58,29 @@ def generate_gmail_env_tokens(port: int = 8080) -> None:
     client_id = info.get('client_id')
     client_secret = info.get('client_secret')
 
-    # 4. 輸出三行 .env 內容
-    print("\n請將以下三行貼到你的 .env：\n")
-    print(f"GMAIL_CLIENT_ID={client_id}")
-    print(f"GMAIL_CLIENT_SECRET={client_secret}")
-    print(f"GMAIL_REFRESH_TOKEN={refresh_token}\n")
+    # 4. 寫回 .env（只有在抓到值才寫入）
+    # 4.1 讀取並寫入 client_id, client_secret, refresh_token
+    set_key(env_path, 'GMAIL_CLIENT_ID', client_id)
+    set_key(env_path, 'GMAIL_CLIENT_SECRET', client_secret)
+
+    # 4.2 refresh_token 可能是 None
+    tz_8 = timezone(timedelta(hours=8))
+    issued_at = datetime.now(tz_8).isoformat()
+    if refresh_token is not None:
+        set_key(env_path, 'GMAIL_REFRESH_TOKEN', refresh_token)
+        set_key(env_path, 'GMAIL_REFRESH_TOKEN_ISSUED_AT', issued_at)
+    else:
+        print("⚠️ Warning: 無法取得 refresh_token，未寫入 GMAIL_REFRESH_TOKEN")
+
+    # 5. 印出結果
+    print(f"\n已更新 {env_path}：")
+    print(f"  GMAIL_CLIENT_ID={client_id}")
+    print(f"  GMAIL_CLIENT_SECRET={client_secret}")
+    if refresh_token:
+        print(f"  GMAIL_REFRESH_TOKEN={refresh_token}")
+        print(f"  GMAIL_REFRESH_TOKEN_ISSUED_AT={issued_at}\n")
+    else:
+        print(f"  ⚠️ refresh_token 未更新（目前仍有效），跳過寫入\n")
 
 
 def extract_gmail_env_tokens() -> dict:
@@ -129,6 +147,42 @@ def gmail_build_service():
     return build('gmail', 'v1', credentials=creds)
 
 
+def _attach_token_expiry_notice(body: str) -> str:
+    """
+    在郵件內容尾端附上：
+      1. Refresh Token 過期時間（發行日 + 7 天）
+      2. 距離過期還剩多少天
+    時間都以 UTC+8 顯示。
+    """
+    issued_str = os.getenv('GMAIL_REFRESH_TOKEN_ISSUED_AT')
+    if not issued_str:
+        return body
+
+    # 解析發行時間
+    tz8 = timezone(timedelta(hours=8))
+    try:
+        issued_at = datetime.fromisoformat(issued_str)
+    except ValueError:
+        # 如果沒有時區標記就補上
+        issued_at = datetime.fromisoformat(issued_str).replace(tzinfo=tz8)
+
+    # 計算過期時間與剩餘天數
+    expiry    = issued_at + timedelta(days=7)
+    now       = datetime.now(tz8)
+    diff = expiry - now
+    total_seconds = int(diff.total_seconds())
+    days = total_seconds // 86400
+    hours = (total_seconds % 86400) // 3600
+    minutes = (total_seconds % 3600) // 60
+
+    notice = (
+        "\n\n----\n"
+        f"⚠️ Refresh Token 過期時間：{expiry.strftime('%Y-%m-%d %H:%M:%S')} (UTC+8)\n"
+        f"⌛️ 距離過期還有：{days} 天 {hours} 小時 {minutes} 分鐘\n"
+    )
+    return body + notice
+
+
 def send_email(
     to, subject, body,
     *,
@@ -137,6 +191,9 @@ def send_email(
     attachment_filename=None
 ):
     service = gmail_build_service()
+
+    # 附上 token 過期提醒
+    body = _attach_token_expiry_notice(body)
 
     msg = MIMEMultipart()
     msg['to'], msg['from'], msg['subject'] = to, 'me', subject
@@ -240,7 +297,7 @@ def send_error_notify(error: Exception, record: dict, to: str) -> str:
     now = datetime.now(tz).isoformat()
 
     # 組 subject
-    subject = f"[SERN Error] 指令 {record.get('command')} 執行失敗"
+    subject = f"【SERN Error】 指令 {record.get('command')} 執行失敗"
 
     # 組 body，用 Emoji + 短標題
     body = (
