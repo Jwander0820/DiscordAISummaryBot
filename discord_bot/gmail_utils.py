@@ -327,3 +327,6 @@ def send_error_notify(error: Exception, record: dict, to: str) -> str:
         attachment_data=json_str,
         attachment_filename=filename
     )
+
+if __name__ == "__main__":
+    generate_gmail_env_tokens()
