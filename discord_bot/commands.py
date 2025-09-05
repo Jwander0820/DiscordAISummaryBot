@@ -453,7 +453,7 @@ def register(bot: commands.Bot):
             await interaction.followup.send(f"發生錯誤：{e}", ephemeral=True)
 
     async def send_as_amadeus(channel: discord.TextChannel, content: str):
-        avatar_url = "https://media.discordapp.net/attachments/1381222087305334817/1381222173267595415/Amadeus.png?ex=6846bae3&is=68456963&hm=b87d6c225f4989fa27304c596a1280895b89a11f2fbfa09d5f7c4ae78f91ff45&=&format=webp&quality=lossless&width=1362&height=1362"
+        avatar_url = "https://media.discordapp.net/attachments/1409948881822814450/1413559087609938031/Amadeus.png?ex=68bc5efd&is=68bb0d7d&hm=a9069c5e97de585f0d34479acee579394a52d69bc81445ff3a1fb7c5571e00fa&=&format=webp&quality=lossless&width=1084&height=1084"
         webhooks = await channel.webhooks()
         webhook = discord.utils.get(webhooks, name="Amadeus")
 
