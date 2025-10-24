@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 load_dotenv()
 logger = logging.getLogger('discord_digest_bot')
 GMAIL_SEND_TO = os.getenv("GMAIL_SEND_TO")
+DEEPFAKER_FAILURE_NOTICE = os.getenv("DEEPFAKER_FAILURE_NOTICE", "轉換失敗 SERN爆炸了")
 
 
 def register(bot: commands.Bot):
@@ -372,6 +373,61 @@ def register(bot: commands.Bot):
                     logger.error(f"無法發送錯誤電子郵件: {mail_err}", exc_info=True)
             await interaction.followup.send(f"發生錯誤：{e}", ephemeral=True)
 
+    @bot.tree.command(name="deepfaker", description="DeepFaker 偽裝成指定用戶發送訊息")
+    async def deepfaker(interaction: discord.Interaction, 冒牌對象: discord.Member, 內容: str):
+        channel = interaction.channel
+        if not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message("此指令僅能用於文字頻道", ephemeral=True)
+            return
+
+        trimmed_content = 內容.strip()
+        if not trimmed_content:
+            await interaction.response.send_message("請提供要偽裝發送的內容。", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        should_fail = random.random() < 0.05
+        failure_text = DEEPFAKER_FAILURE_NOTICE.strip()
+
+        if should_fail:
+            username = interaction.user.display_name or interaction.user.name
+            avatar_url = interaction.user.display_avatar.url
+            message_content = trimmed_content
+            if failure_text:
+                reserve_length = len(failure_text) + 1
+                if len(message_content) + reserve_length > 2000:
+                    allowed = 2000 - reserve_length
+                    message_content = message_content[:max(allowed, 0)]
+                message_content = f"{message_content}\n{failure_text}".strip()
+            result_message = f"DeepFaker 轉換失敗，已使用你的身份發送訊息。 ({failure_text or '無額外說明'})"
+            success = False
+            target_for_log = interaction.user.display_name or interaction.user.name
+        else:
+            username = 冒牌對象.display_name or 冒牌對象.name
+            avatar_url = 冒牌對象.display_avatar.url
+            message_content = trimmed_content[:2000]
+            result_message = f"已偽裝成 {username} 發送訊息。"
+            success = True
+            target_for_log = username
+
+        try:
+            await send_with_webhook(channel, message_content, username, avatar_url, "DeepFaker")
+        except discord.Forbidden:
+            logger.error("DeepFaker 需要 Manage Webhooks 權限才能發送訊息。")
+            await interaction.followup.send("無法使用 DeepFaker，缺少建立或使用 Webhook 的權限。", ephemeral=True)
+            return
+        except discord.HTTPException as http_err:
+            logger.error(f"DeepFaker webhook 發送失敗: {http_err}", exc_info=True)
+            await interaction.followup.send(f"DeepFaker 發送失敗：{http_err}", ephemeral=True)
+            return
+
+        logger.info(
+            f"DeepFaker invoked by {interaction.user.display_name or interaction.user.name} -> "
+            f"{target_for_log} (success={success})"
+        )
+        await interaction.followup.send(result_message, ephemeral=True)
+
     @bot.tree.command(name="el_psy_kongroo", description="一切都是命運石之門的選擇！")
     async def el_psy_kongroo(interaction: discord.Interaction, 問題: str):
         role_mode = os.getenv("ROLE_MODE", "local")
@@ -454,14 +510,18 @@ def register(bot: commands.Bot):
 
     async def send_as_amadeus(channel: discord.TextChannel, content: str):
         avatar_url = "https://media.discordapp.net/attachments/1409948881822814450/1413559087609938031/Amadeus.png?ex=68bc5efd&is=68bb0d7d&hm=a9069c5e97de585f0d34479acee579394a52d69bc81445ff3a1fb7c5571e00fa&=&format=webp&quality=lossless&width=1084&height=1084"
+        await send_with_webhook(channel, content, "Amadeus", avatar_url, "Amadeus")
+
+    async def send_with_webhook(channel: discord.TextChannel, content: str, username: str,
+                                avatar_url: str, webhook_name: str):
         webhooks = await channel.webhooks()
-        webhook = discord.utils.get(webhooks, name="Amadeus")
+        webhook = discord.utils.get(webhooks, name=webhook_name)
 
         if webhook is None:
-            webhook = await channel.create_webhook(name="Amadeus")
+            webhook = await channel.create_webhook(name=webhook_name)
 
         await webhook.send(
             content,
-            username="Amadeus",
+            username=username,
             avatar_url=avatar_url
         )
