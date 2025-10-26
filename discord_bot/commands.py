@@ -19,7 +19,7 @@ load_dotenv()
 logger = logging.getLogger('discord_digest_bot')
 GMAIL_SEND_TO = os.getenv("GMAIL_SEND_TO")
 DEEPFAKER_FAILURE_NOTICE = os.getenv("DEEPFAKER_FAILURE_NOTICE", "抓到你了！炸彈魔！")
-DEEPFAKER_FAILURE_PROB = os.getenv("DEEPFAKER_FAILURE_PROB", 1)
+DEEPFAKER_FAILURE_PROB = os.getenv("DEEPFAKER_FAILURE_PROB", 0.05)
 
 
 def register(bot: commands.Bot):
