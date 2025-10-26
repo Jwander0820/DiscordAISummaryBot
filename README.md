@@ -43,4 +43,8 @@ GMAIL_CLIENT_SECRET=gmail_client_secret
 GMAIL_REFRESH_TOKEN=token.pickle_refresh_token
 GMAIL_SEND_TO=gmail_send_to@gmail.com
 GMAIL_REFRESH_TOKEN_ISSUED_AT='YYYY-MM-DDTHH:MM:SS+08:00'
+
+# 偽裝功能設定
+DEEPFAKER_FAILURE_NOTICE='台詞'
+DEEPFAKER_FAILURE_PROB=浮點數0~1
 ```
