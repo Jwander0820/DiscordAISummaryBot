@@ -18,7 +18,8 @@ from dotenv import load_dotenv
 load_dotenv()
 logger = logging.getLogger('discord_digest_bot')
 GMAIL_SEND_TO = os.getenv("GMAIL_SEND_TO")
-DEEPFAKER_FAILURE_NOTICE = os.getenv("DEEPFAKER_FAILURE_NOTICE", "轉換失敗 SERN爆炸了")
+DEEPFAKER_FAILURE_NOTICE = os.getenv("DEEPFAKER_FAILURE_NOTICE", "抓到你了！炸彈魔！")
+DEEPFAKER_FAILURE_PROB = os.getenv("DEEPFAKER_FAILURE_PROB", 1)
 
 
 def register(bot: commands.Bot):
@@ -387,22 +388,26 @@ def register(bot: commands.Bot):
 
         await interaction.response.defer(ephemeral=True)
 
-        should_fail = random.random() < 0.05
+        should_fail = random.random() < float(DEEPFAKER_FAILURE_PROB)
         failure_text = DEEPFAKER_FAILURE_NOTICE.strip()
 
         if should_fail:
             username = interaction.user.display_name or interaction.user.name
             avatar_url = interaction.user.display_avatar.url
-            message_content = trimmed_content
+            message_content = trimmed_content  # 訊息內容
             if failure_text:
                 reserve_length = len(failure_text) + 1
-                if len(message_content) + reserve_length > 2000:
+                # 爆炸後增補內容
+                fake_username = 冒牌對象.display_name or 冒牌對象.name
+                fake_message_content = f"↖️ 這個人想偽裝成 {fake_username} 說 「{message_content}」"
+                if len(fake_message_content) + reserve_length > 2000:
                     allowed = 2000 - reserve_length
-                    message_content = message_content[:max(allowed, 0)]
-                message_content = f"{message_content}\n{failure_text}".strip()
+                    fake_message_content = fake_message_content[:max(allowed, 0)]
+                message_content = f"{fake_message_content}\n{failure_text}".strip()
             result_message = f"DeepFaker 轉換失敗，已使用你的身份發送訊息。 ({failure_text or '無額外說明'})"
             success = False
             target_for_log = interaction.user.display_name or interaction.user.name
+            logger.info(f"偽裝失敗log紀錄 {username}{fake_message_content or message_content}")
         else:
             username = 冒牌對象.display_name or 冒牌對象.name
             avatar_url = 冒牌對象.display_avatar.url
