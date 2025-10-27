@@ -12,6 +12,7 @@ load_dotenv()
 from . import database
 from .gemini_client import gemini_model
 from .commands import register as register_commands
+from .threads_preview import handle_threads_in_message
 
 logger = logging.getLogger('discord_digest_bot')
 logging.basicConfig(level=logging.INFO,
@@ -56,6 +57,14 @@ async def on_ready():
 
 register_commands(bot)
 
+@bot.event
+async def on_message(message: discord.Message):
+    # 先嘗試 Threads 預覽
+    handled = await handle_threads_in_message(message)
+    if handled:
+        return
+    # 其他指令/處理
+    await bot.process_commands(message)
 
 def run():
     if not BOT_TOKEN:
