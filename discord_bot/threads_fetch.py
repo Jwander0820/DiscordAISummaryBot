@@ -10,6 +10,7 @@ import html
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
 from urllib.parse import urlparse, urlunparse, urlencode
+from playwright.sync_api import sync_playwright
 
 # =============== 配置 ===============
 REQUEST_TIMEOUT = 15
@@ -63,6 +64,23 @@ class ThreadsPost:
 
 
 # =============== 小工具 ===============
+# --- 新增：從環境變數取得瀏覽器 args（預設必要時才加） ---
+def _browser_args_from_env() -> list[str]:
+    # 以逗號分隔，讓你完全自訂；未設定就回空
+    raw = os.getenv("THREADS_BROWSER_ARGS", "")
+    args = [a.strip() for a in raw.split(",") if a.strip()]
+    # 若設 THREADS_USE_NO_SANDBOX=1，注入常見兩個旗標
+    if os.getenv("THREADS_USE_NO_SANDBOX", "0") == "1":
+        # 去重：避免重覆加入
+        if "--no-sandbox" not in args:
+            args.append("--no-sandbox")
+        if "--disable-dev-shm-usage" not in args:
+            args.append("--disable-dev-shm-usage")
+
+    print(args)
+    return args
+
+
 def build_candidate_urls(url: str) -> list[str]:
     p = urlparse(url)
     if p.scheme not in ("http", "https"):
@@ -338,37 +356,33 @@ def _try_playwright(url: str) -> ThreadsPost:
         p.debug["playwright"] = f"not available: {e}"
         return p
 
-    html_dump = None
-    final_url = None
-
+    browser_args = _browser_args_from_env()
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
+        browser = pw.chromium.launch(
+            headless=True,
+            args=browser_args  # <= 關鍵
+        )
         context = browser.new_context(
-            user_agent=UA_MOBILE,  # 行動 UA 容易拿到較完整 meta
+            user_agent=UA_MOBILE,  # 你的 UA
             locale="en-US",
         )
         page = context.new_page()
         target = _normalize(url)
         try:
-            resp = page.goto(target, wait_until="networkidle", timeout=30000)
-            # 某些情況會 redirect 到 .com，允許
-            final_url = page.url
-            # 等待動態內容寫入（最多再等 2 秒）
+            page.goto(target, wait_until="networkidle", timeout=30000)
             page.wait_for_timeout(2000)
             html_dump = page.content()
-        except Exception:
-            pass
-        finally:
-            context.close()
-            browser.close()
+            final_url = page.url
+        except Exception as e:
+            context.close(); browser.close()
+            p = ThreadsPost(url=_normalize(url))
+            p.debug["playwright"] = f"goto failed: {e}"
+            return p
 
-    if html_dump:
-        _save_debug_html("playwright_last.html", html_dump)
-        return _parse_html(final_url or target, html_dump)
+        context.close()
+        browser.close()
 
-    p = ThreadsPost(url=_normalize(url))
-    p.debug["playwright"] = "no html"
-    return p
+    return _parse_html(final_url, html_dump)
 
 
 # =============== 外部主函數 ===============

@@ -12,3 +12,4 @@ google-auth-httplib2
 oauth2client<4.0.0
 scrapfly-sdk
 Playwright
+beautifulsoup4

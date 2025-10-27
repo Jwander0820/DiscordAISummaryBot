@@ -184,8 +184,8 @@ async def handle_threads_in_message(message: discord.Message) -> bool:
     # 限制一次只處理第一個（多個可自行迴圈）
     url = urls[0]
     try:
-        preview = await build_threads_preview(url, reupload_image=True, allow_video_upload=False)
         logger.info(f"{message.author.nick or message.author.global_name} 在 {message.channel.name} 貼了url {url}")
+        preview = await build_threads_preview(url, reupload_image=True, allow_video_upload=False)
 
         if preview.files:
             await message.reply(content=preview.extra_text or None, embed=preview.embed, files=preview.files, mention_author=False)
