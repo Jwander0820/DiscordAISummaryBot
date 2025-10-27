@@ -11,3 +11,4 @@ google-auth-httplib2
 # 以下為 file_cache 相容性所需
 oauth2client<4.0.0
 scrapfly-sdk
+Playwright
