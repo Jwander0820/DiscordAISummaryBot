@@ -25,6 +25,7 @@ from dotenv import load_dotenv
 
 import aiohttp
 import discord
+from discord.errors import HTTPException, InteractionResponded, NotFound
 
 # 你已有的抓取器
 from .threads_fetch import fetch_threads_post
@@ -51,6 +52,52 @@ class PreviewResult:
     embed: discord.Embed
     files: List[discord.File]
     extra_text: Optional[str] = None
+
+
+# --- Discord 互動元件 ---
+
+
+class DeletePreviewView(discord.ui.View):
+    """提供刪除 Threads 預覽訊息的按鈕。"""
+
+    def __init__(self, *, timeout: Optional[float] = 3600) -> None:
+        super().__init__(timeout=timeout)
+
+    @discord.ui.button(label="", style=discord.ButtonStyle.gray, emoji="🗑️")
+    async def delete_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:  # pragma: no cover - 互動流程難以以測試覆蓋
+        try:
+            await interaction.response.send_message("預覽已刪除。", ephemeral=True)
+        except InteractionResponded:
+            pass
+
+        preview_message = interaction.message
+        channel = getattr(preview_message, "channel", None)
+        deleter = f"{interaction.user.global_name}"
+
+        try:
+            await interaction.message.delete()
+        except (NotFound, HTTPException):
+            # 訊息已刪除或 Discord 拒絕刪除，忽略即可。
+            logger.info(
+                "Threads 預覽刪除失敗：訊息不存在或無法刪除 "
+                f"{deleter} 想刪除 {channel} 內的 Threads預覽對話",
+            )
+            return
+
+        logger.info(
+            "Threads 預覽已刪除 "
+            f"{deleter} 刪除了 {channel} 內的 Threads預覽對話",
+        )
+    async def on_timeout(self) -> None:  # pragma: no cover - 互動流程難以以測試覆蓋
+        for item in self.children:
+            item.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=None)
+            except (NotFound, HTTPException):
+                pass
 
 
 # --- URL 擷取 ---
@@ -187,10 +234,17 @@ async def handle_threads_in_message(message: discord.Message) -> bool:
         logger.info(f"{message.author.nick or message.author.global_name} 在 {message.channel.name} 貼了url {url}")
         preview = await build_threads_preview(url, reupload_image=True, allow_video_upload=False)
 
+        view = DeletePreviewView()
+        reply_kwargs = {
+            "embed": preview.embed,
+            "view": view,
+            "mention_author": False,
+        }
+        if preview.extra_text:
+            reply_kwargs["content"] = preview.extra_text
         if preview.files:
-            await message.reply(content=preview.extra_text or None, embed=preview.embed, files=preview.files, mention_author=False)
-        else:
-            await message.reply(content=preview.extra_text or None, embed=preview.embed, mention_author=False)
+            reply_kwargs["files"] = preview.files
+        await message.reply(**reply_kwargs)
         return True
     except Exception as e:
         logger.error(e, exc_info=True)
