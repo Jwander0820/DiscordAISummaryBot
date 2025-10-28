@@ -129,8 +129,27 @@ def _variants(url: str) -> List[str]:
     return uniq
 
 
+def _is_probable_profile_image(item: ThreadsMedia) -> bool:
+    if item.type != "image":
+        return False
+
+    url = (item.url or "").lower()
+    if any(token in url for token in ["profile_pic", "profile_media", "avatar"]):
+        return True
+    if re.search(r"/t51\.2885-19/", url):
+        return True
+
+    alt = (item.alt or "").lower()
+    if alt and any(token in alt for token in ["profile picture", "頭像", "大頭照"]):
+        return True
+
+    return False
+
+
 def _append_media_unique(lst: List[ThreadsMedia], item: ThreadsMedia):
     if not item.url:
+        return
+    if _is_probable_profile_image(item):
         return
     if any(m.url == item.url for m in lst):
         return
