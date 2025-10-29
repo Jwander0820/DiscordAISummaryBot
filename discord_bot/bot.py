@@ -67,12 +67,12 @@ async def on_message(message: discord.Message):
     if message.author.bot:
         return await bot.process_commands(message)
 
-    # （可選）快速檢查訊息裡是否有 Threads 連結，沒連結就不要呼叫 handler（省成本）
-    has_threads_url = bool(extract_threads_urls(message.content or ""))
-
     # 功能關閉時：**不要做 Threads 預覽**，直接交給其他指令
     if not threads_preview_enabled():
         return await bot.process_commands(message)
+
+    # （可選）快速檢查訊息裡是否有 Threads 連結，沒連結就不要呼叫 handler（省成本）
+    has_threads_url = bool(extract_threads_urls(message.content or ""))
 
     # 功能開啟時，且真的有連結再處理
     if has_threads_url:
