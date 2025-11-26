@@ -328,5 +328,65 @@ def send_error_notify(error: Exception, record: dict, to: str) -> str:
         attachment_filename=filename
     )
 
+
+def send_deepfaker_notify(record: dict, to: str) -> str:
+    """
+    根據 record 自動
+      1. 組出 subject、body
+      2. 將 record 序列化為 JSON 並依 call_time+command+channel_id 產生檔名
+      3. 呼叫 send_email() 發信並回傳 messageId
+
+    record 應包含：
+      - user_id, channel_id, command, question, summary, call_time (ISO str)
+    to: 收件人 email
+    """
+    # 1. 拆欄位
+    user_id    = record["user_id"]
+    channel_id = record["channel_id"]
+    command    = record["command"]
+    question   = record["question"]
+    prompt     = record["prompt"]
+    summary    = record["summary"]
+    call_time  = record["call_time"]  # ISO 格式 e.g. "2025-06-09T16:00:00+08:00"
+
+    # 2. subject & body
+    subject = f"【SERN Notify】{user_id} 在 {channel_id} 使用了 {command}"
+    body = (
+        f"📣 SERN Notify\n"
+        f"🔹 使用者    : {user_id}\n"
+        f"🔹 頻道      : {channel_id}\n"
+        f"🔹 指令      : {command}\n\n"
+        f"📝 {user_id} 寫了 :\n"
+        f"> {prompt}\n\n"
+        f"💡 log\n"
+        f"> {question}\n\n"
+        f"> {summary}\n\n"
+        f"⏰ 執行時間\n"
+        f"> {call_time}\n"
+    )
+
+    # 3. 把 record 轉 JSON 串
+    json_str = json.dumps(record, ensure_ascii=False, indent=2)
+
+    # 4. 產生檔名：把 ISO call_time 轉成 YYYYMMDDHHMMSS
+    try:
+        dt = datetime.fromisoformat(call_time)
+    except ValueError:
+        # 如果含時區不被支援，可去掉時區後再 parse
+        dt = datetime.fromisoformat(call_time.rstrip("Z"))
+    ts = dt.strftime("%Y%m%d%H%M%S")
+    filename = f"{ts}-{command}-{channel_id}.json"
+
+    # 5. 呼叫 send_email，attachment_data + attachment_filename
+    msg_id = send_email(
+        to=to,
+        subject=subject,
+        body=body,
+        attachment_data=json_str,
+        attachment_filename=filename
+    )
+    return msg_id
+
+
 if __name__ == "__main__":
     generate_gmail_env_tokens()

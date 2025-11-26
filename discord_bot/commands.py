@@ -6,13 +6,17 @@ import random
 import os
 
 import json
+
+from discord.ext.commands import NoEntryPointError
+from google.protobuf.internal.message_listener import NullMessageListener
+
 from .summarizer import summarize_messages
 from .summarizer import call_cloud_llm
 from .database import insert_summary
 from .local_llm_client import query_local_llm
 from .gemini_client import gemini_model
 from .gemini_client import role_model
-from .gmail_utils import send_sarn_notify, send_error_notify
+from .gmail_utils import send_sarn_notify, send_error_notify, send_deepfaker_notify
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -374,7 +378,7 @@ def register(bot: commands.Bot):
                     logger.error(f"無法發送錯誤電子郵件: {mail_err}", exc_info=True)
             await interaction.followup.send(f"發生錯誤：{e}", ephemeral=True)
 
-    @bot.tree.command(name="deepfaker", description="DeepFaker 偽裝成指定用戶發送訊息")
+    @bot.tree.command(name="deepfaker", description=f"DeepFaker 偽裝成指定用戶發送訊息，有一定機率會爆炸")
     async def deepfaker(interaction: discord.Interaction, 冒牌對象: discord.Member, 內容: str):
         channel = interaction.channel
         if not isinstance(channel, discord.TextChannel):
@@ -389,7 +393,12 @@ def register(bot: commands.Bot):
         await interaction.response.defer(ephemeral=True)
 
         should_fail = random.random() < float(DEEPFAKER_FAILURE_PROB)
-        failure_text = DEEPFAKER_FAILURE_NOTICE.strip()
+        parts = [s.strip() for s in DEEPFAKER_FAILURE_NOTICE.split('|') if s.strip()]
+        if not parts:
+            failure_text = "抓到你了！炸彈魔！"
+        else:
+            failure_text = random.choice(parts)
+        fake_message_content = ""  # 偽裝失敗訊息
 
         if should_fail:
             username = interaction.user.display_name or interaction.user.name
@@ -427,10 +436,30 @@ def register(bot: commands.Bot):
             await interaction.followup.send(f"DeepFaker 發送失敗：{http_err}", ephemeral=True)
             return
 
-        logger.info(
-            f"DeepFaker invoked by {interaction.user.display_name or interaction.user.name} -> "
-            f"{target_for_log} (success={success})"
-        )
+        log_message = f"DeepFaker invoked by {interaction.user.display_name or interaction.user.name} -> {target_for_log} (status={success})"
+        logger.info(log_message)
+
+        # 組織發信內容
+        tz = timezone(timedelta(hours=8))
+        call_time = datetime.now(tz).isoformat()
+        record = {
+            "channel_id": str(channel.name),
+            "user_id": str(interaction.user.display_name or interaction.user.name),
+            "command": "deepfaker",
+            "question": log_message,
+            "prompt": message_content,
+            "summary": fake_message_content,
+            "call_time": call_time,
+        }
+
+        # 發信通知
+        if GMAIL_SEND_TO:
+            try:
+                msg_id = send_deepfaker_notify(record, GMAIL_SEND_TO)
+                logger.info(f"SERN deepfaker result sent, messageId={msg_id}")
+            except Exception as e:
+                logger.error(f"發信失敗：{e}")
+
         await interaction.followup.send(result_message, ephemeral=True)
 
     @bot.tree.command(name="el_psy_kongroo", description="一切都是命運石之門的選擇！")
