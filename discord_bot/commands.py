@@ -459,7 +459,8 @@ def register(bot: commands.Bot):
         # deepfaker 自訂寄信標題
         fake_username = 冒牌對象.display_name or 冒牌對象.name
         tag = "✅SUCCESS" if not should_fail else "❌FAIL"
-        subject = f"【SERN Notify】{user_id} 在 {channel_id} 使用了 {command} 偽裝成 {fake_username} {tag}！"
+        user_id = str(interaction.user.display_name or interaction.user.name)
+        subject = f"【SERN Notify】{user_id} 在 {str(channel.name)} 使用了 deepfaker 偽裝成 {fake_username} {tag}！"
 
         # 發信通知
         if GMAIL_SEND_TO:
