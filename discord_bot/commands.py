@@ -46,7 +46,8 @@ def register(bot: commands.Bot):
                     break
 
             logger.info(f"Fetched {len(messages)} non-bot messages for summarization.")
-            summary_text = await summarize_messages(messages)
+            user_id = str(interaction.user.display_name or interaction.user.name)
+            summary_text = await summarize_messages(messages, user_id=user_id)
             if len(summary_text) > 1900:
                 logger.warning(f"Summary length ({len(summary_text)}) exceeds Discord limit. Truncating.")
                 summary_text = summary_text[:1900] + "... (summary truncated)"
@@ -82,7 +83,8 @@ def register(bot: commands.Bot):
                     messages.append(message)
 
             logger.info(f"Fetched {len(messages)} non-bot messages in last hour.")
-            summary_text = await summarize_messages(messages, prompt_scope="過去一小時")
+            user_id = str(interaction.user.display_name or interaction.user.name)
+            summary_text = await summarize_messages(messages, prompt_scope="過去一小時", user_id=user_id)
             if len(summary_text) > 1900:
                 logger.warning(f"Summary length ({len(summary_text)}) exceeds Discord limit. Truncating.")
                 summary_text = summary_text[:1900] + "...（已截斷）"
@@ -122,7 +124,8 @@ def register(bot: commands.Bot):
                     break
 
             logger.info(f"Fetched {len(messages)} non-bot messages for 7-day summary.")
-            summary_text = await summarize_messages(messages, prompt_scope="過去七天")
+            user_id = str(interaction.user.display_name or interaction.user.name)
+            summary_text = await summarize_messages(messages, prompt_scope="過去七天", user_id=user_id)
             if len(summary_text) > 1900:
                 logger.warning(f"Summary length ({len(summary_text)}) exceeds Discord limit. Truncating.")
                 summary_text = summary_text[:1900] + "... (summary truncated)"
@@ -436,7 +439,7 @@ def register(bot: commands.Bot):
             await interaction.followup.send(f"DeepFaker 發送失敗：{http_err}", ephemeral=True)
             return
 
-        log_message = f"DeepFaker invoked by {interaction.user.display_name or interaction.user.name} -> {target_for_log} (status={success})"
+        log_message = f"DeepFaker invoked by {interaction.user.display_name or interaction.user.name} 偽裝成 {target_for_log} (status={success})"
         logger.info(log_message)
 
         # 組織發信內容
@@ -451,11 +454,17 @@ def register(bot: commands.Bot):
             "summary": fake_message_content,
             "call_time": call_time,
         }
+        insert_summary(record)
+
+        # deepfaker 自訂寄信標題
+        fake_username = 冒牌對象.display_name or 冒牌對象.name
+        tag = "✅SUCCESS" if not should_fail else "❌FAIL"
+        subject = f"【SERN Notify】{user_id} 在 {channel_id} 使用了 {command} 偽裝成 {fake_username} {tag}！"
 
         # 發信通知
         if GMAIL_SEND_TO:
             try:
-                msg_id = send_deepfaker_notify(record, GMAIL_SEND_TO)
+                msg_id = send_deepfaker_notify(record, GMAIL_SEND_TO, subject)
                 logger.info(f"SERN deepfaker result sent, messageId={msg_id}")
             except Exception as e:
                 logger.error(f"發信失敗：{e}")

@@ -329,7 +329,7 @@ def send_error_notify(error: Exception, record: dict, to: str) -> str:
     )
 
 
-def send_deepfaker_notify(record: dict, to: str) -> str:
+def send_deepfaker_notify(record: dict, to: str, subject: str = None) -> str:
     """
     根據 record 自動
       1. 組出 subject、body
@@ -350,7 +350,8 @@ def send_deepfaker_notify(record: dict, to: str) -> str:
     call_time  = record["call_time"]  # ISO 格式 e.g. "2025-06-09T16:00:00+08:00"
 
     # 2. subject & body
-    subject = f"【SERN Notify】{user_id} 在 {channel_id} 使用了 {command}"
+    if subject is None:
+        subject = f"【SERN Notify】{user_id} 在 {channel_id} 使用了 {command}"
     body = (
         f"📣 SERN Notify\n"
         f"🔹 使用者    : {user_id}\n"

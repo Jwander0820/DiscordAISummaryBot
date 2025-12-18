@@ -15,7 +15,7 @@ logger = logging.getLogger('discord_digest_bot')
 GMAIL_SEND_TO = os.getenv("GMAIL_SEND_TO")
 
 
-async def summarize_messages(messages: list[discord.Message], prompt_scope: str = "過去24小時") -> str:
+async def summarize_messages(messages: list[discord.Message], prompt_scope: str = "過去24小時", user_id: str = None) -> str:
     """Summarize the given messages using Gemini."""
     logger.info(f"Summarizing {len(messages)} messages...")
     TZ_8 = timezone(timedelta(hours=8))
@@ -23,7 +23,7 @@ async def summarize_messages(messages: list[discord.Message], prompt_scope: str 
     # 先組好共用的 record skeleton，確保 exception 裡也有 record
     record = {
         "channel_id": messages[0].channel.name if messages else None,
-        "user_id": messages[0].author.global_name if messages else None,
+        "user_id": user_id,
         "command": f"{prompt_scope}總結",
         "question": "",
         "prompt": "",
