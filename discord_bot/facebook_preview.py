@@ -10,8 +10,8 @@ from urllib.parse import urlparse, urlunparse
 
 import aiohttp
 import discord
-from discord.errors import Forbidden, HTTPException
 from bs4 import BeautifulSoup
+from discord.errors import Forbidden, HTTPException, InteractionResponded, NotFound
 
 logger = logging.getLogger("discord_digest_bot")
 
@@ -33,11 +33,39 @@ DEFAULT_HEADERS = {
     "Sec-Fetch-Dest": "document",
 }
 
+MAX_VIDEO_UPLOAD_BYTES = 20 * 1024 * 1024
+
 
 @dataclass
 class FacebookPreview:
     embed: discord.Embed
     files: List[discord.File]
+    extra_text: Optional[str] = None
+
+
+class DeleteFacebookPreviewView(discord.ui.View):
+    def __init__(self, *, timeout: Optional[float] = 3600) -> None:
+        super().__init__(timeout=timeout)
+        self.message: Optional[discord.Message] = None
+
+    @discord.ui.button(label="", style=discord.ButtonStyle.gray, emoji="🗑️")
+    async def delete_button(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:  # pragma: no cover
+        try:
+            await interaction.response.send_message("預覽已刪除。", ephemeral=True)
+        except InteractionResponded:
+            pass
+
+        try:
+            await interaction.message.delete()
+        except (NotFound, HTTPException):
+            return
+
+    async def on_timeout(self) -> None:  # pragma: no cover
+        if self.message:
+            try:
+                await self.message.edit(view=None)
+            except (NotFound, HTTPException):
+                pass
 
 
 def extract_facebook_urls(content: str) -> List[str]:
@@ -90,18 +118,6 @@ async def _download_bytes(session: aiohttp.ClientSession, url: str, timeout_sec:
     return None
 
 
-def _meta_content(soup: BeautifulSoup, key: str) -> Optional[str]:
-    tag = soup.find("meta", attrs={"property": key})
-    if tag and tag.get("content"):
-        return tag["content"].strip()
-
-    tag = soup.find("meta", attrs={"name": key})
-    if tag and tag.get("content"):
-        return tag["content"].strip()
-
-    return None
-
-
 def _meta_contents(soup: BeautifulSoup, key: str) -> List[str]:
     values: List[str] = []
     for tag in soup.find_all("meta", attrs={"property": key}):
@@ -122,15 +138,29 @@ def _meta_contents(soup: BeautifulSoup, key: str) -> List[str]:
     return unique_values
 
 
-def _extract_og_data(html: str) -> Tuple[Optional[str], Optional[str], List[str]]:
+def _extract_og_data(html: str) -> Tuple[str, str, List[str], List[str]]:
     soup = BeautifulSoup(html, "html.parser")
-    title = _meta_content(soup, "og:title")
-    description = _meta_content(soup, "og:description")
+    title = (_meta_contents(soup, "og:title") or ["Facebook 貼文"])[0]
+    description = (_meta_contents(soup, "og:description") or [""])[0]
     image_urls = _meta_contents(soup, "og:image")
-    return title, description, image_urls
+
+    video_urls = []
+    for key in ("og:video", "og:video:url", "og:video:secure_url"):
+        video_urls.extend(_meta_contents(soup, key))
+    # fallback: 有些頁面只放 twitter player
+    video_urls.extend(_meta_contents(soup, "twitter:player:stream"))
+
+    seen_video = set()
+    unique_video_urls = []
+    for url in video_urls:
+        if url not in seen_video:
+            seen_video.add(url)
+            unique_video_urls.append(url)
+
+    return title, description, image_urls, unique_video_urls
 
 
-async def _fetch_html_with_aiohttp(url: str) -> Tuple[Optional[str], Optional[str], List[str], Optional[str], int]:
+async def _fetch_html_with_aiohttp(url: str) -> Tuple[str, str, List[str], List[str], Optional[str], int]:
     last_error = "Facebook 頁面讀取失敗"
     last_status = 0
 
@@ -140,13 +170,13 @@ async def _fetch_html_with_aiohttp(url: str) -> Tuple[Optional[str], Optional[st
                 async with session.get(candidate, timeout=25, allow_redirects=True) as resp:
                     last_status = resp.status
                     html = await resp.text(errors="ignore")
-                    title, description, image_urls = _extract_og_data(html)
+                    title, description, image_urls, video_urls = _extract_og_data(html)
 
-                    if title or description or image_urls:
-                        return title, description, image_urls, str(resp.url), resp.status
+                    if title or description or image_urls or video_urls:
+                        return title, description, image_urls, video_urls, str(resp.url), resp.status
 
                     if resp.status < 400:
-                        return title, description, image_urls, str(resp.url), resp.status
+                        return title, description, image_urls, video_urls, str(resp.url), resp.status
 
                     last_error = f"Facebook 頁面讀取失敗（HTTP {resp.status}）"
             except Exception as exc:
@@ -155,7 +185,7 @@ async def _fetch_html_with_aiohttp(url: str) -> Tuple[Optional[str], Optional[st
     raise RuntimeError(last_error if last_status else "Facebook 頁面讀取失敗（無有效回應）")
 
 
-def _fetch_og_with_playwright_sync(url: str) -> Tuple[Optional[str], Optional[str], List[str], str]:
+def _fetch_og_with_playwright_sync(url: str) -> Tuple[str, str, List[str], List[str], str]:
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as pw:
@@ -165,45 +195,40 @@ def _fetch_og_with_playwright_sync(url: str) -> Tuple[Optional[str], Optional[st
         page.goto(url, wait_until="domcontentloaded", timeout=30000)
         page.wait_for_timeout(1200)
 
-        def read_meta(selector: str) -> Optional[str]:
-            node = page.query_selector(selector)
-            if node:
-                content = node.get_attribute("content")
-                if content:
-                    return content.strip()
-            return None
-
-        title = read_meta('meta[property="og:title"]') or read_meta('meta[name="og:title"]')
-        description = read_meta('meta[property="og:description"]') or read_meta('meta[name="og:description"]')
-        image = read_meta('meta[property="og:image"]') or read_meta('meta[name="og:image"]')
-        image_urls = [image] if image else []
+        html = page.content()
+        title, description, image_urls, video_urls = _extract_og_data(html)
         final_url = page.url
 
         context.close()
         browser.close()
-        return title, description, image_urls, final_url
+        return title, description, image_urls, video_urls, final_url
 
 
-async def _fetch_og_data(url: str) -> Tuple[str, str, List[str], str]:
+async def _fetch_og_data(url: str) -> Tuple[str, str, List[str], List[str], str]:
     try:
-        title, description, image_urls, final_url, status = await _fetch_html_with_aiohttp(url)
-        if status >= 400 and not (title or description or image_urls):
+        title, description, image_urls, video_urls, final_url, status = await _fetch_html_with_aiohttp(url)
+        if status >= 400 and not (title or description or image_urls or video_urls):
             raise RuntimeError(f"HTTP {status} 且無可用 Open Graph")
-
-        return (title or "Facebook 貼文", description or "", image_urls, final_url or url)
+        return title, description, image_urls, video_urls, final_url or url
     except Exception as http_error:
         logger.warning("aiohttp 抓 Facebook Open Graph 失敗，改用 Playwright: %s", http_error)
 
     try:
-        title, description, image_urls, final_url = await asyncio.to_thread(_fetch_og_with_playwright_sync, url)
-        return (title or "Facebook 貼文", description or "", image_urls, final_url or url)
+        title, description, image_urls, video_urls, final_url = await asyncio.to_thread(_fetch_og_with_playwright_sync, url)
+        return title, description, image_urls, video_urls, final_url or url
     except Exception as playwright_error:
         logger.warning("Playwright 擷取 Facebook Open Graph 失敗: %s", playwright_error)
-        return ("Facebook 貼文", "", [], url)
+        return "Facebook 貼文", "", [], [], url
 
 
-async def build_facebook_preview(url: str, *, reupload_image: bool = True, max_images: int = 4) -> FacebookPreview:
-    title, description, image_urls, final_url = await _fetch_og_data(url)
+async def build_facebook_preview(
+    url: str,
+    *,
+    reupload_image: bool = True,
+    max_images: int = 4,
+    allow_video_upload: bool = True,
+) -> FacebookPreview:
+    title, description, image_urls, video_urls, final_url = await _fetch_og_data(url)
 
     embed = discord.Embed(
         title=title[:256],
@@ -213,6 +238,8 @@ async def build_facebook_preview(url: str, *, reupload_image: bool = True, max_i
     embed.set_author(name="Facebook")
 
     files: List[discord.File] = []
+    extra_lines: List[str] = []
+
     selected_image_urls = image_urls[:max(1, max_images)]
     if selected_image_urls:
         if reupload_image:
@@ -231,7 +258,20 @@ async def build_facebook_preview(url: str, *, reupload_image: bool = True, max_i
         else:
             embed.set_image(url=selected_image_urls[0])
 
-    return FacebookPreview(embed=embed, files=files)
+    if video_urls:
+        mp4_urls = [u for u in video_urls if u.lower().endswith(".mp4")]
+        if allow_video_upload and mp4_urls:
+            async with aiohttp.ClientSession(headers=DEFAULT_HEADERS) as session:
+                video_data = await _download_bytes(session, mp4_urls[0], timeout_sec=40)
+            if video_data and len(video_data) <= MAX_VIDEO_UPLOAD_BYTES:
+                files.append(discord.File(io.BytesIO(video_data), filename="facebook_preview_video.mp4"))
+            else:
+                extra_lines.append(f"影片連結：{mp4_urls[0]}")
+        else:
+            extra_lines.append(f"影片連結：{video_urls[0]}")
+
+    extra_text = "\n".join(extra_lines) if extra_lines else None
+    return FacebookPreview(embed=embed, files=files, extra_text=extra_text)
 
 
 async def handle_facebook_in_message(message: discord.Message) -> bool:
@@ -250,21 +290,24 @@ async def handle_facebook_in_message(message: discord.Message) -> bool:
             message.channel.name,
             url,
         )
-        preview = await build_facebook_preview(url, reupload_image=True, max_images=4)
+        preview = await build_facebook_preview(url, reupload_image=True, max_images=4, allow_video_upload=True)
+        view = DeleteFacebookPreviewView()
         reply_kwargs = {
             "embed": preview.embed,
             "mention_author": False,
+            "view": view,
         }
         if preview.files:
             reply_kwargs["files"] = preview.files
+        if preview.extra_text:
+            reply_kwargs["content"] = preview.extra_text
 
-        await message.reply(**reply_kwargs)
+        sent = await message.reply(**reply_kwargs)
+        view.message = sent
 
-        # 抑制原訊息的 Discord 預設連結嵌入（例如 Facebook 的 "Log in or sign up to view"）
         try:
             await message.edit(suppress=True)
         except (Forbidden, HTTPException):
-            # 沒有 Manage Messages 權限或 Discord 拒絕修改時，保留功能主流程成功
             pass
 
         return True
