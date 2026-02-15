@@ -13,6 +13,7 @@ from . import database
 from .gemini_client import gemini_model
 from .commands import register as register_commands
 from .threads_preview import handle_threads_in_message, extract_threads_urls
+from .facebook_preview import handle_facebook_in_message, extract_facebook_urls
 logger = logging.getLogger('discord_digest_bot')
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s:%(levelname)s:%(name)s: %(message)s')
@@ -71,14 +72,21 @@ async def on_message(message: discord.Message):
     if not threads_preview_enabled():
         return await bot.process_commands(message)
 
-    # （可選）快速檢查訊息裡是否有 Threads 連結，沒連結就不要呼叫 handler（省成本）
-    has_threads_url = bool(extract_threads_urls(message.content or ""))
+    content = message.content or ""
 
-    # 功能開啟時，且真的有連結再處理
+    # 快速檢查是否有支援的社群連結
+    has_threads_url = bool(extract_threads_urls(content))
+    has_facebook_url = bool(extract_facebook_urls(content))
+
     if has_threads_url:
         handled = await handle_threads_in_message(message)
         if handled:
-            return  # 成功預覽就不要往下傳給指令解析
+            return
+
+    if has_facebook_url:
+        handled = await handle_facebook_in_message(message)
+        if handled:
+            return
 
     # 沒處理或沒連結：交給其他指令
     await bot.process_commands(message)
