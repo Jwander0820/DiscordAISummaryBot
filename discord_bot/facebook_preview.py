@@ -102,15 +102,35 @@ def _meta_content(soup: BeautifulSoup, key: str) -> Optional[str]:
     return None
 
 
-def _extract_og_data(html: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+def _meta_contents(soup: BeautifulSoup, key: str) -> List[str]:
+    values: List[str] = []
+    for tag in soup.find_all("meta", attrs={"property": key}):
+        content = tag.get("content")
+        if content and content.strip():
+            values.append(content.strip())
+    for tag in soup.find_all("meta", attrs={"name": key}):
+        content = tag.get("content")
+        if content and content.strip():
+            values.append(content.strip())
+
+    seen = set()
+    unique_values = []
+    for value in values:
+        if value not in seen:
+            seen.add(value)
+            unique_values.append(value)
+    return unique_values
+
+
+def _extract_og_data(html: str) -> Tuple[Optional[str], Optional[str], List[str]]:
     soup = BeautifulSoup(html, "html.parser")
     title = _meta_content(soup, "og:title")
     description = _meta_content(soup, "og:description")
-    image = _meta_content(soup, "og:image")
-    return title, description, image
+    image_urls = _meta_contents(soup, "og:image")
+    return title, description, image_urls
 
 
-async def _fetch_html_with_aiohttp(url: str) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str], int]:
+async def _fetch_html_with_aiohttp(url: str) -> Tuple[Optional[str], Optional[str], List[str], Optional[str], int]:
     last_error = "Facebook 頁面讀取失敗"
     last_status = 0
 
@@ -120,13 +140,13 @@ async def _fetch_html_with_aiohttp(url: str) -> Tuple[Optional[str], Optional[st
                 async with session.get(candidate, timeout=25, allow_redirects=True) as resp:
                     last_status = resp.status
                     html = await resp.text(errors="ignore")
-                    title, description, image = _extract_og_data(html)
+                    title, description, image_urls = _extract_og_data(html)
 
-                    if title or description or image:
-                        return title, description, image, str(resp.url), resp.status
+                    if title or description or image_urls:
+                        return title, description, image_urls, str(resp.url), resp.status
 
                     if resp.status < 400:
-                        return title, description, image, str(resp.url), resp.status
+                        return title, description, image_urls, str(resp.url), resp.status
 
                     last_error = f"Facebook 頁面讀取失敗（HTTP {resp.status}）"
             except Exception as exc:
@@ -135,7 +155,7 @@ async def _fetch_html_with_aiohttp(url: str) -> Tuple[Optional[str], Optional[st
     raise RuntimeError(last_error if last_status else "Facebook 頁面讀取失敗（無有效回應）")
 
 
-def _fetch_og_with_playwright_sync(url: str) -> Tuple[Optional[str], Optional[str], Optional[str], str]:
+def _fetch_og_with_playwright_sync(url: str) -> Tuple[Optional[str], Optional[str], List[str], str]:
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as pw:
@@ -156,33 +176,34 @@ def _fetch_og_with_playwright_sync(url: str) -> Tuple[Optional[str], Optional[st
         title = read_meta('meta[property="og:title"]') or read_meta('meta[name="og:title"]')
         description = read_meta('meta[property="og:description"]') or read_meta('meta[name="og:description"]')
         image = read_meta('meta[property="og:image"]') or read_meta('meta[name="og:image"]')
+        image_urls = [image] if image else []
         final_url = page.url
 
         context.close()
         browser.close()
-        return title, description, image, final_url
+        return title, description, image_urls, final_url
 
 
-async def _fetch_og_data(url: str) -> Tuple[str, str, Optional[str], str]:
+async def _fetch_og_data(url: str) -> Tuple[str, str, List[str], str]:
     try:
-        title, description, image, final_url, status = await _fetch_html_with_aiohttp(url)
-        if status >= 400 and not (title or description or image):
+        title, description, image_urls, final_url, status = await _fetch_html_with_aiohttp(url)
+        if status >= 400 and not (title or description or image_urls):
             raise RuntimeError(f"HTTP {status} 且無可用 Open Graph")
 
-        return (title or "Facebook 貼文", description or "", image, final_url or url)
+        return (title or "Facebook 貼文", description or "", image_urls, final_url or url)
     except Exception as http_error:
         logger.warning("aiohttp 抓 Facebook Open Graph 失敗，改用 Playwright: %s", http_error)
 
     try:
-        title, description, image, final_url = await asyncio.to_thread(_fetch_og_with_playwright_sync, url)
-        return (title or "Facebook 貼文", description or "", image, final_url or url)
+        title, description, image_urls, final_url = await asyncio.to_thread(_fetch_og_with_playwright_sync, url)
+        return (title or "Facebook 貼文", description or "", image_urls, final_url or url)
     except Exception as playwright_error:
         logger.warning("Playwright 擷取 Facebook Open Graph 失敗: %s", playwright_error)
-        return ("Facebook 貼文", "", None, url)
+        return ("Facebook 貼文", "", [], url)
 
 
-async def build_facebook_preview(url: str, *, reupload_image: bool = True) -> FacebookPreview:
-    title, description, image_url, final_url = await _fetch_og_data(url)
+async def build_facebook_preview(url: str, *, reupload_image: bool = True, max_images: int = 4) -> FacebookPreview:
+    title, description, image_urls, final_url = await _fetch_og_data(url)
 
     embed = discord.Embed(
         title=title[:256],
@@ -192,18 +213,23 @@ async def build_facebook_preview(url: str, *, reupload_image: bool = True) -> Fa
     embed.set_author(name="Facebook")
 
     files: List[discord.File] = []
-    if image_url:
+    selected_image_urls = image_urls[:max(1, max_images)]
+    if selected_image_urls:
         if reupload_image:
             async with aiohttp.ClientSession(headers=DEFAULT_HEADERS) as session:
-                image_data = await _download_bytes(session, image_url)
-            if image_data:
-                file_name = "facebook_preview.jpg"
-                files.append(discord.File(io.BytesIO(image_data), filename=file_name))
-                embed.set_image(url=f"attachment://{file_name}")
+                for index, image_url in enumerate(selected_image_urls, start=1):
+                    image_data = await _download_bytes(session, image_url)
+                    if not image_data:
+                        continue
+                    file_name = f"facebook_preview_{index}.jpg"
+                    files.append(discord.File(io.BytesIO(image_data), filename=file_name))
+
+            if files:
+                embed.set_image(url=f"attachment://{files[0].filename}")
             else:
-                embed.set_image(url=image_url)
+                embed.set_image(url=selected_image_urls[0])
         else:
-            embed.set_image(url=image_url)
+            embed.set_image(url=selected_image_urls[0])
 
     return FacebookPreview(embed=embed, files=files)
 
@@ -224,7 +250,7 @@ async def handle_facebook_in_message(message: discord.Message) -> bool:
             message.channel.name,
             url,
         )
-        preview = await build_facebook_preview(url, reupload_image=True)
+        preview = await build_facebook_preview(url, reupload_image=True, max_images=4)
         reply_kwargs = {
             "embed": preview.embed,
             "mention_author": False,
