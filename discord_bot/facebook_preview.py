@@ -10,6 +10,7 @@ from urllib.parse import urlparse, urlunparse
 
 import aiohttp
 import discord
+from discord.errors import Forbidden, HTTPException
 from bs4 import BeautifulSoup
 
 logger = logging.getLogger("discord_digest_bot")
@@ -232,6 +233,14 @@ async def handle_facebook_in_message(message: discord.Message) -> bool:
             reply_kwargs["files"] = preview.files
 
         await message.reply(**reply_kwargs)
+
+        # 抑制原訊息的 Discord 預設連結嵌入（例如 Facebook 的 "Log in or sign up to view"）
+        try:
+            await message.edit(suppress=True)
+        except (Forbidden, HTTPException):
+            # 沒有 Manage Messages 權限或 Discord 拒絕修改時，保留功能主流程成功
+            pass
+
         return True
     except Exception as exc:
         logger.error("Facebook 預覽失敗: %s", exc, exc_info=True)
