@@ -44,8 +44,10 @@ GMAIL_REFRESH_TOKEN=token.pickle_refresh_token
 GMAIL_SEND_TO=gmail_send_to@gmail.com
 GMAIL_REFRESH_TOKEN_ISSUED_AT='YYYY-MM-DDTHH:MM:SS+08:00'
 
-# Threads Setting THREADS_PREVIEW_ENABLED=0 就會關閉Threads預覽功能
-THREADS_PREVIEW_ENABLED=0
+# Threads/Facebook 預覽功能開關
+# 設為 0 表示關閉，1 表示啟用（預設 1）
+THREADS_PREVIEW_ENABLED=1
+FACEBOOK_PREVIEW_ENABLED=1
 THREADS_USE_NO_SANDBOX=1
 
 # 偽裝功能設定
