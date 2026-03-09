@@ -4,6 +4,7 @@ import discord
 from discord.ext import commands
 import random
 import os
+from typing import Optional
 
 import json
 
@@ -17,6 +18,7 @@ from .local_llm_client import query_local_llm
 from .gemini_client import gemini_model
 from .gemini_client import role_model
 from .gmail_utils import send_sarn_notify, send_error_notify, send_deepfaker_notify
+from .notify_forwarder import forward_notify_to_channel
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -24,6 +26,41 @@ logger = logging.getLogger('discord_digest_bot')
 GMAIL_SEND_TO = os.getenv("GMAIL_SEND_TO")
 DEEPFAKER_FAILURE_NOTICE = os.getenv("DEEPFAKER_FAILURE_NOTICE", "抓到你了！炸彈魔！")
 DEEPFAKER_FAILURE_PROB = os.getenv("DEEPFAKER_FAILURE_PROB", 0.05)
+
+
+async def dispatch_notify(
+    *,
+    record: dict,
+    guild: Optional[discord.Guild] = None,
+    bot_client: Optional[discord.Client] = None,
+    error: Optional[Exception] = None,
+    deepfaker_subject: Optional[str] = None,
+) -> None:
+    email_sent = None
+    msg_id = None
+    notify_type = "error" if error else "success"
+    try:
+        if GMAIL_SEND_TO:
+            if error:
+                msg_id = send_error_notify(error, record, GMAIL_SEND_TO)
+            elif deepfaker_subject:
+                msg_id = send_deepfaker_notify(record, GMAIL_SEND_TO, deepfaker_subject)
+            else:
+                msg_id = send_sarn_notify(record, GMAIL_SEND_TO)
+            email_sent = True
+    except Exception as notify_err:
+        email_sent = False
+        logger.error(f"發信失敗：{notify_err}", exc_info=True)
+
+    await forward_notify_to_channel(
+        record=record,
+        guild=guild,
+        bot=bot_client,
+        notify_type=notify_type,
+        email_sent=email_sent,
+        email_message_id=msg_id,
+        error=error,
+    )
 
 
 def register(bot: commands.Bot):
@@ -154,6 +191,7 @@ def register(bot: commands.Bot):
 
         await interaction.response.defer(ephemeral=False)
         TZ_8 = timezone(timedelta(hours=8))
+        record = {}
         try:
             time_since = datetime.now(timezone.utc) - timedelta(days=1)
             messages = []
@@ -228,24 +266,21 @@ def register(bot: commands.Bot):
             }
             insert_summary(record)
 
-            # 發信通知
-            if GMAIL_SEND_TO:
-                try:
-                    msg_id = send_sarn_notify(record, GMAIL_SEND_TO)
-                    logger.info(f"SERN Notify sent, messageId={msg_id}")
-                except Exception as e:
-                    logger.error(f"發信失敗：{e}")
+            await dispatch_notify(
+                record=record,
+                guild=interaction.guild,
+                bot_client=interaction.client,
+            )
 
             await interaction.followup.send(reply_content)
         except Exception as e:
             logger.error(f"Error in ask_about_conversation: {e}", exc_info=True)
-            # 發錯誤通知信
-            if GMAIL_SEND_TO:
-                try:
-                    msg_id = send_error_notify(e, record, GMAIL_SEND_TO)
-                    logger.info(f"Error notify sent, messageId={msg_id}")
-                except Exception as mail_err:
-                    logger.error(f"無法發送錯誤電子郵件: {mail_err}", exc_info=True)
+            await dispatch_notify(
+                record=record,
+                guild=interaction.guild,
+                bot_client=interaction.client,
+                error=e,
+            )
             await interaction.followup.send(f"發生錯誤：{e}", ephemeral=True)
 
     @bot.tree.command(name="測試d-mail", description="測試機器人連線狀態，應該不會改變世界線，應該啦...")
@@ -298,12 +333,11 @@ def register(bot: commands.Bot):
 
         # 發信通知(若跨越世界線)
         if crossed:
-            if GMAIL_SEND_TO:
-                try:
-                    msg_id = send_sarn_notify(record, GMAIL_SEND_TO)
-                    logger.info(f"SERN Notify sent, messageId={msg_id}")
-                except Exception as e:
-                    logger.error(f"發信失敗：{e}")
+            await dispatch_notify(
+                record=record,
+                guild=interaction.guild,
+                bot_client=interaction.client,
+            )
 
     @bot.tree.command(name="解答之書", description="取樣最近20則訊息，向本地 LLM 詢問")
     async def answer_book(interaction: discord.Interaction, 問題: str):
@@ -315,6 +349,7 @@ def register(bot: commands.Bot):
 
         await interaction.response.defer(ephemeral=False)
         TZ_8 = timezone(timedelta(hours=8))
+        record = {}
         try:
             messages = []
             async for msg in channel.history(limit=50, oldest_first=False):
@@ -357,13 +392,11 @@ def register(bot: commands.Bot):
             }
             insert_summary(record)
 
-            # 發信通知
-            if GMAIL_SEND_TO:
-                try:
-                    msg_id = send_sarn_notify(record, GMAIL_SEND_TO)
-                    logger.info(f"SERN Notify sent, messageId={msg_id}")
-                except Exception as e:
-                    logger.error(f"發信失敗：{e}")
+            await dispatch_notify(
+                record=record,
+                guild=interaction.guild,
+                bot_client=interaction.client,
+            )
 
             if answer.startswith("Error contacting local LLM"):  # 終止問答
                 await interaction.followup.send("AI 罷工了捏 _(:з」∠)\_", ephemeral=True)
@@ -372,13 +405,12 @@ def register(bot: commands.Bot):
             await interaction.followup.send(reply)
         except Exception as e:
             logger.error(f"Error in answer_book: {e}", exc_info=True)
-            # 發錯誤通知信
-            if GMAIL_SEND_TO:
-                try:
-                    msg_id = send_error_notify(e, record, GMAIL_SEND_TO)
-                    logger.info(f"Error notify sent, messageId={msg_id}")
-                except Exception as mail_err:
-                    logger.error(f"無法發送錯誤電子郵件: {mail_err}", exc_info=True)
+            await dispatch_notify(
+                record=record,
+                guild=interaction.guild,
+                bot_client=interaction.client,
+                error=e,
+            )
             await interaction.followup.send(f"發生錯誤：{e}", ephemeral=True)
 
     @bot.tree.command(name="deepfaker", description=f"DeepFaker 偽裝成指定用戶發送訊息，有一定機率會爆炸")
@@ -463,12 +495,12 @@ def register(bot: commands.Bot):
         subject = f"【SERN Notify】{user_id} 在 {str(channel.name)} 使用了 deepfaker 偽裝成 {fake_username} {tag}！"
 
         # 發信通知
-        if GMAIL_SEND_TO:
-            try:
-                msg_id = send_deepfaker_notify(record, GMAIL_SEND_TO, subject)
-                logger.info(f"SERN deepfaker result sent, messageId={msg_id}")
-            except Exception as e:
-                logger.error(f"發信失敗：{e}")
+        await dispatch_notify(
+            record=record,
+            guild=interaction.guild,
+            bot_client=interaction.client,
+            deepfaker_subject=subject,
+        )
 
         await interaction.followup.send(result_message, ephemeral=True)
 
@@ -482,6 +514,7 @@ def register(bot: commands.Bot):
 
         await interaction.response.defer(ephemeral=False)  # 改以webhook處理回答，不需要此行效果
         TZ_8 = timezone(timedelta(hours=8))
+        record = {}
         try:
             messages = []
             async for msg in channel.history(limit=50, oldest_first=False):
@@ -524,13 +557,11 @@ def register(bot: commands.Bot):
             }
             insert_summary(record)
 
-            # 發信通知
-            if GMAIL_SEND_TO:
-                try:
-                    msg_id = send_sarn_notify(record, GMAIL_SEND_TO)
-                    logger.info(f"SERN Notify sent, messageId={msg_id}")
-                except Exception as e:
-                    logger.error(f"發信失敗：{e}")
+            await dispatch_notify(
+                record=record,
+                guild=interaction.guild,
+                bot_client=interaction.client,
+            )
 
             if answer.startswith("Error contacting local LLM"):  # 終止問答
                 await interaction.followup.send("Amadeus 罷工了捏 _(:з」∠)\_", ephemeral=True)
@@ -543,13 +574,12 @@ def register(bot: commands.Bot):
 
         except Exception as e:
             logger.error(f"Error in answer_book: {e}", exc_info=True)
-            # 發錯誤通知信
-            if GMAIL_SEND_TO:
-                try:
-                    msg_id = send_error_notify(e, record, GMAIL_SEND_TO)
-                    logger.info(f"Error notify sent, messageId={msg_id}")
-                except Exception as mail_err:
-                    logger.error(f"無法發送錯誤電子郵件: {mail_err}", exc_info=True)
+            await dispatch_notify(
+                record=record,
+                guild=interaction.guild,
+                bot_client=interaction.client,
+                error=e,
+            )
             await interaction.followup.send(f"發生錯誤：{e}", ephemeral=True)
 
     async def send_as_amadeus(channel: discord.TextChannel, content: str):

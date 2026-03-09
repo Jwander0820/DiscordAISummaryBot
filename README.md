@@ -30,6 +30,12 @@ WORLDLINE_ADMIN_IDS=114514,1919
 # Discord GUILD (伺服器) ID，用於限制指令範圍或快速更新指令
 DISCORD_GUILD_ID=114514
 
+# 通知轉發設定（將 log 同步轉發到 Discord 指定頻道）
+# 必填：目標頻道 ID
+DISCORD_NOTIFY_FORWARD_CHANNEL_ID=123456789012345678
+# 選填：若要固定轉發到特定伺服器，設定目標伺服器 ID
+DISCORD_NOTIFY_FORWARD_GUILD_ID=114514
+
 # 資料庫種類，可設為 "sqlite" 或 "postgres"
 DB_TYPE=sqlite
 
