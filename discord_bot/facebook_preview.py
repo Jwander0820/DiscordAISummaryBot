@@ -11,7 +11,8 @@ from urllib.parse import urlparse, urlunparse
 import aiohttp
 import discord
 from bs4 import BeautifulSoup
-from discord.errors import Forbidden, HTTPException, InteractionResponded, NotFound
+from discord.errors import HTTPException, InteractionResponded, NotFound
+from .preview_sender import cleanup_source_message, send_preview_as_author
 
 logger = logging.getLogger("discord_digest_bot")
 
@@ -44,9 +45,10 @@ class FacebookPreview:
 
 
 class DeleteFacebookPreviewView(discord.ui.View):
-    def __init__(self, *, timeout: Optional[float] = 3600) -> None:
+    def __init__(self, *, original_url: str, timeout: Optional[float] = 3600) -> None:
         super().__init__(timeout=timeout)
         self.message: Optional[discord.Message] = None
+        self.add_item(discord.ui.Button(label="原連結", style=discord.ButtonStyle.link, url=original_url))
 
     @discord.ui.button(label="", style=discord.ButtonStyle.gray, emoji="🗑️")
     async def delete_button(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:  # pragma: no cover
@@ -291,7 +293,7 @@ async def handle_facebook_in_message(message: discord.Message) -> bool:
             url,
         )
         preview = await build_facebook_preview(url, reupload_image=True, max_images=4, allow_video_upload=True)
-        view = DeleteFacebookPreviewView()
+        view = DeleteFacebookPreviewView(original_url=url)
         reply_kwargs = {
             "embed": preview.embed,
             "mention_author": False,
@@ -302,13 +304,16 @@ async def handle_facebook_in_message(message: discord.Message) -> bool:
         if preview.extra_text:
             reply_kwargs["content"] = preview.extra_text
 
-        sent = await message.reply(**reply_kwargs)
+        sent = await send_preview_as_author(
+            message,
+            content=reply_kwargs.get("content"),
+            embed=reply_kwargs.get("embed"),
+            files=reply_kwargs.get("files"),
+            view=reply_kwargs.get("view"),
+        )
         view.message = sent
 
-        try:
-            await message.edit(suppress=True)
-        except (Forbidden, HTTPException):
-            pass
+        await cleanup_source_message(message, platform="Facebook", url=url)
 
         return True
     except Exception as exc:

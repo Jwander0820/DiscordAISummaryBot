@@ -21,6 +21,7 @@ import io
 import logging
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
+from urllib.parse import urlparse, urlunparse
 from dotenv import load_dotenv
 
 import aiohttp
@@ -29,6 +30,7 @@ from discord.errors import HTTPException, InteractionResponded, NotFound
 
 # 你已有的抓取器
 from .threads_fetch import fetch_threads_post
+from .preview_sender import cleanup_source_message, send_preview_as_author
 
 
 THREADS_URL_RE = re.compile(
@@ -60,8 +62,10 @@ class PreviewResult:
 class DeletePreviewView(discord.ui.View):
     """提供刪除 Threads 預覽訊息的按鈕。"""
 
-    def __init__(self, *, timeout: Optional[float] = 3600) -> None:
+    def __init__(self, *, original_url: str, timeout: Optional[float] = 3600) -> None:
         super().__init__(timeout=timeout)
+        self.message: Optional[discord.Message] = None
+        self.add_item(discord.ui.Button(label="原連結", style=discord.ButtonStyle.link, url=original_url))
 
     @discord.ui.button(label="", style=discord.ButtonStyle.gray, emoji="🗑️")
     async def delete_button(
@@ -102,6 +106,12 @@ class DeletePreviewView(discord.ui.View):
 
 # --- URL 擷取 ---
 
+def _sanitize_threads_url(url: str) -> str:
+    clean = url.rstrip(").,>")
+    parsed = urlparse(clean)
+    path = parsed.path.rstrip("/")
+    return urlunparse((parsed.scheme or "https", parsed.netloc, path, "", "", ""))
+
 def extract_threads_urls(content: str) -> List[str]:
     """
     從原始訊息內容中擷取 Threads 貼文 URL 清單
@@ -114,7 +124,7 @@ def extract_threads_urls(content: str) -> List[str]:
     # 正規化去重
     seen, out = set(), []
     for u in urls:
-        u = u.rstrip(").,>")  # 常見標點尾巴
+        u = _sanitize_threads_url(u)
         if u not in seen:
             seen.add(u)
             out.append(u)
@@ -234,7 +244,7 @@ async def handle_threads_in_message(message: discord.Message) -> bool:
         logger.info(f"{message.author.nick or message.author.global_name} 在 {message.channel.name} 貼了url {url}")
         preview = await build_threads_preview(url, reupload_image=True, allow_video_upload=False)
 
-        view = DeletePreviewView()
+        view = DeletePreviewView(original_url=url)
         reply_kwargs = {
             "embed": preview.embed,
             "view": view,
@@ -244,7 +254,17 @@ async def handle_threads_in_message(message: discord.Message) -> bool:
             reply_kwargs["content"] = preview.extra_text
         if preview.files:
             reply_kwargs["files"] = preview.files
-        await message.reply(**reply_kwargs)
+        sent = await send_preview_as_author(
+            message,
+            content=reply_kwargs.get("content"),
+            embed=reply_kwargs.get("embed"),
+            files=reply_kwargs.get("files"),
+            view=reply_kwargs.get("view"),
+        )
+        view.message = sent
+
+        await cleanup_source_message(message, platform="Threads", url=url)
+
         return True
     except Exception as e:
         logger.error(e, exc_info=True)

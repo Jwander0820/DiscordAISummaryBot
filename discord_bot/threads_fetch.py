@@ -10,7 +10,6 @@ import html
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
 from urllib.parse import urlparse, urlunparse, urlencode
-from playwright.sync_api import sync_playwright
 
 # =============== 配置 ===============
 REQUEST_TIMEOUT = 15
@@ -81,8 +80,14 @@ def _browser_args_from_env() -> list[str]:
     return args
 
 
+def _strip_tracking_query(url: str) -> str:
+    parsed = urlparse(url.rstrip(").,>"))
+    path = parsed.path.rstrip("/")
+    return urlunparse((parsed.scheme or "https", parsed.netloc, path, "", "", ""))
+
+
 def build_candidate_urls(url: str) -> list[str]:
-    p = urlparse(url)
+    p = urlparse(_strip_tracking_query(url))
     if p.scheme not in ("http", "https"):
         p = p._replace(scheme="https")
 
@@ -104,9 +109,10 @@ def build_candidate_urls(url: str) -> list[str]:
 
 
 def _normalize(url: str) -> str:
-    if not THREADS_RE.match(url):
+    clean_url = _strip_tracking_query(url)
+    if not THREADS_RE.match(clean_url):
         raise ValueError(f"不是 Threads 貼文 URL：{url}")
-    p = urlparse(url)
+    p = urlparse(clean_url)
     scheme = p.scheme or "https"
     path = p.path.rstrip("/")
     # 先強制 threads.net，加 hl=en 提升 meta 完整度
@@ -114,7 +120,7 @@ def _normalize(url: str) -> str:
 
 
 def _variants(url: str) -> List[str]:
-    p = urlparse(url)
+    p = urlparse(_strip_tracking_query(url))
     path = p.path.rstrip("/")
     out = []
     for host in ("threads.net", "threads.com"):
