@@ -81,7 +81,8 @@ def _browser_args_from_env() -> list[str]:
 
 
 def _strip_tracking_query(url: str) -> str:
-    parsed = urlparse(url.rstrip(").,>"))
+    # 連結包在 ||spoiler|| 時，regex 可能把結尾 || 一起吃進來
+    parsed = urlparse(url.rstrip(").,>|"))
     path = parsed.path.rstrip("/")
     return urlunparse((parsed.scheme or "https", parsed.netloc, path, "", "", ""))
 

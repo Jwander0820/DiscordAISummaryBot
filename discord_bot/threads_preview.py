@@ -19,6 +19,7 @@ import re
 import asyncio
 import io
 import logging
+import os
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
@@ -37,11 +38,29 @@ THREADS_URL_RE = re.compile(
     r"https?://(?:www\.)?threads\.(?:net|com)/@[^\s/]+/post/[A-Za-z0-9_\-]+",
     re.IGNORECASE,
 )
+SPOILER_BLOCK_RE = re.compile(r"\|\|(.+?)\|\|", re.DOTALL)
 
 # --- 小工具資料結構 ---
 
 load_dotenv()
 logger = logging.getLogger('discord_digest_bot')
+
+
+def _delete_view_timeout_from_env() -> Optional[float]:
+    # >0: 秒數；<=0 或 none/off: 無逾時（同一個 bot 進程內不會自動消失）
+    raw = os.getenv("SOCIAL_PREVIEW_DELETE_TIMEOUT_SECONDS", "0").strip().lower()
+    if raw in {"none", "off", "disable", "disabled"}:
+        return None
+    try:
+        timeout = float(raw)
+    except ValueError:
+        return None
+    if timeout <= 0:
+        return None
+    return timeout
+
+
+DELETE_VIEW_TIMEOUT = _delete_view_timeout_from_env()
 
 @dataclass
 class PreviewResult:
@@ -62,9 +81,10 @@ class PreviewResult:
 class DeletePreviewView(discord.ui.View):
     """提供刪除 Threads 預覽訊息的按鈕。"""
 
-    def __init__(self, *, original_url: str, timeout: Optional[float] = 3600) -> None:
+    def __init__(self, *, original_url: str, timeout: Optional[float] = DELETE_VIEW_TIMEOUT) -> None:
         super().__init__(timeout=timeout)
         self.message: Optional[discord.Message] = None
+        self.related_message_ids: List[int] = []
         self.add_item(discord.ui.Button(label="原連結", style=discord.ButtonStyle.link, url=original_url))
 
     @discord.ui.button(label="", style=discord.ButtonStyle.gray, emoji="🗑️")
@@ -90,6 +110,15 @@ class DeletePreviewView(discord.ui.View):
             )
             return
 
+        # 若有額外附件訊息，一併刪除，避免只刪到上方卡片
+        if channel and self.related_message_ids:
+            for message_id in list(self.related_message_ids):
+                try:
+                    related = await channel.fetch_message(message_id)
+                    await related.delete()
+                except (NotFound, HTTPException, AttributeError):
+                    continue
+
         logger.info(
             "Threads 預覽已刪除 "
             f"{deleter} 刪除了 {channel} 內的 Threads預覽對話",
@@ -107,7 +136,8 @@ class DeletePreviewView(discord.ui.View):
 # --- URL 擷取 ---
 
 def _sanitize_threads_url(url: str) -> str:
-    clean = url.rstrip(").,>")
+    # 連結包在 ||spoiler|| 時，regex 可能把結尾 || 一起吃進來
+    clean = url.rstrip(").,>|")
     parsed = urlparse(clean)
     path = parsed.path.rstrip("/")
     return urlunparse((parsed.scheme or "https", parsed.netloc, path, "", "", ""))
@@ -131,6 +161,44 @@ def extract_threads_urls(content: str) -> List[str]:
     return out
 
 
+def _is_threads_url_spoilered(content: str, url: str) -> bool:
+    if not content:
+        return False
+    for block in SPOILER_BLOCK_RE.findall(content):
+        if url in extract_threads_urls(block):
+            return True
+    return False
+
+
+def _spoiler_wrap(text: str) -> str:
+    if not text:
+        return text
+    return f"||{text}||"
+
+
+def _clone_files_as_spoiler(files: List[discord.File]) -> List[discord.File]:
+    cloned: List[discord.File] = []
+    for file in files:
+        try:
+            file.fp.seek(0)
+            data = file.fp.read()
+            file.fp.seek(0)
+            filename = file.filename
+            if filename.startswith("SPOILER_"):
+                filename = filename[len("SPOILER_"):]
+            cloned.append(
+                discord.File(
+                    io.BytesIO(data),
+                    filename=filename,
+                    spoiler=True,
+                    description=file.description,
+                )
+            )
+        except Exception:
+            cloned.append(file)
+    return cloned
+
+
 # --- 下載媒體 ---
 
 async def _download_bytes(session: aiohttp.ClientSession, url: str, timeout_sec: int = 20) -> Optional[bytes]:
@@ -148,7 +216,13 @@ async def _download_bytes(session: aiohttp.ClientSession, url: str, timeout_sec:
 
 # --- 建立預覽 ---
 
-async def build_threads_preview(url: str, *, reupload_image: bool = True, allow_video_upload: bool = False) -> PreviewResult:
+async def build_threads_preview(
+    url: str,
+    *,
+    reupload_image: bool = True,
+    allow_video_upload: bool = False,
+    spoiler: bool = False,
+) -> PreviewResult:
     """
     取得單一 Threads URL 的預覽結果（Embed + 附件）。
     :param url: Threads 貼文 URL
@@ -170,6 +244,8 @@ async def build_threads_preview(url: str, *, reupload_image: bool = True, allow_
         # 若抓到的 author_name 是預設 "Threads" 或空，就用 @username 當顯示
         author_display = f"@{post.author_username}" if post.author_username else "Threads"
     embed.set_author(name=author_display)
+    if spoiler:
+        embed.description = _spoiler_wrap(description)
 
     # 補時間（若你之後抓得到）
     # if post.created_at:
@@ -187,14 +263,17 @@ async def build_threads_preview(url: str, *, reupload_image: bool = True, allow_
                 data = await _download_bytes(sess, first_img)
             if data:
                 fname = "threads_image.jpg"  # 以實際 content-type 命名更好，可在 _download_bytes 補判斷
-                file = discord.File(io.BytesIO(data), filename=fname)
+                file = discord.File(io.BytesIO(data), filename=fname, spoiler=spoiler)
                 files.append(file)
-                embed.set_image(url=f"attachment://{fname}")
+                # 注意：spoiler=True 時 discord 可能改寫成 SPOILER_ 前綴，需用 file.filename
+                embed.set_image(url=f"attachment://{file.filename}")
             else:
                 # 下載失敗就直接熱鏈接
-                embed.set_image(url=first_img)
+                if not spoiler:
+                    embed.set_image(url=first_img)
         else:
-            embed.set_image(url=first_img)
+            if not spoiler:
+                embed.set_image(url=first_img)
 
     # --- 影片處理 ---
     video_urls = [m.url for m in (post.media or []) if m.type == "video"]
@@ -211,7 +290,7 @@ async def build_threads_preview(url: str, *, reupload_image: bool = True, allow_
                 data = await _download_bytes(sess, mp4s[0], timeout_sec=40)
             if data and len(data) < 20 * 1024 * 1024:  # 20MB 只是範例，依你的機器人等級調整
                 vname = "threads_video.mp4"
-                files.append(discord.File(io.BytesIO(data), filename=vname))
+                files.append(discord.File(io.BytesIO(data), filename=vname, spoiler=spoiler))
                 # Discord 無法把影片當 embed.image，直接上傳附件即可
             else:
                 extra_lines.append(f"影片（mp4）：{mp4s[0]}")
@@ -221,6 +300,8 @@ async def build_threads_preview(url: str, *, reupload_image: bool = True, allow_
             extra_lines.append(f"影片（HLS）：{u}")
 
     extra_text = "\n".join(extra_lines) if extra_lines else None
+    if spoiler and extra_text:
+        extra_text = _spoiler_wrap(extra_text)
     return PreviewResult(embed=embed, files=files, extra_text=extra_text)
 
 
@@ -242,7 +323,44 @@ async def handle_threads_in_message(message: discord.Message) -> bool:
     url = urls[0]
     try:
         logger.info(f"{message.author.nick or message.author.global_name} 在 {message.channel.name} 貼了url {url}")
-        preview = await build_threads_preview(url, reupload_image=True, allow_video_upload=False)
+        use_spoiler = _is_threads_url_spoilered(message.content or "", url)
+
+        if use_spoiler:
+            preview = await build_threads_preview(
+                url,
+                reupload_image=True,
+                allow_video_upload=True,
+                spoiler=False,
+            )
+
+            if preview.embed.description:
+                preview.embed.description = _spoiler_wrap(preview.embed.description)
+            preview.embed.set_image(url=None)
+            spoiler_content = _spoiler_wrap(preview.extra_text) if preview.extra_text else None
+
+            view = DeletePreviewView(original_url=url)
+            sent = await send_preview_as_author(
+                message,
+                content=spoiler_content,
+                embed=preview.embed,
+                view=view,
+            )
+            view.message = sent
+
+            if preview.files:
+                spoiler_files = _clone_files_as_spoiler(preview.files)
+                attachment_message = await send_preview_as_author(message, files=spoiler_files)
+                view.related_message_ids.append(attachment_message.id)
+
+            await cleanup_source_message(message, platform="Threads", url=url)
+            return True
+
+        preview = await build_threads_preview(
+            url,
+            reupload_image=True,
+            allow_video_upload=False,
+            spoiler=False,
+        )
 
         view = DeletePreviewView(original_url=url)
         reply_kwargs = {
