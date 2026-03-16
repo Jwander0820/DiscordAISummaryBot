@@ -164,6 +164,38 @@ def _append_media_unique(lst: List[ThreadsMedia], item: ThreadsMedia):
     return True
 
 
+def _safe_int(value: Any) -> Optional[int]:
+    try:
+        if value is None or value == "":
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _dimensions_from_url(url: str) -> tuple[Optional[int], Optional[int]]:
+    path = urlparse(url).path.lower()
+    match = re.search(r"(?:^|/)(?:[sp])?(?P<w>\d{2,4})x(?P<h>\d{2,4})(?:/|$)", path)
+    if not match:
+        return None, None
+    return _safe_int(match.group("w")), _safe_int(match.group("h"))
+
+
+def _is_probable_fallback_avatar(item: ThreadsMedia) -> bool:
+    if _is_probable_profile_image(item):
+        return True
+
+    width = _safe_int(item.width)
+    height = _safe_int(item.height)
+    if width is None or height is None:
+        width, height = _dimensions_from_url(item.url or "")
+
+    if width is None or height is None:
+        return False
+
+    return width == height and width <= 240
+
+
 def _first(*vals):
     for v in vals:
         if isinstance(v, str) and v.strip():
@@ -294,12 +326,15 @@ def _parse_html(url: str, html_text: str) -> ThreadsPost:
     if not post.author_name:
         post.author_name = _first(*metas(["og:site_name", "twitter:creator"]))
 
+    meta_image_width = _safe_int(_first(*metas(["og:image:width", "twitter:image:width"])))
+    meta_image_height = _safe_int(_first(*metas(["og:image:height", "twitter:image:height"])))
     for key in ["og:image", "og:image:url", "og:image:secure_url", "twitter:image", "twitter:image:src"]:
         for u in metas([key]):
-            # 純文字貼文常只會帶 fallback 縮圖；沒有明確媒體時不要把它當成貼文附圖
-            if post.text and not explicit_media_found:
+            candidate = ThreadsMedia("image", u, meta_image_width, meta_image_height)
+            # 純文字貼文有時只會帶作者頭像等 fallback 縮圖，這種情況直接略過
+            if post.text and not explicit_media_found and _is_probable_fallback_avatar(candidate):
                 continue
-            _append_media_unique(post.media, ThreadsMedia("image", u))
+            _append_media_unique(post.media, candidate)
     for key in ["og:video", "og:video:url", "og:video:secure_url", "twitter:player:stream"]:
         for u in metas([key]):
             mime = "application/vnd.apple.mpegurl" if u.endswith(".m3u8") else (
