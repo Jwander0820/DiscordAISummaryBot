@@ -155,12 +155,13 @@ def _is_probable_profile_image(item: ThreadsMedia) -> bool:
 
 def _append_media_unique(lst: List[ThreadsMedia], item: ThreadsMedia):
     if not item.url:
-        return
+        return False
     if _is_probable_profile_image(item):
-        return
+        return False
     if any(m.url == item.url for m in lst):
-        return
+        return False
     lst.append(item)
+    return True
 
 
 def _first(*vals):
@@ -187,6 +188,7 @@ def _parse_html(url: str, html_text: str) -> ThreadsPost:
 
     soup = BeautifulSoup(html_text, "html.parser")
     post = ThreadsPost(url=url)
+    explicit_media_found = False
 
     # 作者 @ 從 URL 推回
     try:
@@ -230,12 +232,22 @@ def _parse_html(url: str, html_text: str) -> ThreadsPost:
             if isinstance(imgs, list):
                 for im in imgs:
                     if isinstance(im, str):
-                        _append_media_unique(post.media, ThreadsMedia("image", im))
+                        if _append_media_unique(post.media, ThreadsMedia("image", im)):
+                            explicit_media_found = True
                     elif isinstance(im, dict):
                         u = im.get("url") or im.get("contentUrl") or im.get("thumbnailUrl")
                         if u:
-                            _append_media_unique(post.media, ThreadsMedia("image", u, im.get("width"), im.get("height"),
-                                                                          im.get("caption") or im.get("name")))
+                            if _append_media_unique(
+                                post.media,
+                                ThreadsMedia(
+                                    "image",
+                                    u,
+                                    im.get("width"),
+                                    im.get("height"),
+                                    im.get("caption") or im.get("name"),
+                                ),
+                            ):
+                                explicit_media_found = True
             # video
             vids = node.get("video")
             if isinstance(vids, dict):
@@ -245,7 +257,8 @@ def _parse_html(url: str, html_text: str) -> ThreadsPost:
                     if isinstance(v, dict):
                         u = v.get("contentUrl") or v.get("embedUrl") or v.get("url")
                         if u:
-                            _append_media_unique(post.media, ThreadsMedia("video", u, v.get("width"), v.get("height")))
+                            if _append_media_unique(post.media, ThreadsMedia("video", u, v.get("width"), v.get("height"))):
+                                explicit_media_found = True
 
     # __NEXT_DATA__ 或其他 script（某些版本會塞不同 id）
     next_node = soup.find("script", id="__NEXT_DATA__")
@@ -283,6 +296,9 @@ def _parse_html(url: str, html_text: str) -> ThreadsPost:
 
     for key in ["og:image", "og:image:url", "og:image:secure_url", "twitter:image", "twitter:image:src"]:
         for u in metas([key]):
+            # 純文字貼文常只會帶 fallback 縮圖；沒有明確媒體時不要把它當成貼文附圖
+            if post.text and not explicit_media_found:
+                continue
             _append_media_unique(post.media, ThreadsMedia("image", u))
     for key in ["og:video", "og:video:url", "og:video:secure_url", "twitter:player:stream"]:
         for u in metas([key]):
@@ -348,7 +364,7 @@ def _try_requests(url: str) -> ThreadsPost:
 
 
 # =============== oEmbed 後援（輕量） ===============
-def _try_oembed_fill(post: ThreadsPost):
+def _try_oembed_fill(post: ThreadsPost, *, allow_thumbnail: bool = True):
     import requests
 
     try:
@@ -361,7 +377,7 @@ def _try_oembed_fill(post: ThreadsPost):
             post.oembed_html = o.get("html")
             post.author_name = _first(post.author_name, o.get("author_name"))
             thumb = o.get("thumbnail_url")
-            if thumb:
+            if allow_thumbnail and thumb:
                 _append_media_unique(post.media, ThreadsMedia("image", thumb))
     except Exception:
         pass
@@ -418,7 +434,7 @@ def fetch_threads_post(url: str) -> ThreadsPost:
 
     # 2) 不足 → oEmbed 補資料（作者名、縮圖、嵌入 HTML）
     if (not post.text or not post.media):
-        _try_oembed_fill(post)
+        _try_oembed_fill(post, allow_thumbnail=not post.text and not post.media)
 
     # 3) 還是不夠 → Playwright 渲染（需要你安裝）
     if (not post.text and not post.media):
