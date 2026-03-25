@@ -196,6 +196,40 @@ def _is_probable_fallback_avatar(item: ThreadsMedia) -> bool:
     return width == height and width <= 240
 
 
+def _is_likely_content_image_meta(item: ThreadsMedia, *, meta_alt: Optional[str], twitter_card: Optional[str]) -> bool:
+    if item.type != "image":
+        return False
+    if _is_probable_fallback_avatar(item):
+        return False
+
+    url = (item.url or "").lower()
+    alt = (meta_alt or item.alt or "").lower()
+    card = (twitter_card or "").lower()
+
+    width = _safe_int(item.width)
+    height = _safe_int(item.height)
+    if width is None or height is None:
+        width, height = _dimensions_from_url(item.url or "")
+
+    # IG/Threads 實際內容圖常見於 scontent / vp 等路徑
+    if any(token in url for token in ["/scontent", "/vp/", "/e35/"]):
+        return True
+
+    # 明確的 large image 卡片通常不是頭像 fallback
+    if "summary_large_image" in card:
+        return True
+
+    # 若有 alt 且非頭像語意，偏向視為內容圖
+    if alt and not any(token in alt for token in ["profile picture", "頭像", "大頭照", "avatar"]):
+        return True
+
+    # 大尺寸圖片較可能是貼文內容，非 fallback avatar
+    if width is not None and height is not None and width >= 600 and height >= 600:
+        return True
+
+    return False
+
+
 def _first(*vals):
     for v in vals:
         if isinstance(v, str) and v.strip():
@@ -328,18 +362,36 @@ def _parse_html(url: str, html_text: str) -> ThreadsPost:
 
     meta_image_width = _safe_int(_first(*metas(["og:image:width", "twitter:image:width"])))
     meta_image_height = _safe_int(_first(*metas(["og:image:height", "twitter:image:height"])))
-    for key in ["og:image", "og:image:url", "og:image:secure_url", "twitter:image", "twitter:image:src"]:
-        for u in metas([key]):
-            candidate = ThreadsMedia("image", u, meta_image_width, meta_image_height)
-            # 純文字貼文有時只會帶作者頭像等 fallback 縮圖，這種情況直接略過
-            if post.text and not explicit_media_found and _is_probable_fallback_avatar(candidate):
-                continue
-            _append_media_unique(post.media, candidate)
+    meta_image_alt = _first(*metas(["og:image:alt", "twitter:image:alt"]))
+    twitter_card = _first(*metas(["twitter:card"]))
+
+    meta_video_urls = []
     for key in ["og:video", "og:video:url", "og:video:secure_url", "twitter:player:stream"]:
-        for u in metas([key]):
-            mime = "application/vnd.apple.mpegurl" if u.endswith(".m3u8") else (
-                "video/mp4" if u.endswith(".mp4") else None)
-            _append_media_unique(post.media, ThreadsMedia("video", u, mime=mime))
+        meta_video_urls.extend(metas([key]))
+
+    meta_image_urls = []
+    for key in ["og:image", "og:image:url", "og:image:secure_url", "twitter:image", "twitter:image:src"]:
+        meta_image_urls.extend(metas([key]))
+
+    seen_meta_images = set()
+    for u in meta_image_urls:
+        if u in seen_meta_images:
+            continue
+        seen_meta_images.add(u)
+        candidate = ThreadsMedia("image", u, meta_image_width, meta_image_height)
+        # 純文字貼文且沒有明確 media/video 時，只接受高機率為內容圖的 meta image
+        if post.text and not explicit_media_found and not meta_video_urls and not _is_likely_content_image_meta(
+            candidate,
+            meta_alt=meta_image_alt,
+            twitter_card=twitter_card,
+        ):
+            continue
+        _append_media_unique(post.media, candidate)
+
+    for u in meta_video_urls:
+        mime = "application/vnd.apple.mpegurl" if u.endswith(".m3u8") else (
+            "video/mp4" if u.endswith(".mp4") else None)
+        _append_media_unique(post.media, ThreadsMedia("video", u, mime=mime))
 
     if post.text:
         post.text = html.unescape(post.text).strip()
