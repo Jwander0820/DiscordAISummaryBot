@@ -63,23 +63,6 @@ class ThreadsPost:
 
 
 # =============== 小工具 ===============
-# --- 新增：從環境變數取得瀏覽器 args（預設必要時才加） ---
-def _browser_args_from_env() -> list[str]:
-    # 以逗號分隔，讓你完全自訂；未設定就回空
-    raw = os.getenv("THREADS_BROWSER_ARGS", "")
-    args = [a.strip() for a in raw.split(",") if a.strip()]
-    # 若設 THREADS_USE_NO_SANDBOX=1，注入常見兩個旗標
-    if os.getenv("THREADS_USE_NO_SANDBOX", "0") == "1":
-        # 去重：避免重覆加入
-        if "--no-sandbox" not in args:
-            args.append("--no-sandbox")
-        if "--disable-dev-shm-usage" not in args:
-            args.append("--disable-dev-shm-usage")
-
-    print(args)
-    return args
-
-
 def _strip_tracking_query(url: str) -> str:
     # 連結包在 ||spoiler|| 時，regex 可能把結尾 || 一起吃進來
     parsed = urlparse(url.rstrip(").,>|"))
@@ -141,9 +124,9 @@ def _is_probable_profile_image(item: ThreadsMedia) -> bool:
         return False
 
     url = (item.url or "").lower()
-    if any(token in url for token in ["profile_pic", "profile_media", "avatar"]):
+    if any(token in url for token in ["profile_pic", "profilepic", "profile_media", "avatar"]):
         return True
-    if re.search(r"/t51\.2885-19/", url):
+    if re.search(r"/t(?:\d+|51)\.(?:2885|82787)-19/", url):
         return True
 
     alt = (item.alt or "").lower()
@@ -181,6 +164,38 @@ def _dimensions_from_url(url: str) -> tuple[Optional[int], Optional[int]]:
     return _safe_int(match.group("w")), _safe_int(match.group("h"))
 
 
+def _best_src_from_srcset(srcset: str) -> Optional[str]:
+    best_url = None
+    best_width = -1
+    for raw in (srcset or "").split(","):
+        part = raw.strip()
+        if not part:
+            continue
+        pieces = part.split()
+        url = pieces[0].strip()
+        width = 0
+        if len(pieces) > 1 and pieces[1].endswith("w"):
+            width = _safe_int(pieces[1][:-1]) or 0
+        if best_url is None or width > best_width:
+            best_url = url
+            best_width = width
+    return best_url
+
+
+def _best_image_url_from_tag(tag: Any) -> Optional[str]:
+    for attr in ("srcset", "data-srcset"):
+        best = _best_src_from_srcset(tag.get(attr) or "")
+        if best:
+            return best
+
+    for attr in ("src", "data-src", "data-lazy-src", "data-image-src", "data-full-res-src"):
+        value = tag.get(attr)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    return None
+
+
 def _is_probable_fallback_avatar(item: ThreadsMedia) -> bool:
     if _is_probable_profile_image(item):
         return True
@@ -194,6 +209,22 @@ def _is_probable_fallback_avatar(item: ThreadsMedia) -> bool:
         return False
 
     return width == height and width <= 240
+
+
+def _has_only_fallback_media(items: List[ThreadsMedia]) -> bool:
+    if not items:
+        return False
+
+    saw_image = False
+    for item in items:
+        if item.type == "video":
+            return False
+        if item.type == "image":
+            saw_image = True
+            if not _is_probable_fallback_avatar(item):
+                return False
+
+    return saw_image
 
 
 def _first(*vals):
@@ -215,6 +246,103 @@ def _save_debug_html(name: str, text: str):
 
 
 # =============== 解析 ===============
+def _extract_dom_media(post: ThreadsPost, soup: Any) -> bool:
+    media_link_re = re.compile(r"/@[^/]+/post/[^/]+/media(?:[/?#]|$)")
+    found = False
+
+    for link in soup.find_all("a", href=True):
+        href = link.get("href") or ""
+        if not media_link_re.search(href):
+            continue
+
+        for img in link.find_all("img"):
+            media_url = _best_image_url_from_tag(img)
+            if not media_url:
+                continue
+
+            item = ThreadsMedia(
+                "image",
+                media_url,
+                _safe_int(img.get("width")),
+                _safe_int(img.get("height")),
+                img.get("alt"),
+            )
+            if _append_media_unique(post.media, item):
+                found = True
+
+        for video in link.find_all("video"):
+            video_url = video.get("src")
+            if isinstance(video_url, str) and video_url.strip():
+                if _append_media_unique(post.media, ThreadsMedia("video", video_url.strip())):
+                    found = True
+            for source in video.find_all("source"):
+                video_url = source.get("src")
+                if isinstance(video_url, str) and video_url.strip():
+                    mime = source.get("type")
+                    if _append_media_unique(post.media, ThreadsMedia("video", video_url.strip(), mime=mime)):
+                        found = True
+
+    return found
+
+
+def _looks_like_ui_text(text: str) -> bool:
+    normalized = re.sub(r"\s+", " ", text or "").strip()
+    if not normalized:
+        return True
+
+    if normalized.lower() in {"download", "instagram logo"}:
+        return True
+
+    if normalized in {"讚", "收回讚", "回覆", "轉發", "分享"}:
+        return True
+
+    if re.fullmatch(r"[\d\s/.,:]+", normalized):
+        return True
+
+    return False
+
+
+def _extract_dom_text(post: ThreadsPost, soup: Any) -> bool:
+    best_text = None
+    best_score = -1
+    author_tokens = {
+        token.lower()
+        for token in [post.author_username, post.author_name]
+        if isinstance(token, str) and token.strip()
+    }
+
+    for node in soup.select("span[dir='auto'] > span"):
+        text = re.sub(r"\s+", " ", node.get_text(" ", strip=True)).strip()
+        if _looks_like_ui_text(text):
+            continue
+        if text.lower().lstrip("@") in author_tokens:
+            continue
+
+        skip = False
+        for parent in node.parents:
+            name = getattr(parent, "name", None)
+            if name == "a":
+                skip = True
+                break
+            role = parent.get("role") if hasattr(parent, "get") else None
+            if isinstance(role, str) and role.lower() in {"button", "link"}:
+                skip = True
+                break
+        if skip:
+            continue
+
+        score = len(text)
+        if score > best_score:
+            best_text = text
+            best_score = score
+
+    if best_text:
+        post.text = best_text
+        return True
+
+    return False
+
+
 def _parse_html(url: str, html_text: str) -> ThreadsPost:
     from bs4 import BeautifulSoup
 
@@ -292,6 +420,12 @@ def _parse_html(url: str, html_text: str) -> ThreadsPost:
                             if _append_media_unique(post.media, ThreadsMedia("video", u, v.get("width"), v.get("height"))):
                                 explicit_media_found = True
 
+    if _extract_dom_media(post, soup):
+        explicit_media_found = True
+
+    if not post.text:
+        _extract_dom_text(post, soup)
+
     # __NEXT_DATA__ 或其他 script（某些版本會塞不同 id）
     next_node = soup.find("script", id="__NEXT_DATA__")
     if next_node and next_node.string and not post.text:
@@ -328,13 +462,20 @@ def _parse_html(url: str, html_text: str) -> ThreadsPost:
 
     meta_image_width = _safe_int(_first(*metas(["og:image:width", "twitter:image:width"])))
     meta_image_height = _safe_int(_first(*metas(["og:image:height", "twitter:image:height"])))
+    skipped_meta_images = 0
     for key in ["og:image", "og:image:url", "og:image:secure_url", "twitter:image", "twitter:image:src"]:
         for u in metas([key]):
             candidate = ThreadsMedia("image", u, meta_image_width, meta_image_height)
+            if _is_probable_profile_image(candidate):
+                skipped_meta_images += 1
+                continue
             # 純文字貼文有時只會帶作者頭像等 fallback 縮圖，這種情況直接略過
             if post.text and not explicit_media_found and _is_probable_fallback_avatar(candidate):
+                skipped_meta_images += 1
                 continue
             _append_media_unique(post.media, candidate)
+    if skipped_meta_images:
+        post.debug["skipped_meta_image_count"] = skipped_meta_images
     for key in ["og:video", "og:video:url", "og:video:secure_url", "twitter:player:stream"]:
         for u in metas([key]):
             mime = "application/vnd.apple.mpegurl" if u.endswith(".m3u8") else (
@@ -417,51 +558,6 @@ def _try_oembed_fill(post: ThreadsPost, *, allow_thumbnail: bool = True):
     except Exception:
         pass
 
-
-# =============== Playwright 後援（重型） ===============
-def _try_playwright(url: str) -> ThreadsPost:
-    """
-    需要：
-      pip install playwright
-      playwright install
-    """
-    try:
-        from playwright.sync_api import sync_playwright
-    except Exception as e:
-        # 未安裝就直接回空
-        p = ThreadsPost(url=_normalize(url))
-        p.debug["playwright"] = f"not available: {e}"
-        return p
-
-    browser_args = _browser_args_from_env()
-    with sync_playwright() as pw:
-        browser = pw.chromium.launch(
-            headless=True,
-            args=browser_args  # <= 關鍵
-        )
-        context = browser.new_context(
-            user_agent=UA_MOBILE,  # 你的 UA
-            locale="en-US",
-        )
-        page = context.new_page()
-        target = _normalize(url)
-        try:
-            page.goto(target, wait_until="networkidle", timeout=30000)
-            page.wait_for_timeout(2000)
-            html_dump = page.content()
-            final_url = page.url
-        except Exception as e:
-            context.close(); browser.close()
-            p = ThreadsPost(url=_normalize(url))
-            p.debug["playwright"] = f"goto failed: {e}"
-            return p
-
-        context.close()
-        browser.close()
-
-    return _parse_html(final_url, html_dump)
-
-
 # =============== 外部主函數 ===============
 def fetch_threads_post(url: str) -> ThreadsPost:
     # 1) requests（多 UA、多網域變體）
@@ -471,16 +567,10 @@ def fetch_threads_post(url: str) -> ThreadsPost:
     if (not post.text or not post.media):
         _try_oembed_fill(post, allow_thumbnail=not post.text and not post.media)
 
-    # 3) 還是不夠 → Playwright 渲染（需要你安裝）
-    if (not post.text and not post.media):
-        rendered = _try_playwright(url)
-        # 合併（以渲染結果為主）
-        if rendered.text:
-            post.text = rendered.text
-        if rendered.media:
-            for m in rendered.media:
-                _append_media_unique(post.media, m)
-        post.debug.update(rendered.debug or {})
+    # 3) 完全關閉 Playwright，僅保留 requests / oEmbed 結果。
+    # 若最後只剩可疑 fallback/avatar 圖，直接清掉，避免純文字貼文誤帶頭貼。
+    if _has_only_fallback_media(post.media):
+        post.media = []
 
     return post
 
