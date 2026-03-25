@@ -328,18 +328,33 @@ def _parse_html(url: str, html_text: str) -> ThreadsPost:
 
     meta_image_width = _safe_int(_first(*metas(["og:image:width", "twitter:image:width"])))
     meta_image_height = _safe_int(_first(*metas(["og:image:height", "twitter:image:height"])))
-    for key in ["og:image", "og:image:url", "og:image:secure_url", "twitter:image", "twitter:image:src"]:
-        for u in metas([key]):
-            candidate = ThreadsMedia("image", u, meta_image_width, meta_image_height)
-            # 純文字貼文有時只會帶作者頭像等 fallback 縮圖，這種情況直接略過
-            if post.text and not explicit_media_found and _is_probable_fallback_avatar(candidate):
-                continue
-            _append_media_unique(post.media, candidate)
+
+    meta_video_urls = []
     for key in ["og:video", "og:video:url", "og:video:secure_url", "twitter:player:stream"]:
-        for u in metas([key]):
-            mime = "application/vnd.apple.mpegurl" if u.endswith(".m3u8") else (
-                "video/mp4" if u.endswith(".mp4") else None)
-            _append_media_unique(post.media, ThreadsMedia("video", u, mime=mime))
+        meta_video_urls.extend(metas([key]))
+
+    meta_image_urls = []
+    for key in ["og:image", "og:image:url", "og:image:secure_url", "twitter:image", "twitter:image:src"]:
+        meta_image_urls.extend(metas([key]))
+
+    seen_meta_images = set()
+    for u in meta_image_urls:
+        if u in seen_meta_images:
+            continue
+        seen_meta_images.add(u)
+        candidate = ThreadsMedia("image", u, meta_image_width, meta_image_height)
+        # 純文字貼文若沒有偵測到明確圖片/影片，meta image 常只是作者頭像 fallback，這種情況直接略過
+        if post.text and not explicit_media_found and not meta_video_urls:
+            continue
+        # 純文字貼文有時只會帶作者頭像等 fallback 縮圖，這種情況直接略過
+        if post.text and not explicit_media_found and _is_probable_fallback_avatar(candidate):
+            continue
+        _append_media_unique(post.media, candidate)
+
+    for u in meta_video_urls:
+        mime = "application/vnd.apple.mpegurl" if u.endswith(".m3u8") else (
+            "video/mp4" if u.endswith(".mp4") else None)
+        _append_media_unique(post.media, ThreadsMedia("video", u, mime=mime))
 
     if post.text:
         post.text = html.unescape(post.text).strip()
