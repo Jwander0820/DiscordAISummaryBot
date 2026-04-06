@@ -73,6 +73,8 @@ class PreviewResult:
     embed: discord.Embed
     files: List[discord.File]
     extra_text: Optional[str] = None
+    video_url: Optional[str] = None
+    inline_video_url: Optional[str] = None
 
 
 # --- Discord 互動元件 ---
@@ -81,11 +83,19 @@ class PreviewResult:
 class DeletePreviewView(discord.ui.View):
     """提供刪除 Threads 預覽訊息的按鈕。"""
 
-    def __init__(self, *, original_url: str, timeout: Optional[float] = DELETE_VIEW_TIMEOUT) -> None:
+    def __init__(
+        self,
+        *,
+        original_url: str,
+        video_url: Optional[str] = None,
+        timeout: Optional[float] = DELETE_VIEW_TIMEOUT,
+    ) -> None:
         super().__init__(timeout=timeout)
         self.message: Optional[discord.Message] = None
         self.related_message_ids: List[int] = []
         self.add_item(discord.ui.Button(label="原連結", style=discord.ButtonStyle.link, url=original_url))
+        if video_url:
+            self.add_item(discord.ui.Button(label="影片直連", style=discord.ButtonStyle.link, url=video_url))
 
     @discord.ui.button(label="", style=discord.ButtonStyle.gray, emoji="🗑️")
     async def delete_button(
@@ -199,6 +209,10 @@ def _clone_files_as_spoiler(files: List[discord.File]) -> List[discord.File]:
     return cloned
 
 
+def _format_masked_link(label: str, url: str) -> str:
+    return f"[{label}]({url})"
+
+
 # --- 下載媒體 ---
 
 async def _download_bytes(session: aiohttp.ClientSession, url: str, timeout_sec: int = 20) -> Optional[bytes]:
@@ -279,6 +293,8 @@ async def build_threads_preview(
     video_urls = [m.url for m in (post.media or []) if m.type == "video"]
 
     extra_lines = []
+    primary_video_url: Optional[str] = None
+    inline_video_url: Optional[str] = None
     if video_urls:
         # m3u8 不適合上傳，直接貼連結；mp4 若小可選擇嘗試下載上傳
         mp4s = [u for u in video_urls if u.lower().endswith(".mp4")]
@@ -293,16 +309,32 @@ async def build_threads_preview(
                 files.append(discord.File(io.BytesIO(data), filename=vname, spoiler=spoiler))
                 # Discord 無法把影片當 embed.image，直接上傳附件即可
             else:
-                extra_lines.append(f"影片（mp4）：{mp4s[0]}")
+                primary_video_url = mp4s[0]
+        elif mp4s:
+            primary_video_url = mp4s[0]
 
-        # HLS 一律貼連結
-        for u in hls:
-            extra_lines.append(f"影片（HLS）：{u}")
+        if not primary_video_url and hls:
+            primary_video_url = hls[0]
+
+        # 讓第一支影片網址出現在同一則卡片訊息中，交給 Discord 自動轉成影片預覽。
+        inline_video_url = primary_video_url
+
+        # 額外影片只提供簡短遮罩連結，避免訊息出現超長 CDN URL。
+        for index, u in enumerate(mp4s[1:], start=2 if primary_video_url and primary_video_url == mp4s[0] else 1):
+            extra_lines.append(_format_masked_link(f"影片 {index}", u))
+        for index, u in enumerate(hls[1:] if primary_video_url and hls and primary_video_url == hls[0] else hls, start=1):
+            extra_lines.append(_format_masked_link(f"HLS {index}", u))
 
     extra_text = "\n".join(extra_lines) if extra_lines else None
     if spoiler and extra_text:
         extra_text = _spoiler_wrap(extra_text)
-    return PreviewResult(embed=embed, files=files, extra_text=extra_text)
+    return PreviewResult(
+        embed=embed,
+        files=files,
+        extra_text=extra_text,
+        video_url=primary_video_url,
+        inline_video_url=inline_video_url,
+    )
 
 
 # --- Discord 事件整合（範例） ---
@@ -338,7 +370,7 @@ async def handle_threads_in_message(message: discord.Message) -> bool:
             preview.embed.set_image(url=None)
             spoiler_content = _spoiler_wrap(preview.extra_text) if preview.extra_text else None
 
-            view = DeletePreviewView(original_url=url)
+            view = DeletePreviewView(original_url=url, video_url=preview.video_url)
             sent = await send_preview_as_author(
                 message,
                 content=spoiler_content,
@@ -362,14 +394,19 @@ async def handle_threads_in_message(message: discord.Message) -> bool:
             spoiler=False,
         )
 
-        view = DeletePreviewView(original_url=url)
+        view = DeletePreviewView(original_url=url, video_url=preview.video_url)
         reply_kwargs = {
             "embed": preview.embed,
             "view": view,
             "mention_author": False,
         }
+        content_lines = []
+        if preview.inline_video_url:
+            content_lines.append(preview.inline_video_url)
         if preview.extra_text:
-            reply_kwargs["content"] = preview.extra_text
+            content_lines.append(preview.extra_text)
+        if content_lines:
+            reply_kwargs["content"] = "\n".join(content_lines)
         if preview.files:
             reply_kwargs["files"] = preview.files
         sent = await send_preview_as_author(

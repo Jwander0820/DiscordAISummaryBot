@@ -196,6 +196,19 @@ def _best_image_url_from_tag(tag: Any) -> Optional[str]:
     return None
 
 
+def _video_mime_from_url(url: str) -> Optional[str]:
+    path = urlparse(url or "").path.lower()
+    if path.endswith(".m3u8"):
+        return "application/vnd.apple.mpegurl"
+    if path.endswith(".mp4"):
+        return "video/mp4"
+    if path.endswith(".webm"):
+        return "video/webm"
+    if path.endswith(".mov"):
+        return "video/quicktime"
+    return None
+
+
 def _is_probable_fallback_avatar(item: ThreadsMedia) -> bool:
     if _is_probable_profile_image(item):
         return True
@@ -273,14 +286,24 @@ def _extract_dom_media(post: ThreadsPost, soup: Any) -> bool:
         for video in link.find_all("video"):
             video_url = video.get("src")
             if isinstance(video_url, str) and video_url.strip():
-                if _append_media_unique(post.media, ThreadsMedia("video", video_url.strip())):
+                mime = _video_mime_from_url(video_url.strip())
+                if _append_media_unique(post.media, ThreadsMedia("video", video_url.strip(), mime=mime)):
                     found = True
             for source in video.find_all("source"):
                 video_url = source.get("src")
                 if isinstance(video_url, str) and video_url.strip():
-                    mime = source.get("type")
+                    mime = source.get("type") or _video_mime_from_url(video_url.strip())
                     if _append_media_unique(post.media, ThreadsMedia("video", video_url.strip(), mime=mime)):
                         found = True
+
+    # Threads/Instagram 的影片有時不會出現在 <video> 標籤，而是藏在下載按鈕的 src。
+    for node in soup.find_all(src=True):
+        media_url = (node.get("src") or "").strip()
+        mime = _video_mime_from_url(media_url)
+        if not mime:
+            continue
+        if _append_media_unique(post.media, ThreadsMedia("video", media_url, mime=mime)):
+            found = True
 
     return found
 
@@ -290,10 +313,21 @@ def _looks_like_ui_text(text: str) -> bool:
     if not normalized:
         return True
 
-    if normalized.lower() in {"download", "instagram logo"}:
+    lowered = normalized.lower()
+    if lowered in {
+        "download",
+        "instagram logo",
+        "translate",
+        "threads terms",
+        "privacy policy",
+        "cookies policy",
+    }:
         return True
 
     if normalized in {"讚", "收回讚", "回覆", "轉發", "分享"}:
+        return True
+
+    if re.fullmatch(r"[©(]?\s*\d{4}\s*[)]?", normalized):
         return True
 
     if re.fullmatch(r"[\d\s/.,:]+", normalized):
@@ -302,42 +336,188 @@ def _looks_like_ui_text(text: str) -> bool:
     return False
 
 
+def _node_name(node: Any) -> Optional[str]:
+    return getattr(node, "name", None)
+
+
+def _node_get(node: Any, key: str, default: Any = None) -> Any:
+    getter = getattr(node, "get", None)
+    if callable(getter):
+        return getter(key, default)
+    return default
+
+
+def _node_parents(node: Any) -> List[Any]:
+    parents = getattr(node, "parents", None)
+    if parents is None:
+        return []
+    return list(parents)
+
+
+def _node_children(node: Any) -> List[Any]:
+    children = getattr(node, "children", None)
+    if children is None:
+        return []
+    return list(children)
+
+
+def _node_text_for_filter(node: Any) -> str:
+    get_text = getattr(node, "get_text", None)
+    if callable(get_text):
+        return get_text(" ", strip=True)
+    return ""
+
+
+def _attr_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value.lower()
+    if isinstance(value, (list, tuple, set)):
+        return " ".join(str(v).lower() for v in value)
+    return str(value).lower() if value is not None else ""
+
+
+def _strip_spoiler_markup(text: str) -> str:
+    return (text or "").replace("||", "")
+
+
+def _has_interactive_ancestor(node: Any) -> bool:
+    interactive_roles = {"button", "link"}
+    interactive_labels = {"video player", "instagram logo"}
+
+    for parent in _node_parents(node):
+        if _is_interactive_node(parent, interactive_roles, interactive_labels):
+            return True
+
+    return False
+
+
+def _is_interactive_node(
+    node: Any,
+    interactive_roles: Optional[set[str]] = None,
+    interactive_labels: Optional[set[str]] = None,
+) -> bool:
+    if interactive_roles is None:
+        interactive_roles = {"button", "link"}
+    if interactive_labels is None:
+        interactive_labels = {"video player", "instagram logo"}
+
+    name = _node_name(node)
+    if name in {"a", "button"}:
+        return True
+
+    role = _attr_text(_node_get(node, "role"))
+    if role in interactive_roles:
+        return True
+
+    aria_label = _attr_text(_node_get(node, "aria-label"))
+    if aria_label in interactive_labels:
+        return True
+
+    return False
+
+
+def _has_dir_auto_ancestor(node: Any) -> bool:
+    for parent in _node_parents(node):
+        if _attr_text(_node_get(parent, "dir")) == "auto":
+            return True
+    return False
+
+
+def _is_probable_spoiler_node(node: Any) -> bool:
+    spoiler_tokens = [
+        "spoiler",
+        "劇透",
+        "防雷",
+        "tap to reveal",
+        "show spoiler",
+        "reveal",
+    ]
+    style_tokens = ["blur", "mask", "filter", "hidden"]
+
+    for attr in ("aria-label", "title", "data-testid", "data-visualcompletion", "class"):
+        value = _attr_text(_node_get(node, attr))
+        if value and any(token in value for token in spoiler_tokens):
+            return True
+
+    style = _attr_text(_node_get(node, "style"))
+    if style and any(token in style for token in style_tokens):
+        return True
+
+    return False
+
+
+def _render_text_subtree(node: Any, *, spoiler_active: bool = False) -> str:
+    if isinstance(node, str):
+        return html.unescape(node)
+
+    name = _node_name(node)
+    if name == "br":
+        return "\n"
+    if _is_interactive_node(node):
+        return ""
+
+    node_is_spoiler = _is_probable_spoiler_node(node)
+    next_spoiler_state = spoiler_active or node_is_spoiler
+
+    parts: List[str] = []
+    for child in _node_children(node):
+        rendered = _render_text_subtree(child, spoiler_active=next_spoiler_state)
+        if rendered:
+            parts.append(rendered)
+
+    text = "".join(parts)
+    text = text.replace("\xa0", " ")
+    text = re.sub(r"[ \t\r\f\v]+", " ", text)
+    text = re.sub(r" *\n *", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+
+    if node_is_spoiler and not spoiler_active:
+        stripped = text.strip()
+        if stripped:
+            return f"||{stripped}||"
+        return ""
+
+    return text
+
+
 def _extract_dom_text(post: ThreadsPost, soup: Any) -> bool:
-    best_text = None
-    best_score = -1
     author_tokens = {
         token.lower()
         for token in [post.author_username, post.author_name]
         if isinstance(token, str) and token.strip()
     }
+    text_blocks: List[str] = []
+    seen_plain_blocks = set()
 
-    for node in soup.select("span[dir='auto'] > span"):
-        text = re.sub(r"\s+", " ", node.get_text(" ", strip=True)).strip()
-        if _looks_like_ui_text(text):
+    for node in soup.select("span[dir='auto']"):
+        if _has_dir_auto_ancestor(node):
             continue
-        if text.lower().lstrip("@") in author_tokens:
-            continue
-
-        skip = False
-        for parent in node.parents:
-            name = getattr(parent, "name", None)
-            if name == "a":
-                skip = True
-                break
-            role = parent.get("role") if hasattr(parent, "get") else None
-            if isinstance(role, str) and role.lower() in {"button", "link"}:
-                skip = True
-                break
-        if skip:
+        if _has_interactive_ancestor(node):
             continue
 
-        score = len(text)
-        if score > best_score:
-            best_text = text
-            best_score = score
+        filter_text = re.sub(r"\s+", " ", _node_text_for_filter(node)).strip()
+        plain_filter_text = _strip_spoiler_markup(filter_text)
+        if _looks_like_ui_text(plain_filter_text):
+            continue
+        if plain_filter_text.lower().lstrip("@") in author_tokens:
+            continue
 
-    if best_text:
-        post.text = best_text
+        rendered = _render_text_subtree(node).strip()
+        rendered = re.sub(r" *\n *", "\n", rendered)
+        rendered = re.sub(r"\n{3,}", "\n\n", rendered)
+        plain_rendered = re.sub(r"\s+", " ", _strip_spoiler_markup(rendered)).strip()
+        if not plain_rendered or _looks_like_ui_text(plain_rendered):
+            continue
+        if plain_rendered.lower().lstrip("@") in author_tokens:
+            continue
+        if plain_rendered in seen_plain_blocks:
+            continue
+
+        seen_plain_blocks.add(plain_rendered)
+        text_blocks.append(rendered)
+
+    if text_blocks:
+        post.text = "\n".join(text_blocks)
         return True
 
     return False
@@ -478,8 +658,7 @@ def _parse_html(url: str, html_text: str) -> ThreadsPost:
         post.debug["skipped_meta_image_count"] = skipped_meta_images
     for key in ["og:video", "og:video:url", "og:video:secure_url", "twitter:player:stream"]:
         for u in metas([key]):
-            mime = "application/vnd.apple.mpegurl" if u.endswith(".m3u8") else (
-                "video/mp4" if u.endswith(".mp4") else None)
+            mime = _video_mime_from_url(u)
             _append_media_unique(post.media, ThreadsMedia("video", u, mime=mime))
 
     if post.text:
