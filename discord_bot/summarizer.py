@@ -7,7 +7,7 @@ from .gemini_client import gemini_model
 from .gemini_client import role_model
 from .database import insert_summary
 from .local_llm_client import resolve_prompt
-from .gmail_utils import send_sarn_notify, send_error_notify
+from .gmail_utils import gmail_notify_enabled, send_sarn_notify, send_error_notify
 from .notify_forwarder import forward_notify_to_channel
 from dotenv import load_dotenv
 
@@ -86,7 +86,7 @@ async def summarize_messages(messages: list[discord.Message], prompt_scope: str 
         # 發信通知
         email_sent = None
         msg_id = None
-        if GMAIL_SEND_TO:
+        if gmail_notify_enabled() and GMAIL_SEND_TO:
             try:
                 msg_id = send_sarn_notify(record, GMAIL_SEND_TO)
                 logger.info(f"SERN Notify sent, messageId={msg_id}")
@@ -94,6 +94,8 @@ async def summarize_messages(messages: list[discord.Message], prompt_scope: str 
             except Exception as e:
                 logger.error(f"發信失敗：{e}")
                 email_sent = False
+        elif not gmail_notify_enabled():
+            logger.info("Gmail notify disabled by GMAIL_NOTIFY_ENABLED; skipped success email.")
 
         await forward_notify_to_channel(
             record=record,
@@ -110,7 +112,7 @@ async def summarize_messages(messages: list[discord.Message], prompt_scope: str 
         # 發錯誤通知信
         email_sent = None
         msg_id = None
-        if GMAIL_SEND_TO:
+        if gmail_notify_enabled() and GMAIL_SEND_TO:
             try:
                 msg_id = send_error_notify(e, record, GMAIL_SEND_TO)
                 logger.info(f"Error notify sent, messageId={msg_id}")
@@ -118,6 +120,8 @@ async def summarize_messages(messages: list[discord.Message], prompt_scope: str 
             except Exception as mail_err:
                 logger.error(f"Failed to send error email: {mail_err}", exc_info=True)
                 email_sent = False
+        elif not gmail_notify_enabled():
+            logger.info("Gmail notify disabled by GMAIL_NOTIFY_ENABLED; skipped error email.")
         await forward_notify_to_channel(
             record=record,
             guild=messages[0].guild if messages else None,

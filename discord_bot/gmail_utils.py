@@ -25,6 +25,11 @@ load_dotenv()
 SCOPES = ['https://www.googleapis.com/auth/gmail.send']
 
 
+def gmail_notify_enabled() -> bool:
+    raw = os.getenv("GMAIL_NOTIFY_ENABLED", "1").strip().lower()
+    return raw not in {"0", "false", "no", "off", "disable", "disabled"}
+
+
 def generate_gmail_env_tokens(port: int = 8080, env_path: str = '.env') -> None:
     """
     第一次執行，啟動 OAuth 認證：

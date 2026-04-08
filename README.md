@@ -19,6 +19,9 @@ DISABLE_DISCORD_BOT=0
 # PostgreSQL 連線字串（Render 範例）
 DATABASE_URL=postgresql://user:password@host:port/database
 
+# PostgreSQL summaries 備份成本地 SQLite 的輸出路徑
+LOCAL_BACKUP_SQLITE_PATH=postgres_summaries_backup.db
+
 # 本地 LLM 的 API 端點（選用）
 LOCAL_LLM_URL=http://127.0.0.1:9453
 
@@ -43,6 +46,7 @@ DB_TYPE=sqlite
 ROLE_MODE=local
 
 # Gmail 設定
+GMAIL_NOTIFY_ENABLED=1
 GMAIL_CLIENT_SECRET_PATH=client_secret.json
 GMAIL_CLIENT_ID=gmail_client_id
 GMAIL_CLIENT_SECRET=gmail_client_secret
@@ -60,4 +64,9 @@ THREADS_USE_NO_SANDBOX=1
 # DEEPFAKER_FAILURE_NOTICE 使用"|"分隔，隨機選擇台詞
 DEEPFAKER_FAILURE_NOTICE='台詞A|台詞B' 
 DEEPFAKER_FAILURE_PROB=浮點數0~1
+
+# BotLog
+DISCORD_NOTIFY_FORWARD_CHANNEL_ID=12345678
+DISCORD_NOTIFY_FORWARD_GUILD_ID=12345678
+
 ```

@@ -17,7 +17,7 @@ from .database import insert_summary
 from .local_llm_client import query_local_llm
 from .gemini_client import gemini_model
 from .gemini_client import role_model
-from .gmail_utils import send_sarn_notify, send_error_notify, send_deepfaker_notify
+from .gmail_utils import gmail_notify_enabled, send_sarn_notify, send_error_notify, send_deepfaker_notify
 from .notify_forwarder import forward_notify_to_channel
 from dotenv import load_dotenv
 
@@ -40,7 +40,7 @@ async def dispatch_notify(
     msg_id = None
     notify_type = "error" if error else "success"
     try:
-        if GMAIL_SEND_TO:
+        if gmail_notify_enabled() and GMAIL_SEND_TO:
             if error:
                 msg_id = send_error_notify(error, record, GMAIL_SEND_TO)
             elif deepfaker_subject:
@@ -48,6 +48,8 @@ async def dispatch_notify(
             else:
                 msg_id = send_sarn_notify(record, GMAIL_SEND_TO)
             email_sent = True
+        elif not gmail_notify_enabled():
+            logger.info("Gmail notify disabled by GMAIL_NOTIFY_ENABLED; skipped command email.")
     except Exception as notify_err:
         email_sent = False
         logger.error(f"發信失敗：{notify_err}", exc_info=True)
