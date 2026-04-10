@@ -14,6 +14,7 @@ import discord
 from bs4 import BeautifulSoup
 from discord.errors import HTTPException, InteractionResponded, NotFound
 from .preview_sender import cleanup_source_message, send_preview_as_author
+from .social_preview_text import extract_message_commentary
 
 logger = logging.getLogger("discord_digest_bot")
 
@@ -154,6 +155,15 @@ def _clone_files_as_spoiler(files: List[discord.File]) -> List[discord.File]:
         except Exception:
             cloned.append(file)
     return cloned
+
+
+def _extract_facebook_commentary(content: str, url: str) -> str:
+    return extract_message_commentary(
+        content,
+        target_url=url,
+        url_pattern=FACEBOOK_URL_RE,
+        sanitize_url=lambda raw_url: raw_url.rstrip(").,>|"),
+    )
 
 
 def _build_candidate_urls(url: str) -> List[str]:
@@ -362,6 +372,7 @@ async def handle_facebook_in_message(message: discord.Message) -> bool:
     url = urls[0]
     try:
         use_spoiler = _is_facebook_url_spoilered(message.content or "", url)
+        user_commentary = _extract_facebook_commentary(message.content or "", url)
         logger.info(
             "%s 在 %s 貼了 Facebook url %s",
             message.author.nick or message.author.global_name,
@@ -384,7 +395,12 @@ async def handle_facebook_in_message(message: discord.Message) -> bool:
                 fallback_text = preview.embed.title or "Facebook 貼文"
                 preview.embed.description = _spoiler_wrap(fallback_text)
             preview.embed.set_image(url=None)
-            spoiler_content = _spoiler_wrap(preview.extra_text) if preview.extra_text else None
+            content_lines = []
+            if user_commentary:
+                content_lines.append(user_commentary)
+            if preview.extra_text:
+                content_lines.append(_spoiler_wrap(preview.extra_text))
+            spoiler_content = "\n".join(content_lines) if content_lines else None
 
             view = DeleteFacebookPreviewView(original_url=url)
             sent = await send_preview_as_author(
@@ -416,10 +432,15 @@ async def handle_facebook_in_message(message: discord.Message) -> bool:
             "mention_author": False,
             "view": view,
         }
+        content_lines = []
+        if user_commentary:
+            content_lines.append(user_commentary)
         if preview.files:
             reply_kwargs["files"] = preview.files
         if preview.extra_text:
-            reply_kwargs["content"] = preview.extra_text
+            content_lines.append(preview.extra_text)
+        if content_lines:
+            reply_kwargs["content"] = "\n".join(content_lines)
 
         sent = await send_preview_as_author(
             message,

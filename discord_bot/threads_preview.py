@@ -32,6 +32,7 @@ from discord.errors import HTTPException, InteractionResponded, NotFound
 # 你已有的抓取器
 from .threads_fetch import fetch_threads_post
 from .preview_sender import cleanup_source_message, send_preview_as_author
+from .social_preview_text import extract_message_commentary
 
 
 THREADS_URL_RE = re.compile(
@@ -213,6 +214,15 @@ def _format_masked_link(label: str, url: str) -> str:
     return f"[{label}]({url})"
 
 
+def _extract_threads_commentary(content: str, url: str) -> str:
+    return extract_message_commentary(
+        content,
+        target_url=url,
+        url_pattern=THREADS_URL_RE,
+        sanitize_url=_sanitize_threads_url,
+    )
+
+
 # --- 下載媒體 ---
 
 async def _download_bytes(session: aiohttp.ClientSession, url: str, timeout_sec: int = 20) -> Optional[bytes]:
@@ -356,6 +366,7 @@ async def handle_threads_in_message(message: discord.Message) -> bool:
     try:
         logger.info(f"{message.author.nick or message.author.global_name} 在 {message.channel.name} 貼了url {url}")
         use_spoiler = _is_threads_url_spoilered(message.content or "", url)
+        user_commentary = _extract_threads_commentary(message.content or "", url)
 
         if use_spoiler:
             preview = await build_threads_preview(
@@ -368,7 +379,12 @@ async def handle_threads_in_message(message: discord.Message) -> bool:
             if preview.embed.description:
                 preview.embed.description = _spoiler_wrap(preview.embed.description)
             preview.embed.set_image(url=None)
-            spoiler_content = _spoiler_wrap(preview.extra_text) if preview.extra_text else None
+            content_lines = []
+            if user_commentary:
+                content_lines.append(user_commentary)
+            if preview.extra_text:
+                content_lines.append(_spoiler_wrap(preview.extra_text))
+            spoiler_content = "\n".join(content_lines) if content_lines else None
 
             view = DeletePreviewView(original_url=url, video_url=preview.video_url)
             sent = await send_preview_as_author(
@@ -401,6 +417,8 @@ async def handle_threads_in_message(message: discord.Message) -> bool:
             "mention_author": False,
         }
         content_lines = []
+        if user_commentary:
+            content_lines.append(user_commentary)
         if preview.inline_video_url:
             content_lines.append(preview.inline_video_url)
         if preview.extra_text:
