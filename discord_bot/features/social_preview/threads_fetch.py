@@ -64,6 +64,7 @@ class ThreadsPost:
 
 # =============== 小工具 ===============
 def _strip_tracking_query(url: str) -> str:
+    """移除 Threads 分享連結常見的 tracking query 與尾端標點。"""
     # 連結包在 ||spoiler|| 時，regex 可能把結尾 || 一起吃進來
     parsed = urlparse(url.rstrip(").,>|"))
     path = parsed.path.rstrip("/")
@@ -71,6 +72,7 @@ def _strip_tracking_query(url: str) -> str:
 
 
 def build_candidate_urls(url: str) -> list[str]:
+    """建立多種 host/query 版本，增加 requests 抓取成功率。"""
     p = urlparse(_strip_tracking_query(url))
     if p.scheme not in ("http", "https"):
         p = p._replace(scheme="https")
@@ -93,6 +95,7 @@ def build_candidate_urls(url: str) -> list[str]:
 
 
 def _normalize(url: str) -> str:
+    """把輸入 URL 正規化成 parser 內部使用的標準 Threads URL。"""
     clean_url = _strip_tracking_query(url)
     if not THREADS_RE.match(clean_url):
         raise ValueError(f"不是 Threads 貼文 URL：{url}")
@@ -104,6 +107,7 @@ def _normalize(url: str) -> str:
 
 
 def _variants(url: str) -> List[str]:
+    """回傳不同 Threads host 與 `hl=en` 組合的變體網址。"""
     p = urlparse(_strip_tracking_query(url))
     path = p.path.rstrip("/")
     out = []
@@ -120,6 +124,7 @@ def _variants(url: str) -> List[str]:
 
 
 def _is_probable_profile_image(item: ThreadsMedia) -> bool:
+    """根據 URL/alt 判斷媒體是否比較像頭像而非貼文圖片。"""
     if item.type != "image":
         return False
 
@@ -137,6 +142,7 @@ def _is_probable_profile_image(item: ThreadsMedia) -> bool:
 
 
 def _append_media_unique(lst: List[ThreadsMedia], item: ThreadsMedia):
+    """避免重複或頭像型圖片混入媒體列表。"""
     if not item.url:
         return False
     if _is_probable_profile_image(item):
@@ -148,6 +154,7 @@ def _append_media_unique(lst: List[ThreadsMedia], item: ThreadsMedia):
 
 
 def _safe_int(value: Any) -> Optional[int]:
+    """寬鬆地把值轉成 int；失敗回 `None`。"""
     try:
         if value is None or value == "":
             return None
@@ -157,6 +164,7 @@ def _safe_int(value: Any) -> Optional[int]:
 
 
 def _dimensions_from_url(url: str) -> tuple[Optional[int], Optional[int]]:
+    """嘗試從 CDN 路徑中的 `1080x1350` 片段推回圖片尺寸。"""
     path = urlparse(url).path.lower()
     match = re.search(r"(?:^|/)(?:[sp])?(?P<w>\d{2,4})x(?P<h>\d{2,4})(?:/|$)", path)
     if not match:
@@ -165,6 +173,7 @@ def _dimensions_from_url(url: str) -> tuple[Optional[int], Optional[int]]:
 
 
 def _best_src_from_srcset(srcset: str) -> Optional[str]:
+    """從 srcset 中選出最大寬度的圖片來源。"""
     best_url = None
     best_width = -1
     for raw in (srcset or "").split(","):
@@ -183,6 +192,7 @@ def _best_src_from_srcset(srcset: str) -> Optional[str]:
 
 
 def _best_image_url_from_tag(tag: Any) -> Optional[str]:
+    """從 img 標籤常見屬性裡找出最適合的圖片網址。"""
     for attr in ("srcset", "data-srcset"):
         best = _best_src_from_srcset(tag.get(attr) or "")
         if best:
@@ -197,6 +207,7 @@ def _best_image_url_from_tag(tag: Any) -> Optional[str]:
 
 
 def _video_mime_from_url(url: str) -> Optional[str]:
+    """用副檔名粗略推斷影片 MIME type。"""
     path = urlparse(url or "").path.lower()
     if path.endswith(".m3u8"):
         return "application/vnd.apple.mpegurl"
@@ -210,6 +221,7 @@ def _video_mime_from_url(url: str) -> Optional[str]:
 
 
 def _is_probable_fallback_avatar(item: ThreadsMedia) -> bool:
+    """判斷圖片是否屬於縮略頭像/預設 fallback，而非正文媒體。"""
     if _is_probable_profile_image(item):
         return True
 
@@ -225,6 +237,7 @@ def _is_probable_fallback_avatar(item: ThreadsMedia) -> bool:
 
 
 def _has_only_fallback_media(items: List[ThreadsMedia]) -> bool:
+    """檢查媒體列表是否只剩頭像型 fallback 圖片。"""
     if not items:
         return False
 
@@ -241,6 +254,7 @@ def _has_only_fallback_media(items: List[ThreadsMedia]) -> bool:
 
 
 def _first(*vals):
+    """回傳第一個非空白字串。"""
     for v in vals:
         if isinstance(v, str) and v.strip():
             return v.strip()
@@ -248,6 +262,7 @@ def _first(*vals):
 
 
 def _save_debug_html(name: str, text: str):
+    """把最後抓到的 HTML 存到本地，方便手動追 parser 問題。"""
     try:
         os.makedirs("./_threads_debug", exist_ok=True)
         path = f"./_threads_debug/{name}"
@@ -260,6 +275,7 @@ def _save_debug_html(name: str, text: str):
 
 # =============== 解析 ===============
 def _extract_dom_media(post: ThreadsPost, soup: Any) -> bool:
+    """從已渲染 DOM 找圖片/影片，補足 JSON-LD 缺漏。"""
     media_link_re = re.compile(r"/@[^/]+/post/[^/]+/media(?:[/?#]|$)")
     found = False
 
@@ -309,6 +325,7 @@ def _extract_dom_media(post: ThreadsPost, soup: Any) -> bool:
 
 
 def _looks_like_ui_text(text: str) -> bool:
+    """過濾按鈕、footer、統計數字等非正文文字。"""
     normalized = re.sub(r"\s+", " ", text or "").strip()
     if not normalized:
         return True
@@ -337,10 +354,12 @@ def _looks_like_ui_text(text: str) -> bool:
 
 
 def _node_name(node: Any) -> Optional[str]:
+    """抽象化 DOM node.name 讀取，讓 fake DOM 也能共用。"""
     return getattr(node, "name", None)
 
 
 def _node_get(node: Any, key: str, default: Any = None) -> Any:
+    """安全讀取節點屬性。"""
     getter = getattr(node, "get", None)
     if callable(getter):
         return getter(key, default)
@@ -348,6 +367,7 @@ def _node_get(node: Any, key: str, default: Any = None) -> Any:
 
 
 def _node_parents(node: Any) -> List[Any]:
+    """安全取得父節點串列。"""
     parents = getattr(node, "parents", None)
     if parents is None:
         return []
@@ -355,6 +375,7 @@ def _node_parents(node: Any) -> List[Any]:
 
 
 def _node_children(node: Any) -> List[Any]:
+    """安全取得子節點串列。"""
     children = getattr(node, "children", None)
     if children is None:
         return []
@@ -362,6 +383,7 @@ def _node_children(node: Any) -> List[Any]:
 
 
 def _node_text_for_filter(node: Any) -> str:
+    """讀出節點純文字，供 UI 文案過濾用。"""
     get_text = getattr(node, "get_text", None)
     if callable(get_text):
         return get_text(" ", strip=True)
@@ -369,6 +391,7 @@ def _node_text_for_filter(node: Any) -> str:
 
 
 def _attr_text(value: Any) -> str:
+    """把屬性值轉成方便比對的 lowercase 字串。"""
     if isinstance(value, str):
         return value.lower()
     if isinstance(value, (list, tuple, set)):
@@ -377,10 +400,12 @@ def _attr_text(value: Any) -> str:
 
 
 def _strip_spoiler_markup(text: str) -> str:
+    """移除 Discord spoiler 標記，方便做純文字比對。"""
     return (text or "").replace("||", "")
 
 
 def _has_interactive_ancestor(node: Any) -> bool:
+    """判斷節點是否位於按鈕/連結等互動元素內。"""
     interactive_roles = {"button", "link"}
     interactive_labels = {"video player", "instagram logo"}
 
@@ -396,6 +421,7 @@ def _is_interactive_node(
     interactive_roles: Optional[set[str]] = None,
     interactive_labels: Optional[set[str]] = None,
 ) -> bool:
+    """判斷節點本身是否像按鈕、連結或影片播放器控制元件。"""
     if interactive_roles is None:
         interactive_roles = {"button", "link"}
     if interactive_labels is None:
@@ -417,6 +443,7 @@ def _is_interactive_node(
 
 
 def _has_dir_auto_ancestor(node: Any) -> bool:
+    """避免巢狀 `dir=auto` 節點造成正文重複擷取。"""
     for parent in _node_parents(node):
         if _attr_text(_node_get(parent, "dir")) == "auto":
             return True
@@ -424,6 +451,7 @@ def _has_dir_auto_ancestor(node: Any) -> bool:
 
 
 def _is_probable_spoiler_node(node: Any) -> bool:
+    """用 aria/class/style 啟發式判斷節點是否帶 spoiler 效果。"""
     spoiler_tokens = [
         "spoiler",
         "劇透",
@@ -447,6 +475,7 @@ def _is_probable_spoiler_node(node: Any) -> bool:
 
 
 def _render_text_subtree(node: Any, *, spoiler_active: bool = False) -> str:
+    """遞迴渲染正文子樹，保留換行並盡量維持 spoiler 區塊。"""
     if isinstance(node, str):
         return html.unescape(node)
 
@@ -481,6 +510,7 @@ def _render_text_subtree(node: Any, *, spoiler_active: bool = False) -> str:
 
 
 def _extract_dom_text(post: ThreadsPost, soup: Any) -> bool:
+    """從 DOM 的 `span[dir='auto']` 區塊抽出貼文正文。"""
     author_tokens = {
         token.lower()
         for token in [post.author_username, post.author_name]
@@ -524,6 +554,7 @@ def _extract_dom_text(post: ThreadsPost, soup: Any) -> bool:
 
 
 def _parse_html(url: str, html_text: str) -> ThreadsPost:
+    """整合 JSON-LD、meta 與 DOM heuristic，產生完整 `ThreadsPost`。"""
     from bs4 import BeautifulSoup
 
     soup = BeautifulSoup(html_text, "html.parser")
@@ -669,6 +700,7 @@ def _parse_html(url: str, html_text: str) -> ThreadsPost:
 
 # =============== 抓取（requests） ===============
 def _try_requests(url: str) -> ThreadsPost:
+    """用 requests + 多 UA/host 重試抓 Threads 頁面。"""
     import requests
 
     headers_list = [
@@ -720,6 +752,7 @@ def _try_requests(url: str) -> ThreadsPost:
 
 # =============== oEmbed 後援（輕量） ===============
 def _try_oembed_fill(post: ThreadsPost, *, allow_thumbnail: bool = True):
+    """當正文或媒體不足時，用 oEmbed 補作者名稱與縮圖。"""
     import requests
 
     try:
@@ -739,6 +772,7 @@ def _try_oembed_fill(post: ThreadsPost, *, allow_thumbnail: bool = True):
 
 # =============== 外部主函數 ===============
 def fetch_threads_post(url: str) -> ThreadsPost:
+    """Threads parser 對外主入口。"""
     # 1) requests（多 UA、多網域變體）
     post = _try_requests(url)
 
@@ -756,6 +790,7 @@ def fetch_threads_post(url: str) -> ThreadsPost:
 
 # =============== CLI ===============
 def main():
+    """本地 CLI 除錯入口，輸出解析結果 JSON。"""
     if len(sys.argv) < 2:
         print("用法：python threads_fetch.py <Threads貼文URL>")
         sys.exit(1)

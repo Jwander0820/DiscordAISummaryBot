@@ -17,6 +17,7 @@ BUILTIN_BASIC_PROMPT = ("你是 Discord 群組裡一位毒舌但熟悉的朋友�
 
 # --- 載入 JSON prompt，如果失敗就用內建 basic ---
 def resolve_prompt(role: str) -> str:
+    """依角色名稱載入 system prompt；失敗時退回內建 basic prompt。"""
     try:
         with open(PROMPT_PATH, encoding='utf-8') as f:
             prompts = json.load(f)
@@ -33,7 +34,7 @@ def resolve_prompt(role: str) -> str:
 
 
 async def query_local_llm(prompt: str, role: str = "basic") -> str:
-    """發送 prompt 給本地 LLM 並回傳回應文字。"""
+    """呼叫本地 OpenAI-compatible LLM API，回傳解析後的文字結果。"""
     url = POST_URL.rstrip('/')
     role_prompt = resolve_prompt(role)
     try:

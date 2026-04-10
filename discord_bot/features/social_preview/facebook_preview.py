@@ -13,13 +13,14 @@ import aiohttp
 import discord
 from bs4 import BeautifulSoup
 from discord.errors import HTTPException, InteractionResponded, NotFound
-from .preview_sender import cleanup_source_message, send_preview_as_author
-from .social_preview_text import extract_message_commentary
+from .sender import cleanup_source_message, send_preview_as_author
+from .text import extract_message_commentary
 
 logger = logging.getLogger("discord_digest_bot")
 
 
 def _delete_view_timeout_from_env() -> Optional[float]:
+    """讀取預覽刪除按鈕的逾時秒數設定。"""
     # >0: 秒數；<=0 或 none/off: 無逾時（同一個 bot 進程內不會自動消失）
     raw = os.getenv("SOCIAL_PREVIEW_DELETE_TIMEOUT_SECONDS", "0").strip().lower()
     if raw in {"none", "off", "disable", "disabled"}:
@@ -65,6 +66,8 @@ class FacebookPreview:
 
 
 class DeleteFacebookPreviewView(discord.ui.View):
+    """Facebook 預覽卡片的刪除控制元件。"""
+
     def __init__(self, *, original_url: str, timeout: Optional[float] = DELETE_VIEW_TIMEOUT) -> None:
         super().__init__(timeout=timeout)
         self.message: Optional[discord.Message] = None
@@ -73,6 +76,7 @@ class DeleteFacebookPreviewView(discord.ui.View):
 
     @discord.ui.button(label="", style=discord.ButtonStyle.gray, emoji="🗑️")
     async def delete_button(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:  # pragma: no cover
+        """刪除主預覽訊息與相關附件訊息。"""
         try:
             await interaction.response.send_message("預覽已刪除。", ephemeral=True)
         except InteractionResponded:
@@ -93,6 +97,7 @@ class DeleteFacebookPreviewView(discord.ui.View):
                     continue
 
     async def on_timeout(self) -> None:  # pragma: no cover
+        """逾時後移除操作按鈕，避免使用者誤觸失效控制項。"""
         if self.message:
             try:
                 await self.message.edit(view=None)
@@ -101,6 +106,7 @@ class DeleteFacebookPreviewView(discord.ui.View):
 
 
 def extract_facebook_urls(content: str) -> List[str]:
+    """從訊息中擷取 Facebook/fb.watch 連結並去重。"""
     if not content:
         return []
 
@@ -120,6 +126,7 @@ def extract_facebook_urls(content: str) -> List[str]:
 
 
 def _is_facebook_url_spoilered(content: str, url: str) -> bool:
+    """判斷指定 Facebook URL 是否被 Discord spoiler 包住。"""
     if not content:
         return False
     for block in SPOILER_BLOCK_RE.findall(content):
@@ -129,12 +136,14 @@ def _is_facebook_url_spoilered(content: str, url: str) -> bool:
 
 
 def _spoiler_wrap(text: str) -> str:
+    """用 Discord spoiler 標記包住文字。"""
     if not text:
         return text
     return f"||{text}||"
 
 
 def _clone_files_as_spoiler(files: List[discord.File]) -> List[discord.File]:
+    """複製附件並強制設為 spoiler，避免重用原檔案指標出錯。"""
     cloned: List[discord.File] = []
     for file in files:
         try:
@@ -158,6 +167,7 @@ def _clone_files_as_spoiler(files: List[discord.File]) -> List[discord.File]:
 
 
 def _extract_facebook_commentary(content: str, url: str) -> str:
+    """抽掉目標 URL 後，保留使用者原本的前後評論文字。"""
     return extract_message_commentary(
         content,
         target_url=url,
@@ -167,6 +177,7 @@ def _extract_facebook_commentary(content: str, url: str) -> str:
 
 
 def _build_candidate_urls(url: str) -> List[str]:
+    """建立 Facebook 多 host 版本，提升 Open Graph 抓取成功率。"""
     parsed = urlparse(url)
     if not parsed.scheme:
         parsed = parsed._replace(scheme="https")
@@ -189,6 +200,7 @@ def _build_candidate_urls(url: str) -> List[str]:
 
 
 async def _download_bytes(session: aiohttp.ClientSession, url: str, timeout_sec: int = 20) -> Optional[bytes]:
+    """下載圖片或影片位元組，失敗時回傳 `None`。"""
     try:
         async with session.get(url, timeout=timeout_sec) as resp:
             if resp.status == 200:
@@ -199,6 +211,7 @@ async def _download_bytes(session: aiohttp.ClientSession, url: str, timeout_sec:
 
 
 def _meta_contents(soup: BeautifulSoup, key: str) -> List[str]:
+    """收集指定 meta key 的內容，支援 property/name 並去重。"""
     values: List[str] = []
     for tag in soup.find_all("meta", attrs={"property": key}):
         content = tag.get("content")
@@ -219,6 +232,7 @@ def _meta_contents(soup: BeautifulSoup, key: str) -> List[str]:
 
 
 def _extract_og_data(html: str) -> Tuple[str, str, List[str], List[str]]:
+    """從 HTML 抽出 Facebook Open Graph 標題、描述、圖片與影片網址。"""
     soup = BeautifulSoup(html, "html.parser")
     title = (_meta_contents(soup, "og:title") or ["Facebook 貼文"])[0]
     description = (_meta_contents(soup, "og:description") or [""])[0]
@@ -241,6 +255,7 @@ def _extract_og_data(html: str) -> Tuple[str, str, List[str], List[str]]:
 
 
 async def _fetch_html_with_aiohttp(url: str) -> Tuple[str, str, List[str], List[str], Optional[str], int]:
+    """先用 aiohttp 抓 OG 資料，若失敗再交給上層 fallback。"""
     last_error = "Facebook 頁面讀取失敗"
     last_status = 0
 
@@ -266,6 +281,7 @@ async def _fetch_html_with_aiohttp(url: str) -> Tuple[str, str, List[str], List[
 
 
 def _fetch_og_with_playwright_sync(url: str) -> Tuple[str, str, List[str], List[str], str]:
+    """用 Playwright 取得動態渲染後的 Facebook Open Graph 資料。"""
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as pw:
@@ -285,6 +301,7 @@ def _fetch_og_with_playwright_sync(url: str) -> Tuple[str, str, List[str], List[
 
 
 async def _fetch_og_data(url: str) -> Tuple[str, str, List[str], List[str], str]:
+    """統一 Facebook OG 抓取入口，依序嘗試 aiohttp 與 Playwright。"""
     try:
         title, description, image_urls, video_urls, final_url, status = await _fetch_html_with_aiohttp(url)
         if status >= 400 and not (title or description or image_urls or video_urls):
@@ -309,6 +326,7 @@ async def build_facebook_preview(
     allow_video_upload: bool = True,
     spoiler: bool = False,
 ) -> FacebookPreview:
+    """把 Facebook 網址轉成 Discord embed、附件與補充文字。"""
     title, description, image_urls, video_urls, final_url = await _fetch_og_data(url)
 
     embed = discord.Embed(
@@ -362,6 +380,7 @@ async def build_facebook_preview(
 
 
 async def handle_facebook_in_message(message: discord.Message) -> bool:
+    """Facebook 訊息處理主流程，負責留言保留、preview 代發與原文清理。"""
     if message.author.bot:
         return False
 

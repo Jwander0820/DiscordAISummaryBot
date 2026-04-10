@@ -15,7 +15,10 @@ def extract_message_commentary(
     url_pattern: Pattern[str],
     sanitize_url: Callable[[str], str],
 ) -> str:
-    """Remove the handled URL from a message while keeping the user's commentary."""
+    """移除本次要處理的 URL，保留使用者原本的評論文字。
+
+    這層會特別避開把 Threads/Facebook tracking query 殘留成評論的一部分。
+    """
     if not content or not target_url:
         return ""
 
@@ -31,7 +34,9 @@ def extract_message_commentary(
         start, end = match.span()
         segments.append(content[cursor:start])
         if raw_url.startswith(target_url):
-            segments.append(raw_url[len(target_url):])
+            suffix = raw_url[len(target_url):]
+            if _should_preserve_url_suffix(suffix):
+                segments.append(suffix)
         cursor = end
         removed_any = True
 
@@ -40,6 +45,17 @@ def extract_message_commentary(
 
     segments.append(content[cursor:])
     return _normalize_commentary("".join(segments))
+
+
+def _should_preserve_url_suffix(suffix: str) -> bool:
+    # 只保留純標點尾碼，像 `,`、`!`；`?xmt=...` 這類 query/fragment 一律丟掉。
+    if not suffix:
+        return False
+    if any(char.isalnum() for char in suffix):
+        return False
+    if any(char in "?&=#/%" for char in suffix):
+        return False
+    return True
 
 
 def _normalize_commentary(text: str) -> str:

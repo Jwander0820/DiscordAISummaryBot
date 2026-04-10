@@ -1,4 +1,3 @@
-from datetime import datetime
 import logging
 import os
 
@@ -6,100 +5,64 @@ import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 
-# Load environment variables before importing modules that depend on them
 load_dotenv()
 
-from . import database
-from .gemini_client import gemini_model
-from .commands import register as register_commands
-from .threads_preview import handle_threads_in_message, extract_threads_urls
-from .facebook_preview import handle_facebook_in_message, extract_facebook_urls
-logger = logging.getLogger('discord_digest_bot')
-logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s:%(levelname)s:%(name)s: %(message)s')
-formatter = logging.Formatter('%(asctime)s:%(levelname)s:%(name)s: %(message)s')
-file_handler = logging.FileHandler('bot.log', encoding='utf-8')
-file_handler.setLevel(logging.INFO)
-file_handler.setFormatter(formatter)
-logger.addHandler(file_handler)
+from .core.bootstrap import bootstrap_application
 
-# Initialize database
-database.init_db()
+bootstrap_application()
 
-GUILD_ID = os.environ.get('DISCORD_GUILD_ID')  # 把這裡換成你的伺服器 ID
+from .cogs import load_extensions
+from .integrations.gemini_client import gemini_model
 
-BOT_TOKEN = os.environ.get('DISCORD_BOT_TOKEN')
+logger = logging.getLogger("discord_digest_bot")
+
+BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN")
 if not BOT_TOKEN:
     logger.error("DISCORD_BOT_TOKEN environment variable not set.")
 
-intents = discord.Intents.default()
-intents.message_content = True
-intents.messages = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+class DiscordSummaryBot(commands.Bot):
+    """Bot 主體。
+
+    這層盡量只保留 Discord 啟動與 extension 載入，不放業務邏輯。
+    """
+
+    def __init__(self) -> None:
+        intents = discord.Intents.default()
+        intents.message_content = True
+        intents.messages = True
+        super().__init__(command_prefix="!", intents=intents)
+        self._synced = False
+
+    async def setup_hook(self) -> None:
+        """在連上 Discord 前先載入所有 cogs。"""
+        await load_extensions(self)
 
 
-def threads_preview_enabled() -> bool:
-    # 預設啟用；設 THREADS_PREVIEW_ENABLED=0 就會關閉
-    return os.getenv("THREADS_PREVIEW_ENABLED", "1") == "1"
-
-
-def facebook_preview_enabled() -> bool:
-    # 預設啟用；設 FACEBOOK_PREVIEW_ENABLED=0 就會關閉
-    return os.getenv("FACEBOOK_PREVIEW_ENABLED", "1") == "1"
+bot = DiscordSummaryBot()
 
 
 @bot.event
-async def on_ready():
-    logger.info(f'{bot.user.name} has connected to Discord!')
+async def on_ready() -> None:
+    """Bot 上線後只做一次 slash command sync，避免重複同步。"""
+    if bot.user is None:
+        return
+
+    logger.info("%s has connected to Discord!", bot.user.name)
+    if bot._synced:
+        return
+
     logger.info("Attempting to sync slash commands...")
     try:
-        # 全域註冊
         synced = await bot.tree.sync()
-        # 只同步到特定伺服器（GUILD），立即生效，更新指令使用
-        # guild = discord.Object(id=GUILD_ID)
-        # synced = await bot.tree.sync(guild=guild)
-
-        logger.info(f"Synced {len(synced)} slash commands.")
-    except Exception as e:
-        logger.error(f"Failed to sync slash commands: {e}")
+        bot._synced = True
+        logger.info("Synced %s slash commands.", len(synced))
+    except Exception as exc:
+        logger.error("Failed to sync slash commands: %s", exc, exc_info=True)
 
 
-register_commands(bot)
-
-@bot.event
-async def on_message(message: discord.Message):
-    # 其他 bot/系統訊息直接放行
-    if message.author.bot:
-        return await bot.process_commands(message)
-
-    threads_enabled = threads_preview_enabled()
-    facebook_enabled = facebook_preview_enabled()
-
-    # 兩者都關閉時，直接交給其他指令
-    if not threads_enabled and not facebook_enabled:
-        return await bot.process_commands(message)
-
-    content = message.content or ""
-
-    # 依各自開關決定是否處理對應連結
-    has_threads_url = threads_enabled and bool(extract_threads_urls(content))
-    has_facebook_url = facebook_enabled and bool(extract_facebook_urls(content))
-
-    if has_threads_url:
-        handled = await handle_threads_in_message(message)
-        if handled:
-            return
-
-    if has_facebook_url:
-        handled = await handle_facebook_in_message(message)
-        if handled:
-            return
-
-    # 沒處理或沒連結：交給其他指令
-    await bot.process_commands(message)
-
-def run():
+def run() -> None:
+    """根據環境變數啟動 bot。"""
     if not BOT_TOKEN:
         logger.critical("Bot token is not configured. Exiting.")
         return

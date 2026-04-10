@@ -14,7 +14,7 @@ else:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
 
-        gemini_model = genai.GenerativeModel("gemini-2.5-flash")
+        gemini_model = genai.GenerativeModel("gemini-3-flash-preview")
         logger.info(f"Initialized Gemini Model: {gemini_model.model_name}")
 
         role_model = genai.GenerativeModel("gemini-2.5-flash-lite")

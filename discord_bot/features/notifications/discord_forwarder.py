@@ -8,6 +8,7 @@ logger = logging.getLogger("discord_digest_bot")
 
 
 def _truncate(text: object, limit: int = 260) -> str:
+    """將通知欄位裁成 Discord 好讀的長度。"""
     if text is None:
         return ""
     value = str(text).strip()
@@ -17,6 +18,7 @@ def _truncate(text: object, limit: int = 260) -> str:
 
 
 def _resolve_int_env(name: str) -> Optional[int]:
+    """解析整數型 env；格式錯誤時只記 log 不丟例外。"""
     raw = (os.getenv(name) or "").strip()
     if not raw:
         return None

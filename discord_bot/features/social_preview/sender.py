@@ -12,6 +12,7 @@ PREVIEW_WEBHOOK_NAME = "digest-preview-relay"
 
 
 def _author_display_name(author: discord.abc.User) -> str:
+    """Pick the most user-friendly display name available for webhook relays."""
     return (
         getattr(author, "display_name", None)
         or getattr(author, "global_name", None)
@@ -21,6 +22,7 @@ def _author_display_name(author: discord.abc.User) -> str:
 
 
 def _clone_files(files: Sequence[discord.File]) -> List[discord.File]:
+    """Clone file buffers so webhook fallback can resend the same attachments safely."""
     clones: List[discord.File] = []
     for file in files:
         file.fp.seek(0)
@@ -45,6 +47,7 @@ async def _send_via_webhook(
     files: List[discord.File],
     view: Optional[discord.ui.View],
 ) -> Optional[discord.Message]:
+    """Try to send the preview via webhook so it appears as the original author."""
     channel = message.channel
     guild = message.guild
     if guild is None:
@@ -103,6 +106,7 @@ async def send_preview_as_author(
     files: Optional[Sequence[discord.File]] = None,
     view: Optional[discord.ui.View] = None,
 ) -> discord.Message:
+    """Send a social preview as the original author, falling back to normal bot send if needed."""
     channel = message.channel
     source_files = list(files or [])
 
@@ -138,6 +142,7 @@ async def send_preview_as_author(
 
 
 async def cleanup_source_message(message: discord.Message, *, platform: str, url: str) -> None:
+    """Delete the original source message, or suppress embeds if delete is not allowed."""
     try:
         await message.delete()
         return

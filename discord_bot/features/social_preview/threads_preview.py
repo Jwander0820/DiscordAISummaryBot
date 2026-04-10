@@ -31,12 +31,12 @@ from discord.errors import HTTPException, InteractionResponded, NotFound
 
 # 你已有的抓取器
 from .threads_fetch import fetch_threads_post
-from .preview_sender import cleanup_source_message, send_preview_as_author
-from .social_preview_text import extract_message_commentary
+from .sender import cleanup_source_message, send_preview_as_author
+from .text import extract_message_commentary
 
 
 THREADS_URL_RE = re.compile(
-    r"https?://(?:www\.)?threads\.(?:net|com)/@[^\s/]+/post/[A-Za-z0-9_\-]+",
+    r"https?://(?:www\.)?threads\.(?:net|com)/@[^\s/]+/post/[A-Za-z0-9_\-]+(?:\?[^\s<>()|]+)?(?:#[^\s<>()|]+)?",
     re.IGNORECASE,
 )
 SPOILER_BLOCK_RE = re.compile(r"\|\|(.+?)\|\|", re.DOTALL)
@@ -48,6 +48,7 @@ logger = logging.getLogger('discord_digest_bot')
 
 
 def _delete_view_timeout_from_env() -> Optional[float]:
+    """讀取預覽刪除按鈕的逾時秒數設定。"""
     # >0: 秒數；<=0 或 none/off: 無逾時（同一個 bot 進程內不會自動消失）
     raw = os.getenv("SOCIAL_PREVIEW_DELETE_TIMEOUT_SECONDS", "0").strip().lower()
     if raw in {"none", "off", "disable", "disabled"}:
@@ -147,6 +148,7 @@ class DeletePreviewView(discord.ui.View):
 # --- URL 擷取 ---
 
 def _sanitize_threads_url(url: str) -> str:
+    """清掉 Threads 分享網址的 tracking query 與尾端標點。"""
     # 連結包在 ||spoiler|| 時，regex 可能把結尾 || 一起吃進來
     clean = url.rstrip(").,>|")
     parsed = urlparse(clean)
@@ -155,7 +157,9 @@ def _sanitize_threads_url(url: str) -> str:
 
 def extract_threads_urls(content: str) -> List[str]:
     """
-    從原始訊息內容中擷取 Threads 貼文 URL 清單
+    從原始訊息內容中擷取 Threads 貼文 URL 清單。
+
+    這裡允許抓到 `?xmt=...` 等 query，但回傳前會正規化成乾淨 URL，方便後續 preview 與留言抽取共用。
     :param content: 訊息字串
     :return: list[str]
     """
@@ -173,6 +177,7 @@ def extract_threads_urls(content: str) -> List[str]:
 
 
 def _is_threads_url_spoilered(content: str, url: str) -> bool:
+    """判斷目標 Threads URL 是否被 Discord spoiler 包住。"""
     if not content:
         return False
     for block in SPOILER_BLOCK_RE.findall(content):
@@ -182,12 +187,14 @@ def _is_threads_url_spoilered(content: str, url: str) -> bool:
 
 
 def _spoiler_wrap(text: str) -> str:
+    """用 Discord spoiler 語法包住字串。"""
     if not text:
         return text
     return f"||{text}||"
 
 
 def _clone_files_as_spoiler(files: List[discord.File]) -> List[discord.File]:
+    """複製附件並改成 spoiler，避免直接重用舊檔案指標。"""
     cloned: List[discord.File] = []
     for file in files:
         try:
@@ -211,10 +218,12 @@ def _clone_files_as_spoiler(files: List[discord.File]) -> List[discord.File]:
 
 
 def _format_masked_link(label: str, url: str) -> str:
+    """把長影片網址縮成 Discord markdown 連結。"""
     return f"[{label}]({url})"
 
 
 def _extract_threads_commentary(content: str, url: str) -> str:
+    """移除目標 Threads URL 後保留使用者評論文字。"""
     return extract_message_commentary(
         content,
         target_url=url,
@@ -254,7 +263,7 @@ async def build_threads_preview(
     :param allow_video_upload: 若為 mp4 且檔案不大是否嘗試上傳（預設 False，避免大檔）
     :return: PreviewResult
     """
-    # 在背景執行同步抓取（避免阻塞事件迴圈）
+    # fetch_threads_post() 仍是同步 parser，這裡轉到 thread 避免卡住 bot event loop。
     post = await asyncio.to_thread(fetch_threads_post, url)
 
     # --- 準備 Embed ---
@@ -351,7 +360,13 @@ async def build_threads_preview(
 
 async def handle_threads_in_message(message: discord.Message) -> bool:
     """
-    在 on_message 中呼叫，若訊息含 Threads 連結就回覆預覽。
+    Threads 訊息處理主流程。
+
+    負責：
+    1. 抽出第一個 Threads URL
+    2. 保留使用者原本的評論
+    3. 送出代發 preview
+    4. 清理原始訊息
     :return: 是否有處理（找到並回覆）
     """
     if message.author.bot:

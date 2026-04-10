@@ -9,33 +9,15 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-SUMMARY_COLUMNS = (
-    "id",
-    "channel_id",
-    "user_id",
-    "command",
-    "question",
-    "prompt",
-    "summary",
-    "call_time",
-)
-
-CREATE_SUMMARIES_SQL = """
-CREATE TABLE IF NOT EXISTS summaries (
-    id INTEGER PRIMARY KEY,
-    channel_id TEXT,
-    user_id TEXT,
-    command TEXT,
-    question TEXT,
-    prompt TEXT,
-    summary TEXT,
-    call_time TEXT
-);
-"""
+from discord_bot.db.schema import SQLITE_CREATE_SUMMARIES_SQL, SUMMARY_COLUMNS
 
 
 def _load_simple_env(path: Path) -> None:
+    """Load a small subset of `.env` syntax without introducing a runtime dependency."""
     if not path.exists():
         return
 
@@ -52,12 +34,14 @@ def _load_simple_env(path: Path) -> None:
 
 
 def load_local_env() -> None:
-    root = Path(__file__).resolve().parents[1]
+    """Load project-level env files in the same order as local bot development."""
+    root = PROJECT_ROOT
     _load_simple_env(root / ".env")
     _load_simple_env(root / "discord_bot" / ".env")
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    """Parse CLI arguments for the backup tool."""
     default_output = os.getenv("LOCAL_BACKUP_SQLITE_PATH", "postgres_summaries_backup.db")
     parser = argparse.ArgumentParser(
         description="Copy the PostgreSQL summaries table into a local SQLite database."
@@ -96,12 +80,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
 
 def _coerce_sqlite_value(value):
+    """Convert database-native values into SQLite-friendly scalar values."""
     if isinstance(value, (datetime, date)):
         return value.isoformat()
     return value
 
 
 def _coerce_row(row: Sequence[object]) -> tuple[object, ...]:
+    """Normalize every field in a fetched PostgreSQL row before writing to SQLite."""
     return tuple(_coerce_sqlite_value(value) for value in row)
 
 
@@ -111,6 +97,7 @@ def fetch_summaries(
     min_id: Optional[int] = None,
     limit: Optional[int] = None,
 ) -> list[tuple[object, ...]]:
+    """Fetch rows from PostgreSQL in summaries-table order, optionally incrementally."""
     try:
         import psycopg2
     except ModuleNotFoundError as exc:
@@ -135,6 +122,7 @@ def fetch_summaries(
 
 
 def get_local_max_summary_id(sqlite_path: Path) -> Optional[int]:
+    """Read the local backup's latest summaries.id for incremental sync mode."""
     if not sqlite_path.exists():
         return None
 
@@ -155,6 +143,7 @@ def get_local_max_summary_id(sqlite_path: Path) -> Optional[int]:
 
 
 def write_summaries_to_sqlite(rows: Iterable[Sequence[object]], sqlite_path: Path, *, mode: str) -> int:
+    """Write fetched PostgreSQL rows into the local SQLite backup."""
     rows = [tuple(row) for row in rows]
     sqlite_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -164,7 +153,7 @@ def write_summaries_to_sqlite(rows: Iterable[Sequence[object]], sqlite_path: Pat
     with sqlite3.connect(sqlite_path) as conn:
         if mode == "replace":
             conn.execute("DROP TABLE IF EXISTS summaries")
-        conn.execute(CREATE_SUMMARIES_SQL)
+        conn.execute(SQLITE_CREATE_SUMMARIES_SQL)
         conn.executemany(
             f"INSERT OR REPLACE INTO summaries ({columns}) VALUES ({placeholders})",
             rows,
@@ -175,6 +164,7 @@ def write_summaries_to_sqlite(rows: Iterable[Sequence[object]], sqlite_path: Pat
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    """CLI entry point for syncing the cloud summaries table into a local SQLite file."""
     load_local_env()
     args = parse_args(argv)
 
