@@ -1,4 +1,3 @@
-from google.generativeai.types import GenerationConfig
 import discord
 import logging
 from ...db.repository import summary_repository
@@ -116,7 +115,7 @@ async def call_cloud_llm(prompt: str, role: str = "basic") -> str:
                 "parts": [prompt]
             }
         ]
-        gen_config = GenerationConfig(temperature=0.7)
+        gen_config = {"temperature": 0.7}
 
         response = await role_model.generate_content_async(contents=contents, generation_config=gen_config)
 
