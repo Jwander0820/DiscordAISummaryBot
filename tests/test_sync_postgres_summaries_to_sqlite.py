@@ -39,10 +39,13 @@ class SyncPostgresSummariesToolTests(unittest.TestCase):
             written = sync_tool.write_summaries_to_sqlite([row], sqlite_path, mode="upsert")
 
             self.assertEqual(written, 1)
-            with sqlite3.connect(sqlite_path) as conn:
+            conn = sqlite3.connect(sqlite_path)
+            try:
                 selected = conn.execute(
                     f"SELECT {', '.join(SUMMARY_COLUMNS)} FROM summaries"
                 ).fetchone()
+            finally:
+                conn.close()
 
             self.assertEqual(selected, row)
 

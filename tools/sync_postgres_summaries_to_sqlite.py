@@ -126,16 +126,20 @@ def get_local_max_summary_id(sqlite_path: Path) -> Optional[int]:
     if not sqlite_path.exists():
         return None
 
+    conn = None
     try:
-        with sqlite3.connect(sqlite_path) as conn:
-            exists = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'summaries'"
-            ).fetchone()
-            if not exists:
-                return None
-            row = conn.execute("SELECT MAX(id) FROM summaries").fetchone()
+        conn = sqlite3.connect(sqlite_path)
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'summaries'"
+        ).fetchone()
+        if not exists:
+            return None
+        row = conn.execute("SELECT MAX(id) FROM summaries").fetchone()
     except sqlite3.DatabaseError:
         return None
+    finally:
+        if conn is not None:
+            conn.close()
 
     if row is None or row[0] is None:
         return None
@@ -150,7 +154,8 @@ def write_summaries_to_sqlite(rows: Iterable[Sequence[object]], sqlite_path: Pat
     placeholders = ", ".join(["?"] * len(SUMMARY_COLUMNS))
     columns = ", ".join(SUMMARY_COLUMNS)
 
-    with sqlite3.connect(sqlite_path) as conn:
+    conn = sqlite3.connect(sqlite_path)
+    try:
         if mode == "replace":
             conn.execute("DROP TABLE IF EXISTS summaries")
         conn.execute(SQLITE_CREATE_SUMMARIES_SQL)
@@ -159,6 +164,8 @@ def write_summaries_to_sqlite(rows: Iterable[Sequence[object]], sqlite_path: Pat
             rows,
         )
         conn.commit()
+    finally:
+        conn.close()
 
     return len(rows)
 

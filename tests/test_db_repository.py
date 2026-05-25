@@ -37,10 +37,13 @@ class SummaryRepositoryTests(unittest.TestCase):
 
                 repository.insert_summary(record)
 
-                with sqlite3.connect(sqlite_path) as conn:
+                conn = sqlite3.connect(sqlite_path)
+                try:
                     row = conn.execute(
                         "SELECT channel_id, user_id, command, question, prompt, summary, call_time FROM summaries"
                     ).fetchone()
+                finally:
+                    conn.close()
 
                 self.assertEqual(row, tuple(record.values()))
                 repository.conn.close()

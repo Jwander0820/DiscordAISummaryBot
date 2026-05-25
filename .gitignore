@@ -14,6 +14,15 @@ venv.bak/
 
 # Environment variables
 .env
+https://www.threads.com/@jwander87/post/DYwC3x2AR7gdiscord_bot/.env
+
+# Local secrets / OAuth tokens
+*.pickle
+token.pickle
+client_secret.json
+discord_bot/client_secret.json
+postgres_summaries_backup.db
+summaries.db
 
 # IDEs
 .vscode/
@@ -63,3 +72,8 @@ render.yaml
 *.jpg
 *.db
 *.json
+
+# Local scratch files
+.codex
+test_code.py
+data/
