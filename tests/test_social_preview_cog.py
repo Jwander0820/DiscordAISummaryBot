@@ -26,6 +26,7 @@ class SocialPreviewCogTests(unittest.IsolatedAsyncioTestCase):
             name: sys.modules.get(name)
             for name in (
                 "discord_bot.features.social_preview.threads_preview",
+                "discord_bot.features.social_preview.instagram_preview",
                 "discord_bot.features.social_preview.facebook_preview",
                 "discord_bot.cogs.social_preview_cog",
             )
@@ -39,7 +40,12 @@ class SocialPreviewCogTests(unittest.IsolatedAsyncioTestCase):
         self.facebook_stub.extract_facebook_urls = Mock(return_value=[])
         self.facebook_stub.handle_facebook_in_message = AsyncMock(return_value=False)
 
+        self.instagram_stub = types.ModuleType("discord_bot.features.social_preview.instagram_preview")
+        self.instagram_stub.extract_instagram_urls = Mock(return_value=[])
+        self.instagram_stub.handle_instagram_in_message = AsyncMock(return_value=False)
+
         sys.modules["discord_bot.features.social_preview.threads_preview"] = self.threads_stub
+        sys.modules["discord_bot.features.social_preview.instagram_preview"] = self.instagram_stub
         sys.modules["discord_bot.features.social_preview.facebook_preview"] = self.facebook_stub
         sys.modules.pop("discord_bot.cogs.social_preview_cog", None)
         self.cog_module = importlib.import_module("discord_bot.cogs.social_preview_cog")
@@ -59,6 +65,7 @@ class SocialPreviewCogTests(unittest.IsolatedAsyncioTestCase):
 
         self.cog_module.is_social_preview_enabled.assert_not_called()
         self.threads_stub.extract_threads_urls.assert_not_called()
+        self.instagram_stub.extract_instagram_urls.assert_not_called()
         self.facebook_stub.extract_facebook_urls.assert_not_called()
 
     async def test_both_disabled_skips_url_extraction(self):
@@ -66,8 +73,9 @@ class SocialPreviewCogTests(unittest.IsolatedAsyncioTestCase):
 
         await self.cog.on_message(FakeMessage("https://facebook.com/demo"))
 
-        self.assertEqual(self.cog_module.is_social_preview_enabled.call_count, 2)
+        self.assertEqual(self.cog_module.is_social_preview_enabled.call_count, 3)
         self.threads_stub.extract_threads_urls.assert_not_called()
+        self.instagram_stub.extract_instagram_urls.assert_not_called()
         self.facebook_stub.extract_facebook_urls.assert_not_called()
 
     async def test_threads_disabled_facebook_enabled_only_handles_facebook(self):
@@ -81,9 +89,28 @@ class SocialPreviewCogTests(unittest.IsolatedAsyncioTestCase):
         await self.cog.on_message(FakeMessage("https://facebook.com/demo"))
 
         self.threads_stub.extract_threads_urls.assert_not_called()
+        self.instagram_stub.extract_instagram_urls.assert_not_called()
         self.facebook_stub.extract_facebook_urls.assert_called_once()
         self.threads_stub.handle_threads_in_message.assert_not_awaited()
+        self.instagram_stub.handle_instagram_in_message.assert_not_awaited()
         self.facebook_stub.handle_facebook_in_message.assert_awaited_once()
+
+    async def test_instagram_enabled_handles_instagram_before_facebook(self):
+        def enabled(_guild_id, platform):
+            return platform in {"instagram", "facebook"}
+
+        self.cog_module.is_social_preview_enabled = Mock(side_effect=enabled)
+        self.instagram_stub.extract_instagram_urls.return_value = ["https://www.instagram.com/p/abc"]
+        self.instagram_stub.handle_instagram_in_message.return_value = True
+        self.facebook_stub.extract_facebook_urls.return_value = ["https://facebook.com/demo"]
+
+        await self.cog.on_message(FakeMessage("https://www.instagram.com/p/abc https://facebook.com/demo"))
+
+        self.threads_stub.extract_threads_urls.assert_not_called()
+        self.instagram_stub.extract_instagram_urls.assert_called_once()
+        self.facebook_stub.extract_facebook_urls.assert_called_once()
+        self.instagram_stub.handle_instagram_in_message.assert_awaited_once()
+        self.facebook_stub.handle_facebook_in_message.assert_not_awaited()
 
     async def test_threads_handler_short_circuits_facebook(self):
         self.cog_module.is_social_preview_enabled = Mock(return_value=True)
@@ -94,6 +121,7 @@ class SocialPreviewCogTests(unittest.IsolatedAsyncioTestCase):
         await self.cog.on_message(FakeMessage("https://threads.com/@demo/post/abc https://facebook.com/demo"))
 
         self.threads_stub.handle_threads_in_message.assert_awaited_once()
+        self.instagram_stub.handle_instagram_in_message.assert_not_awaited()
         self.facebook_stub.handle_facebook_in_message.assert_not_awaited()
 
 

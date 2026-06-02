@@ -4,7 +4,8 @@ import discord
 from discord.ext import commands
 
 from ..features.social_preview.facebook_preview import extract_facebook_urls, handle_facebook_in_message
-from ..features.social_preview.settings import PLATFORM_FACEBOOK, PLATFORM_THREADS, is_social_preview_enabled
+from ..features.social_preview.instagram_preview import extract_instagram_urls, handle_instagram_in_message
+from ..features.social_preview.settings import PLATFORM_FACEBOOK, PLATFORM_INSTAGRAM, PLATFORM_THREADS, is_social_preview_enabled
 from ..features.social_preview.threads_preview import extract_threads_urls, handle_threads_in_message
 
 
@@ -23,17 +24,24 @@ class SocialPreviewCog(commands.Cog):
 
         guild_id = str(message.guild.id) if message.guild is not None else None
         threads_enabled = is_social_preview_enabled(guild_id, PLATFORM_THREADS)
+        instagram_enabled = is_social_preview_enabled(guild_id, PLATFORM_INSTAGRAM)
         facebook_enabled = is_social_preview_enabled(guild_id, PLATFORM_FACEBOOK)
-        if not threads_enabled and not facebook_enabled:
+        if not threads_enabled and not instagram_enabled and not facebook_enabled:
             return
 
         content = message.content or ""
         has_threads_url = threads_enabled and bool(extract_threads_urls(content))
+        has_instagram_url = instagram_enabled and bool(extract_instagram_urls(content))
         has_facebook_url = facebook_enabled and bool(extract_facebook_urls(content))
 
         # Threads 優先處理；若已經成功代發 preview，Facebook 就不用再接手。
         if has_threads_url:
             handled = await handle_threads_in_message(message)
+            if handled:
+                return
+
+        if has_instagram_url:
+            handled = await handle_instagram_in_message(message)
             if handled:
                 return
 

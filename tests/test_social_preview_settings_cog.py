@@ -52,6 +52,7 @@ class SocialPreviewSettingsCogTests(unittest.IsolatedAsyncioTestCase):
         service.list_statuses.return_value = {
             "threads": self.cog_module.SocialPreviewSettingStatus("threads", True, False, False, "guild_override"),
             "facebook": self.cog_module.SocialPreviewSettingStatus("facebook", True, None, True, "global_default"),
+            "instagram": self.cog_module.SocialPreviewSettingStatus("instagram", False, None, False, "global_default"),
         }
         self.cog_module.social_preview_settings_service = service
         interaction = FakeInteraction(manage_guild=True)
@@ -71,6 +72,7 @@ class SocialPreviewSettingsCogTests(unittest.IsolatedAsyncioTestCase):
         service.list_statuses.return_value = {
             "threads": self.cog_module.SocialPreviewSettingStatus("threads", True, None, True, "global_default"),
             "facebook": self.cog_module.SocialPreviewSettingStatus("facebook", True, None, True, "global_default"),
+            "instagram": self.cog_module.SocialPreviewSettingStatus("instagram", False, None, False, "global_default"),
         }
         self.cog_module.social_preview_settings_service = service
         interaction = FakeInteraction(manage_guild=True)
@@ -83,6 +85,26 @@ class SocialPreviewSettingsCogTests(unittest.IsolatedAsyncioTestCase):
 
         service.clear_override.assert_called_once_with("123", "facebook")
         service.set_override.assert_not_called()
+
+    async def test_manager_can_enable_instagram(self):
+        service = Mock()
+        service.list_statuses.return_value = {
+            "threads": self.cog_module.SocialPreviewSettingStatus("threads", False, None, False, "global_default"),
+            "facebook": self.cog_module.SocialPreviewSettingStatus("facebook", False, None, False, "global_default"),
+            "instagram": self.cog_module.SocialPreviewSettingStatus("instagram", False, True, True, "guild_override"),
+        }
+        self.cog_module.social_preview_settings_service = service
+        interaction = FakeInteraction(manage_guild=True)
+
+        await self.cog.configure_social_preview(
+            interaction,
+            types.SimpleNamespace(value="instagram"),
+            types.SimpleNamespace(value="enabled"),
+        )
+
+        service.set_override.assert_called_once_with("123", "instagram", True, updated_by="42")
+        self.assertTrue(interaction.response.messages[-1]["ephemeral"])
+        self.assertIn("Instagram", interaction.response.messages[-1]["content"])
 
 
 if __name__ == "__main__":

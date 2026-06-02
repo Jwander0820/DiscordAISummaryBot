@@ -100,6 +100,40 @@ class SocialPreviewSettingsTests(unittest.TestCase):
                 self.assertEqual(status.source, "global_default")
                 repository.close()
 
+    def test_instagram_env_default_enabled_without_override_is_enabled(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sqlite_path = os.path.join(temp_dir, "settings.db")
+            with patch.dict(
+                os.environ,
+                {"DB_TYPE": "sqlite", "SQLITE_PATH": sqlite_path, "INSTAGRAM_PREVIEW_ENABLED": "1"},
+                clear=False,
+            ):
+                service, repository = self._make_service(sqlite_path)
+
+                status = service.resolve_status("123", "instagram")
+
+                self.assertTrue(status.effective_enabled)
+                self.assertEqual(status.source, "global_default")
+                repository.close()
+
+    def test_instagram_guild_override_can_enable_when_global_default_disabled(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sqlite_path = os.path.join(temp_dir, "settings.db")
+            with patch.dict(
+                os.environ,
+                {"DB_TYPE": "sqlite", "SQLITE_PATH": sqlite_path, "INSTAGRAM_PREVIEW_ENABLED": "0"},
+                clear=False,
+            ):
+                service, repository = self._make_service(sqlite_path)
+                repository.set_setting("123", "instagram", True, updated_by="42")
+
+                status = service.resolve_status("123", "instagram")
+
+                self.assertTrue(status.effective_enabled)
+                self.assertTrue(status.guild_override)
+                self.assertEqual(status.source, "guild_override")
+                repository.close()
+
     def test_unknown_platform_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             sqlite_path = os.path.join(temp_dir, "settings.db")
@@ -107,7 +141,7 @@ class SocialPreviewSettingsTests(unittest.TestCase):
                 service, repository = self._make_service(sqlite_path)
 
                 with self.assertRaises(ValueError):
-                    service.resolve_status("123", "instagram")
+                    service.resolve_status("123", "bluesky")
 
                 repository.close()
 

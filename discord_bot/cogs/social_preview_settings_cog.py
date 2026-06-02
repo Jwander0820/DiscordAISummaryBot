@@ -6,6 +6,7 @@ from discord.ext import commands
 
 from ..features.social_preview.settings import (
     PLATFORM_FACEBOOK,
+    PLATFORM_INSTAGRAM,
     PLATFORM_THREADS,
     SUPPORTED_PLATFORMS,
     SocialPreviewSettingStatus,
@@ -20,6 +21,7 @@ STATE_DEFAULT = "default"
 _PLATFORM_LABELS = {
     PLATFORM_THREADS: "Threads",
     PLATFORM_FACEBOOK: "Facebook",
+    PLATFORM_INSTAGRAM: "Instagram",
 }
 
 _STATE_LABELS = {
@@ -56,7 +58,7 @@ class SocialPreviewSettingsCog(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
 
-    @app_commands.command(name="社群預覽設定", description="設定本伺服器的 Threads / Facebook 自動預覽")
+    @app_commands.command(name="社群預覽設定", description="設定本伺服器的 Threads / Facebook / Instagram 自動預覽")
     @app_commands.default_permissions(manage_guild=True)
     @app_commands.rename(platform="平台", state="狀態")
     @app_commands.describe(platform="要調整的平台", state="要套用的狀態")
@@ -64,6 +66,7 @@ class SocialPreviewSettingsCog(commands.Cog):
         platform=[
             app_commands.Choice(name="Threads", value=PLATFORM_THREADS),
             app_commands.Choice(name="Facebook", value=PLATFORM_FACEBOOK),
+            app_commands.Choice(name="Instagram", value=PLATFORM_INSTAGRAM),
             app_commands.Choice(name="全部", value=PLATFORM_ALL),
         ],
         state=[
