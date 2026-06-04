@@ -40,6 +40,7 @@ THREADS_URL_RE = re.compile(
     re.IGNORECASE,
 )
 SPOILER_BLOCK_RE = re.compile(r"\|\|(.+?)\|\|", re.DOTALL)
+THREADS_INVALID_POST_MESSAGE = "Threads預覽失敗 爛meta"
 
 # --- 小工具資料結構 ---
 
@@ -266,6 +267,14 @@ async def build_threads_preview(
     # fetch_threads_post() 仍是同步 parser，這裡轉到 thread 避免卡住 bot event loop。
     post = await asyncio.to_thread(fetch_threads_post, url)
 
+    if post.preview_error == "invalid_post":
+        description = THREADS_INVALID_POST_MESSAGE
+        if spoiler:
+            description = _spoiler_wrap(description)
+        embed = discord.Embed(title="Threads", description=description, url=url)
+        embed.set_author(name="Threads")
+        return PreviewResult(embed=embed, files=[])
+
     # --- 準備 Embed ---
     title = f"Threads @{post.author_username or ''}".strip() or "Threads 貼文"
     description = (post.text or "(無文字內容)")[:4096]
@@ -316,8 +325,8 @@ async def build_threads_preview(
     inline_video_url: Optional[str] = None
     if video_urls:
         # m3u8 不適合上傳，直接貼連結；mp4 若小可選擇嘗試下載上傳
-        mp4s = [u for u in video_urls if u.lower().endswith(".mp4")]
-        hls = [u for u in video_urls if u.lower().endswith(".m3u8")]
+        mp4s = [u for u in video_urls if urlparse(u).path.lower().endswith(".mp4")]
+        hls = [u for u in video_urls if urlparse(u).path.lower().endswith(".m3u8")]
 
         if allow_video_upload and mp4s:
             # （可選）小檔案才建議上傳，避免觸發檔案大小限制

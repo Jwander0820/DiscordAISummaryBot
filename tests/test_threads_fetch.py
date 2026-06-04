@@ -1,5 +1,6 @@
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from discord_bot.features.social_preview.threads_fetch import (
     ThreadsMedia,
@@ -7,6 +8,7 @@ from discord_bot.features.social_preview.threads_fetch import (
     _best_src_from_srcset,
     _extract_dom_text,
     _is_probable_profile_image,
+    _try_requests,
     _video_mime_from_url,
     fetch_threads_post,
 )
@@ -145,6 +147,152 @@ class ThreadsFetchTests(unittest.TestCase):
 
         self.assertTrue(found)
         self.assertEqual(post.text, "揠苗助長的故事告訴我們什麼？")
+
+    @patch("discord_bot.features.social_preview.threads_fetch._parse_html")
+    @patch(
+        "discord_bot.features.social_preview.threads_fetch.build_candidate_urls",
+        return_value=["https://www.threads.com/@demo/post/abc"],
+    )
+    def test_try_requests_marks_invalid_post_redirect_without_parsing_error_page(
+        self,
+        _mock_build_candidate_urls,
+        mock_parse_html,
+    ):
+        url = "https://www.threads.com/@demo/post/abc"
+        requests_stub = SimpleNamespace(
+            get=Mock(
+                return_value=SimpleNamespace(
+                    status_code=200,
+                    url="https://www.threads.com/?error=invalid_post",
+                    text="<html><meta name='description' content='unrelated error page'></html>",
+                )
+            )
+        )
+
+        with patch.dict("sys.modules", {"requests": requests_stub}):
+            post = _try_requests(url)
+
+        self.assertEqual(post.preview_error, "invalid_post")
+        self.assertIsNone(post.text)
+        self.assertEqual(post.media, [])
+        mock_parse_html.assert_not_called()
+
+    @patch("discord_bot.features.social_preview.threads_fetch._parse_html")
+    @patch(
+        "discord_bot.features.social_preview.threads_fetch.build_candidate_urls",
+        return_value=["https://www.threads.com/@demo/post/abc"],
+    )
+    def test_try_requests_uses_later_success_after_invalid_post_redirect(
+        self,
+        _mock_build_candidate_urls,
+        mock_parse_html,
+    ):
+        url = "https://www.threads.com/@demo/post/abc"
+        requests_stub = SimpleNamespace(
+            get=Mock(
+                side_effect=[
+                    SimpleNamespace(
+                        status_code=200,
+                        url="https://www.threads.com/?error=invalid_post",
+                        text="<html>error</html>",
+                    ),
+                    SimpleNamespace(
+                        status_code=200,
+                        url=url,
+                        text="<html>post</html>",
+                    ),
+                ]
+            )
+        )
+        mock_parse_html.return_value = ThreadsPost(url=url, text="正常貼文")
+
+        with patch.dict("sys.modules", {"requests": requests_stub}):
+            post = _try_requests(url)
+
+        self.assertIsNone(post.preview_error)
+        self.assertEqual(post.text, "正常貼文")
+
+    @patch("discord_bot.features.social_preview.threads_fetch._parse_html")
+    @patch(
+        "discord_bot.features.social_preview.threads_fetch.build_candidate_urls",
+        return_value=["https://www.threads.com/@demo/post/abc"],
+    )
+    def test_try_requests_does_not_treat_invalid_post_text_in_normal_html_as_redirect(
+        self,
+        _mock_build_candidate_urls,
+        mock_parse_html,
+    ):
+        url = "https://www.threads.com/@demo/post/abc"
+        requests_stub = SimpleNamespace(
+            get=Mock(
+                return_value=SimpleNamespace(
+                    status_code=200,
+                    url=url,
+                    text=r"<html><script>const route='?error\u003dinvalid_post'</script></html>",
+                )
+            )
+        )
+        mock_parse_html.return_value = ThreadsPost(url=url, text="正常貼文")
+
+        with patch.dict("sys.modules", {"requests": requests_stub}):
+            post = _try_requests(url)
+
+        self.assertIsNone(post.preview_error)
+        self.assertEqual(post.text, "正常貼文")
+        mock_parse_html.assert_called_once()
+
+    @patch("discord_bot.features.social_preview.threads_fetch._try_oembed_fill")
+    @patch("discord_bot.features.social_preview.threads_fetch._try_requests")
+    def test_fetch_threads_post_skips_oembed_after_invalid_post_redirect(
+        self,
+        mock_try_requests,
+        mock_try_oembed_fill,
+    ):
+        url = "https://www.threads.com/@demo/post/abc"
+        mock_try_requests.return_value = ThreadsPost(url=url, preview_error="invalid_post")
+
+        post = fetch_threads_post(url)
+
+        self.assertEqual(post.preview_error, "invalid_post")
+        mock_try_oembed_fill.assert_not_called()
+
+    @patch("discord_bot.features.social_preview.threads_fetch._save_debug_html")
+    @patch("discord_bot.features.social_preview.threads_fetch._parse_html")
+    @patch(
+        "discord_bot.features.social_preview.threads_fetch.build_candidate_urls",
+        return_value=["https://www.threads.com/@demo/post/abc"],
+    )
+    def test_try_requests_does_not_save_html_after_invalid_post_redirect(
+        self,
+        _mock_build_candidate_urls,
+        mock_parse_html,
+        mock_save_debug_html,
+    ):
+        url = "https://www.threads.com/@demo/post/abc"
+        requests_stub = SimpleNamespace(
+            get=Mock(
+                side_effect=[
+                    SimpleNamespace(status_code=200, url=url, text="<html>empty post</html>"),
+                    SimpleNamespace(
+                        status_code=200,
+                        url="https://www.threads.com/?error=invalid_post",
+                        text="<html>error</html>",
+                    ),
+                    SimpleNamespace(
+                        status_code=200,
+                        url="https://www.threads.com/?error=invalid_post",
+                        text="<html>error</html>",
+                    ),
+                ]
+            )
+        )
+        mock_parse_html.return_value = ThreadsPost(url=url)
+
+        with patch.dict("sys.modules", {"requests": requests_stub}):
+            post = _try_requests(url)
+
+        self.assertEqual(post.preview_error, "invalid_post")
+        mock_save_debug_html.assert_not_called()
 
     @patch("discord_bot.features.social_preview.threads_fetch._try_oembed_fill")
     @patch("discord_bot.features.social_preview.threads_fetch._try_requests")

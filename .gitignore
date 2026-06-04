@@ -14,7 +14,7 @@ venv.bak/
 
 # Environment variables
 .env
-https://www.threads.com/@jwander87/post/DYwC3x2AR7gdiscord_bot/.env
+discord_bot/.env
 
 # Local secrets / OAuth tokens
 *.pickle
@@ -75,5 +75,6 @@ render.yaml
 
 # Local scratch files
 .codex
+_threads_debug/
 test_code.py
 data/

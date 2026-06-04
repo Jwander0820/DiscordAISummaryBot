@@ -14,11 +14,62 @@ if "dotenv" not in sys.modules:
 if importlib.util.find_spec("aiohttp") is None or importlib.util.find_spec("discord") is None:
     raise unittest.SkipTest("threads_preview tests require aiohttp and discord.py")
 
-from discord_bot.features.social_preview.threads_preview import DeletePreviewView, PreviewResult, build_threads_preview, handle_threads_in_message
+from discord_bot.features.social_preview.threads_preview import (
+    THREADS_INVALID_POST_MESSAGE,
+    DeletePreviewView,
+    PreviewResult,
+    build_threads_preview,
+    handle_threads_in_message,
+)
 import discord
 
 
 class ThreadsPreviewTests(unittest.IsolatedAsyncioTestCase):
+    @patch("discord_bot.features.social_preview.threads_preview.asyncio.to_thread")
+    async def test_build_threads_preview_replaces_invalid_post_meta_with_failure_message(self, mock_to_thread):
+        url = "https://www.threads.com/@demo/post/abc"
+        mock_to_thread.return_value = ThreadsPost(
+            url="https://www.threads.com/?error=invalid_post",
+            preview_error="invalid_post",
+        )
+
+        preview = await build_threads_preview(url)
+
+        self.assertEqual(preview.embed.description, THREADS_INVALID_POST_MESSAGE)
+        self.assertEqual(preview.embed.url, url)
+        self.assertEqual(preview.files, [])
+        self.assertIsNone(preview.inline_video_url)
+
+    @patch("discord_bot.features.social_preview.threads_preview.cleanup_source_message", new_callable=AsyncMock)
+    @patch("discord_bot.features.social_preview.threads_preview.send_preview_as_author", new_callable=AsyncMock)
+    @patch("discord_bot.features.social_preview.threads_preview.asyncio.to_thread")
+    async def test_handle_invalid_post_sends_fixed_failure_preview_with_original_link(
+        self,
+        mock_to_thread,
+        mock_send_preview_as_author,
+        mock_cleanup_source_message,
+    ):
+        url = "https://www.threads.com/@demo/post/abc"
+        mock_to_thread.return_value = ThreadsPost(
+            url="https://www.threads.com/?error=invalid_post",
+            preview_error="invalid_post",
+        )
+        mock_send_preview_as_author.return_value = types.SimpleNamespace(id=123)
+        message = types.SimpleNamespace(
+            author=types.SimpleNamespace(bot=False, nick="demo", global_name="demo"),
+            channel=types.SimpleNamespace(name="general"),
+            content=url,
+        )
+
+        handled = await handle_threads_in_message(message)
+
+        self.assertTrue(handled)
+        sent_kwargs = mock_send_preview_as_author.await_args.kwargs
+        self.assertEqual(sent_kwargs["embed"].description, THREADS_INVALID_POST_MESSAGE)
+        original_link = next(item for item in sent_kwargs["view"].children if getattr(item, "label", None) == "原連結")
+        self.assertEqual(original_link.url, url)
+        mock_cleanup_source_message.assert_awaited_once()
+
     @patch("discord_bot.features.social_preview.threads_preview.asyncio.to_thread")
     async def test_build_threads_preview_uses_clean_video_button_instead_of_raw_url(self, mock_to_thread):
         video_url = "https://cdn.example.com/media/video.mp4?token=abc"
@@ -45,6 +96,8 @@ class ThreadsPreviewTests(unittest.IsolatedAsyncioTestCase):
         labels = [getattr(item, "label", None) for item in view.children]
         self.assertIn("原連結", labels)
         self.assertIn("影片直連", labels)
+        original_link = next(item for item in view.children if getattr(item, "label", None) == "原連結")
+        self.assertEqual(original_link.url, "https://www.threads.com/@demo/post/abc")
 
     @patch("discord_bot.features.social_preview.threads_preview.cleanup_source_message", new_callable=AsyncMock)
     @patch("discord_bot.features.social_preview.threads_preview.send_preview_as_author", new_callable=AsyncMock)

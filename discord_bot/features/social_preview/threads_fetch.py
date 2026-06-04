@@ -9,7 +9,7 @@ import time
 import html
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
-from urllib.parse import urlparse, urlunparse, urlencode
+from urllib.parse import parse_qs, urlparse, urlunparse, urlencode
 
 # =============== 配置 ===============
 REQUEST_TIMEOUT = 15
@@ -59,6 +59,7 @@ class ThreadsPost:
     created_at: Optional[str] = None
     media: List[ThreadsMedia] = field(default_factory=list)
     oembed_html: Optional[str] = None
+    preview_error: Optional[str] = None
     debug: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -121,6 +122,25 @@ def _variants(url: str) -> List[str]:
             seen.add(u);
             uniq.append(u)
     return uniq
+
+
+def _threads_error_from_url(url: Optional[str]) -> Optional[str]:
+    """Return a known Threads error code from a redirected final URL."""
+    if not url:
+        return None
+
+    parsed = urlparse(url)
+    host = parsed.netloc.lower().split(":", 1)[0]
+    if host not in {"threads.net", "www.threads.net", "threads.com", "www.threads.com"}:
+        return None
+
+    for key, values in parse_qs(parsed.query).items():
+        if key.lower() != "error":
+            continue
+        for value in values:
+            if value.lower() == "invalid_post":
+                return "invalid_post"
+    return None
 
 
 def _is_probable_profile_image(item: ThreadsMedia) -> bool:
@@ -714,6 +734,7 @@ def _try_requests(url: str) -> ThreadsPost:
     last_html = None
     last_status = None
     last_url = None
+    last_threads_error = None
     for vurl in variants:
         for hdr in headers_list:
             err = None
@@ -722,6 +743,10 @@ def _try_requests(url: str) -> ThreadsPost:
                     resp = requests.get(vurl, headers=hdr, timeout=REQUEST_TIMEOUT, allow_redirects=True)
                     last_status = resp.status_code
                     last_url = resp.url
+                    redirect_error = _threads_error_from_url(resp.url)
+                    if redirect_error:
+                        last_threads_error = redirect_error
+                        break
                     if resp.status_code == 200 and "<html" in resp.text.lower():
                         post = _parse_html(resp.url, resp.text)
                         # 判斷是否已拿到有效資料
@@ -742,9 +767,10 @@ def _try_requests(url: str) -> ThreadsPost:
             # 這個 UA/URL 過完重試了，換下一個
     # 全部失敗，回傳空 post + debug
     p = ThreadsPost(url=_normalize(url))
+    p.preview_error = last_threads_error
     p.debug["requests_last_status"] = last_status
     p.debug["requests_last_url"] = last_url
-    if last_html:
+    if last_html and not p.preview_error:
         path = _save_debug_html("requests_last.html", last_html)
         p.debug["requests_last_html_path"] = path
     return p
@@ -777,7 +803,7 @@ def fetch_threads_post(url: str) -> ThreadsPost:
     post = _try_requests(url)
 
     # 2) 不足 → oEmbed 補資料（作者名、縮圖、嵌入 HTML）
-    if (not post.text or not post.media):
+    if not post.preview_error and (not post.text or not post.media):
         _try_oembed_fill(post, allow_thumbnail=not post.text and not post.media)
 
     # 3) 完全關閉 Playwright，僅保留 requests / oEmbed 結果。
