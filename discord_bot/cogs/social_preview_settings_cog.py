@@ -95,16 +95,25 @@ class SocialPreviewSettingsCog(commands.Cog):
         guild_id = str(interaction.guild.id)
         updated_by = str(interaction.user.id)
 
+        update_results = []
         for target_platform in target_platforms:
             if state_value == STATE_DEFAULT:
-                social_preview_settings_service.clear_override(guild_id, target_platform)
+                result = social_preview_settings_service.clear_override(guild_id, target_platform)
             else:
-                social_preview_settings_service.set_override(
+                result = social_preview_settings_service.set_override(
                     guild_id,
                     target_platform,
                     state_value == STATE_ENABLED,
                     updated_by=updated_by,
                 )
+            update_results.append(result)
+
+        if any(result is False for result in update_results):
+            await interaction.response.send_message(
+                "社群預覽設定資料庫目前無法使用，這次變更沒有完整套用。請稍後再試，或檢查 Server 啟動時的資料庫連線錯誤。",
+                ephemeral=True,
+            )
+            return
 
         statuses = social_preview_settings_service.list_statuses(guild_id)
         lines = [_format_status_line(statuses[platform_name]) for platform_name in SUPPORTED_PLATFORMS]
@@ -119,6 +128,13 @@ class SocialPreviewSettingsCog(commands.Cog):
     async def social_preview_status(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None:
             await interaction.response.send_message("此指令只能在伺服器內使用。", ephemeral=True)
+            return
+
+        if not social_preview_settings_service.settings_available():
+            await interaction.response.send_message(
+                "社群預覽設定資料庫目前無法使用，無法確認伺服器層級設定。請檢查 Server 啟動時的資料庫連線錯誤。",
+                ephemeral=True,
+            )
             return
 
         statuses = social_preview_settings_service.list_statuses(str(interaction.guild.id))

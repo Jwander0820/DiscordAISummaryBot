@@ -77,16 +77,26 @@ class SocialPreviewSettingsService:
     def is_enabled(self, guild_id: Optional[str], platform: str) -> bool:
         return self.resolve_status(guild_id, platform).effective_enabled
 
-    def set_override(self, guild_id: str, platform: str, enabled: bool, *, updated_by: Optional[str] = None) -> None:
+    def set_override(
+        self,
+        guild_id: str,
+        platform: str,
+        enabled: bool,
+        *,
+        updated_by: Optional[str] = None,
+    ) -> bool:
         normalized = validate_platform(platform)
-        self.repository.set_setting(str(guild_id), normalized, enabled, updated_by=updated_by)
+        return self.repository.set_setting(str(guild_id), normalized, enabled, updated_by=updated_by)
 
-    def clear_override(self, guild_id: str, platform: str) -> None:
+    def clear_override(self, guild_id: str, platform: str) -> bool:
         normalized = validate_platform(platform)
-        self.repository.clear_setting(str(guild_id), normalized)
+        return self.repository.clear_setting(str(guild_id), normalized)
 
     def list_statuses(self, guild_id: Optional[str]) -> dict[str, SocialPreviewSettingStatus]:
         return {platform: self.resolve_status(guild_id, platform) for platform in SUPPORTED_PLATFORMS}
+
+    def settings_available(self) -> bool:
+        return self.repository.is_available()
 
 
 social_preview_settings_service = SocialPreviewSettingsService()

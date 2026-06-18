@@ -163,6 +163,29 @@ class SocialPreviewSettingsTests(unittest.TestCase):
 
                 self.assertEqual(row, ("123", "threads", 0, "42"))
 
+    def test_repository_retries_after_transient_initialization_failure(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sqlite_path = os.path.join(temp_dir, "settings.db")
+            real_connect = sqlite3.connect
+            connect_attempts = 0
+
+            def flaky_connect(path):
+                nonlocal connect_attempts
+                connect_attempts += 1
+                if connect_attempts == 1:
+                    raise sqlite3.OperationalError("temporary failure")
+                return real_connect(path)
+
+            with patch.dict(os.environ, {"DB_TYPE": "sqlite", "SQLITE_PATH": sqlite_path}, clear=False):
+                repository = SocialPreviewSettingsRepository(retry_interval_seconds=0)
+                with patch("discord_bot.db.social_preview_settings_repository.sqlite3.connect", side_effect=flaky_connect):
+                    self.assertFalse(repository.init())
+                    self.assertTrue(repository.set_setting("123", "threads", True, updated_by="42"))
+
+                self.assertTrue(repository.get_setting("123", "threads"))
+                self.assertEqual(connect_attempts, 2)
+                repository.close()
+
 
 if __name__ == "__main__":
     unittest.main()

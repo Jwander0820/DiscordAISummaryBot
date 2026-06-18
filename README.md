@@ -84,7 +84,10 @@ DISCORD_NOTIFY_FORWARD_CHANNEL_ID=123456789012345678
 DISCORD_NOTIFY_FORWARD_GUILD_ID=114514
 
 # 資料庫種類，可設為 "sqlite" 或 "postgres"
-DB_TYPE=sqlite
+# 正式部署建議使用 postgres，讓 summaries 與伺服器社群預覽設定能跨版本保留。
+# 若使用 sqlite，SQLITE_PATH 必須放在部署平台的 persistent volume。
+DB_TYPE=postgres
+SQLITE_PATH=summaries.db
 
 # LLM 調用模式："local" 或 "cloud" (僅在部分指令作用)
 ROLE_MODE=local
@@ -98,8 +101,9 @@ GMAIL_REFRESH_TOKEN=token.pickle_refresh_token
 GMAIL_SEND_TO=gmail_send_to@gmail.com
 GMAIL_REFRESH_TOKEN_ISSUED_AT='YYYY-MM-DDTHH:MM:SS+08:00'
 
-# Threads/Facebook 預覽功能開關
-# 設為 0 表示關閉，1 表示啟用（預設 1）
+# Threads/Facebook/Instagram 預覽功能的全域預設
+# 設為 0 表示關閉，1 表示啟用；未設定時預設為 0。
+# guild 管理者透過 slash command 設定的 override 會存入 DB_TYPE 指定的資料庫。
 THREADS_PREVIEW_ENABLED=1
 FACEBOOK_PREVIEW_ENABLED=1
 INSTAGRAM_PREVIEW_ENABLED=1

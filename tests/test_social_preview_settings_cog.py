@@ -106,6 +106,34 @@ class SocialPreviewSettingsCogTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(interaction.response.messages[-1]["ephemeral"])
         self.assertIn("Instagram", interaction.response.messages[-1]["content"])
 
+    async def test_database_failure_does_not_claim_setting_was_updated(self):
+        service = Mock()
+        service.set_override.return_value = False
+        self.cog_module.social_preview_settings_service = service
+        interaction = FakeInteraction(manage_guild=True)
+
+        await self.cog.configure_social_preview(
+            interaction,
+            types.SimpleNamespace(value="threads"),
+            types.SimpleNamespace(value="enabled"),
+        )
+
+        service.list_statuses.assert_not_called()
+        content = interaction.response.messages[-1]["content"]
+        self.assertIn("資料庫目前無法使用", content)
+        self.assertNotIn("已將 Threads 設為", content)
+
+    async def test_status_reports_database_unavailable(self):
+        service = Mock()
+        service.settings_available.return_value = False
+        self.cog_module.social_preview_settings_service = service
+        interaction = FakeInteraction()
+
+        await self.cog.social_preview_status(interaction)
+
+        service.list_statuses.assert_not_called()
+        self.assertIn("無法確認伺服器層級設定", interaction.response.messages[-1]["content"])
+
 
 if __name__ == "__main__":
     unittest.main()

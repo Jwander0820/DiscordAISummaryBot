@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
+import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -22,18 +23,23 @@ except ImportError:  # pragma: no cover - depends on runtime extras
 class SocialPreviewSettingsRepository:
     """Persist guild-level social preview platform overrides."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, retry_interval_seconds: float = 30.0) -> None:
         self.db_type = (os.getenv("DB_TYPE", "sqlite") or "sqlite").lower()
         self.db_enabled = True
         self.placeholder = "?"
         self.conn: Optional[Any] = None
         self.cursor: Optional[Any] = None
         self._initialized = False
+        self._last_init_attempt: Optional[float] = None
+        self.retry_interval_seconds = retry_interval_seconds
 
-    def init(self) -> None:
-        if self._initialized:
-            return
+    def init(self, *, force: bool = False) -> bool:
+        if self._initialized and not force:
+            return self._ready
+        if force:
+            self._close_connection()
 
+        self._last_init_attempt = time.monotonic()
         self.db_type = (os.getenv("DB_TYPE", "sqlite") or "sqlite").lower()
         self.db_enabled = True
 
@@ -47,6 +53,7 @@ class SocialPreviewSettingsRepository:
             self._init_sqlite()
 
         self._initialized = True
+        return self._ready
 
     def _init_postgres(self) -> None:
         if psycopg2 is None:
@@ -73,6 +80,11 @@ class SocialPreviewSettingsRepository:
 
     def _init_sqlite(self) -> None:
         sqlite_path = os.getenv("SQLITE_PATH", "summaries.db")
+        logger.warning(
+            "Social Preview guild settings 使用 SQLite (%s)；部署環境必須將此路徑放在 persistent volume，"
+            "否則重新部署後設定可能遺失。",
+            sqlite_path,
+        )
         try:
             self.conn = sqlite3.connect(sqlite_path)
             self.cursor = self.conn.cursor()
@@ -85,32 +97,63 @@ class SocialPreviewSettingsRepository:
             self.db_enabled = False
 
     def close(self) -> None:
+        self._close_connection()
+        self._initialized = False
+        self._last_init_attempt = None
+
+    def _close_connection(self) -> None:
         if self.conn is not None:
-            self.conn.close()
+            try:
+                self.conn.close()
+            except Exception:
+                logger.debug("關閉 Social Preview settings DB 連線失敗", exc_info=True)
         self.conn = None
         self.cursor = None
-        self._initialized = False
+
+    def _ensure_ready(self) -> bool:
+        if self.init():
+            return True
+
+        now = time.monotonic()
+        if self._last_init_attempt is None or now - self._last_init_attempt >= self.retry_interval_seconds:
+            logger.info("Social Preview settings DB unavailable，嘗試重新初始化")
+            return self.init(force=True)
+        return False
+
+    def _mark_unavailable(self) -> None:
+        self.db_enabled = False
+        self._close_connection()
 
     def get_setting(self, guild_id: str, platform: str) -> Optional[bool]:
-        self.init()
-        if not self._ready:
+        if not self._ensure_ready():
             return None
 
-        sql = (
-            "SELECT enabled FROM guild_social_preview_settings "
-            f"WHERE guild_id = {self.placeholder} AND platform = {self.placeholder};"
-        )
-        self.cursor.execute(sql, (str(guild_id), platform))
-        row = self.cursor.fetchone()
+        try:
+            sql = (
+                "SELECT enabled FROM guild_social_preview_settings "
+                f"WHERE guild_id = {self.placeholder} AND platform = {self.placeholder};"
+            )
+            self.cursor.execute(sql, (str(guild_id), platform))
+            row = self.cursor.fetchone()
+        except Exception as exc:
+            logger.error("讀取 Social Preview guild setting 失敗: %s", exc, exc_info=True)
+            self._mark_unavailable()
+            return None
         if row is None:
             return None
         return bool(row[0])
 
-    def set_setting(self, guild_id: str, platform: str, enabled: bool, *, updated_by: Optional[str] = None) -> None:
-        self.init()
-        if not self._ready:
+    def set_setting(
+        self,
+        guild_id: str,
+        platform: str,
+        enabled: bool,
+        *,
+        updated_by: Optional[str] = None,
+    ) -> bool:
+        if not self._ensure_ready():
             logger.warning("set_setting: Social Preview settings DB unavailable")
-            return
+            return False
 
         enabled_value: Any = bool(enabled) if self.db_type == "postgres" else int(bool(enabled))
         updated_at = datetime.now(timezone.utc).isoformat()
@@ -123,30 +166,49 @@ class SocialPreviewSettingsRepository:
             "updated_by = excluded.updated_by, "
             "updated_at = excluded.updated_at;"
         )
-        self.cursor.execute(sql, (str(guild_id), platform, enabled_value, updated_by, updated_at))
-        self.conn.commit()
+        try:
+            self.cursor.execute(sql, (str(guild_id), platform, enabled_value, updated_by, updated_at))
+            self.conn.commit()
+            return True
+        except Exception as exc:
+            logger.error("寫入 Social Preview guild setting 失敗: %s", exc, exc_info=True)
+            self._mark_unavailable()
+            return False
 
-    def clear_setting(self, guild_id: str, platform: str) -> None:
-        self.init()
-        if not self._ready:
+    def clear_setting(self, guild_id: str, platform: str) -> bool:
+        if not self._ensure_ready():
             logger.warning("clear_setting: Social Preview settings DB unavailable")
-            return
+            return False
 
         sql = (
             "DELETE FROM guild_social_preview_settings "
             f"WHERE guild_id = {self.placeholder} AND platform = {self.placeholder};"
         )
-        self.cursor.execute(sql, (str(guild_id), platform))
-        self.conn.commit()
+        try:
+            self.cursor.execute(sql, (str(guild_id), platform))
+            self.conn.commit()
+            return True
+        except Exception as exc:
+            logger.error("清除 Social Preview guild setting 失敗: %s", exc, exc_info=True)
+            self._mark_unavailable()
+            return False
 
     def list_guild_settings(self, guild_id: str) -> dict[str, bool]:
-        self.init()
-        if not self._ready:
+        if not self._ensure_ready():
             return {}
 
-        sql = f"SELECT platform, enabled FROM guild_social_preview_settings WHERE guild_id = {self.placeholder};"
-        self.cursor.execute(sql, (str(guild_id),))
-        return {str(platform): bool(enabled) for platform, enabled in self.cursor.fetchall()}
+        try:
+            sql = f"SELECT platform, enabled FROM guild_social_preview_settings WHERE guild_id = {self.placeholder};"
+            self.cursor.execute(sql, (str(guild_id),))
+            return {str(platform): bool(enabled) for platform, enabled in self.cursor.fetchall()}
+        except Exception as exc:
+            logger.error("列出 Social Preview guild settings 失敗: %s", exc, exc_info=True)
+            self._mark_unavailable()
+            return {}
+
+    def is_available(self) -> bool:
+        """Return current availability, retrying a failed initialization when due."""
+        return self._ensure_ready()
 
     @property
     def _ready(self) -> bool:
