@@ -326,8 +326,8 @@ def send_error_notify(error: Exception, record: dict, to: str) -> str:
     json_str = json.dumps(record, ensure_ascii=False, indent=2)
     # 用時間+指令+頻道當檔名，並 sanitize（去掉冒號等）
     ts = now.replace(":", "").split("+")[0].replace("-", "")
-    safe_cmd = record.get("command").replace(" ", "_")
-    safe_ch  = record.get("channel_id").replace(" ", "_")
+    safe_cmd = str(record.get("command") or "unknown").replace(" ", "_")
+    safe_ch = str(record.get("channel_id") or "unknown").replace(" ", "_")
     filename = f"{ts}-{safe_cmd}-{safe_ch}-ERROR.json"
 
     # 呼叫 send_email

@@ -94,6 +94,26 @@ class GeminiClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(module.gemini_model)
         self.assertIsNone(module.role_model)
 
+    def test_503_error_returns_busy_message_without_exposing_api_details(self):
+        with patch.dict(os.environ, {"GOOGLE_GENAI_API_KEY": "test-key"}, clear=False):
+            module = importlib.import_module("discord_bot.integrations.gemini_client")
+
+        server_error_type = type("ServerError", (Exception,), {"__module__": "google.genai.errors"})
+        error = server_error_type("503 UNAVAILABLE: model is experiencing high demand")
+        error.code = 503
+
+        message = module.gemini_user_message(error)
+
+        self.assertEqual(message, module.GEMINI_BUSY_MESSAGE)
+        self.assertNotIn("503", message)
+        self.assertNotIn("UNAVAILABLE", message)
+
+    def test_non_gemini_error_is_not_misclassified(self):
+        with patch.dict(os.environ, {"GOOGLE_GENAI_API_KEY": "test-key"}, clear=False):
+            module = importlib.import_module("discord_bot.integrations.gemini_client")
+
+        self.assertIsNone(module.gemini_user_message(RuntimeError("database failed")))
+
 
 if __name__ == "__main__":
     unittest.main()

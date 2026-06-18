@@ -4,8 +4,7 @@ from ...db.repository import summary_repository
 from ...features.chat.history import format_message_history
 from ...features.chat.records import build_summary_record
 from ...features.notifications.service import notification_service
-from ...integrations.gemini_client import gemini_model
-from ...integrations.gemini_client import role_model
+from ...integrations.gemini_client import gemini_model, gemini_user_message, role_model
 from ...integrations.local_llm import resolve_prompt
 from dotenv import load_dotenv
 
@@ -92,7 +91,7 @@ async def summarize_messages(messages: list[discord.Message], prompt_scope: str 
             guild=messages[0].guild if messages else None,
             error=e,
         )
-        return f"Error during summarization: {e}"
+        return gemini_user_message(e) or "SERN 系統暫時發生問題，請稍後再試一次。"
 
 
 async def call_cloud_llm(prompt: str, role: str = "basic") -> str:
@@ -128,4 +127,4 @@ async def call_cloud_llm(prompt: str, role: str = "basic") -> str:
         return summary_text.strip()
     except Exception as e:
         logger.error(f"Error generating summary: {e}", exc_info=True)
-        return f"Error during summarization: {e}"
+        raise

@@ -16,6 +16,44 @@ except ImportError:  # pragma: no cover - depends on deployed optional package
 
 GEMINI_API_KEY = os.environ.get("GOOGLE_GENAI_API_KEY")
 
+GEMINI_BUSY_MESSAGE = "SERN 目前忙線中，觀測世界線的人太多了。請稍後再試一次。"
+GEMINI_RATE_LIMIT_MESSAGE = "SERN 收到的請求太多了，請稍後再試一次。"
+GEMINI_TIMEOUT_MESSAGE = "SERN 的回應超時了，請稍後再試一次。"
+GEMINI_ERROR_MESSAGE = "SERN 暫時無法連上 AI 服務，請稍後再試一次。"
+
+
+def _error_status_code(exc: Exception) -> Optional[int]:
+    """Best-effort extraction across google-genai error versions."""
+    for value in (
+        getattr(exc, "code", None),
+        getattr(exc, "status_code", None),
+        getattr(getattr(exc, "response", None), "status_code", None),
+    ):
+        try:
+            if value is not None:
+                return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def gemini_user_message(exc: Exception) -> Optional[str]:
+    """Return a safe Discord message when an exception came from Gemini."""
+    status_code = _error_status_code(exc)
+    error_text = str(exc).upper()
+    error_module = exc.__class__.__module__
+    is_gemini_error = error_module.startswith("google.genai") or status_code is not None
+
+    if not is_gemini_error:
+        return None
+    if status_code == 503 or "UNAVAILABLE" in error_text or "HIGH DEMAND" in error_text:
+        return GEMINI_BUSY_MESSAGE
+    if status_code == 429 or "RESOURCE_EXHAUSTED" in error_text:
+        return GEMINI_RATE_LIMIT_MESSAGE
+    if status_code == 504 or "DEADLINE_EXCEEDED" in error_text or "TIMEOUT" in error_text:
+        return GEMINI_TIMEOUT_MESSAGE
+    return GEMINI_ERROR_MESSAGE
+
 
 class GeminiAsyncModel:
     """Small adapter that preserves the project's previous async model interface."""

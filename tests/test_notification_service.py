@@ -62,16 +62,20 @@ class NotificationServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_dispatch_uses_error_mailer_for_error_notifications(self):
         self.gmail_stub.gmail_notify_enabled = lambda: True
+        captured_records = []
+        self.gmail_stub.send_error_notify = lambda error, record, to: captured_records.append(record) or "error-id"
         self.service_module = importlib.reload(self.service_module)
 
         with patch.dict("os.environ", {"GMAIL_SEND_TO": "demo@example.com"}, clear=False):
             await self.service_module.notification_service.dispatch(
-                record={"command": "解答之書"},
+                record={},
                 error=RuntimeError("boom"),
             )
 
         self.assertEqual(self.forward_calls[-1]["notify_type"], "error")
         self.assertEqual(self.forward_calls[-1]["email_message_id"], "error-id")
+        self.assertEqual(captured_records[0]["command"], "unknown")
+        self.assertEqual(captured_records[0]["channel_id"], "unknown")
 
 
 if __name__ == "__main__":

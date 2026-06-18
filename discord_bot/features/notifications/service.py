@@ -32,6 +32,11 @@ class NotificationService:
         先決定是否寄 Gmail，再把結果轉發到 Discord notify channel。
         這樣上層 command/service 不需要知道通知細節。
         """
+        safe_record = dict(record or {})
+        for field in ("command", "channel_id", "user_id"):
+            if not safe_record.get(field):
+                safe_record[field] = "unknown"
+
         email_sent = None
         message_id = None
         notify_type = "error" if error else "success"
@@ -40,11 +45,11 @@ class NotificationService:
         try:
             if gmail_notify_enabled() and gmail_send_to:
                 if error:
-                    message_id = send_error_notify(error, record, gmail_send_to)
+                    message_id = send_error_notify(error, safe_record, gmail_send_to)
                 elif deepfaker_subject:
-                    message_id = send_deepfaker_notify(record, gmail_send_to, deepfaker_subject)
+                    message_id = send_deepfaker_notify(safe_record, gmail_send_to, deepfaker_subject)
                 else:
-                    message_id = send_sarn_notify(record, gmail_send_to)
+                    message_id = send_sarn_notify(safe_record, gmail_send_to)
                 email_sent = True
             elif not gmail_notify_enabled():
                 logger.info("Gmail notify disabled by GMAIL_NOTIFY_ENABLED; skipped command email.")
@@ -53,7 +58,7 @@ class NotificationService:
             logger.error("發信失敗：%s", notify_err, exc_info=True)
 
         await forward_notify_to_channel(
-            record=record,
+            record=safe_record,
             guild=guild,
             bot=bot_client,
             notify_type=notify_type,

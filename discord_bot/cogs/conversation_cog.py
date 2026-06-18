@@ -13,7 +13,7 @@ from ..features.chat.history import collect_non_bot_messages, format_message_his
 from ..features.chat.records import build_summary_record
 from ..features.notifications.service import notification_service
 from ..features.summaries.service import call_cloud_llm
-from ..integrations.gemini_client import gemini_model
+from ..integrations.gemini_client import gemini_model, gemini_user_message
 from ..integrations.local_llm import query_local_llm
 
 logger = logging.getLogger("discord_digest_bot")
@@ -45,7 +45,12 @@ class ConversationCog(commands.Cog):
 
         await interaction.response.defer(ephemeral=False)
         question = 想問些什麼
-        record = {}
+        record = build_summary_record(
+            channel_id=str(channel.name),
+            user_id=str(interaction.user.global_name or interaction.user.name),
+            command="你要不要聽聽看你現在在講什麼",
+            question=question,
+        )
         try:
             time_since = datetime.now(timezone.utc) - timedelta(days=1)
             messages = await collect_non_bot_messages(channel, limit=len_msg, after=time_since, fetch_multiplier=1.1)
@@ -54,6 +59,7 @@ class ConversationCog(commands.Cog):
                 return
 
             message_text = format_message_history(messages, include_author_id=True)
+            record["prompt"] = message_text
             contents = [
                 {
                     "role": "model",
@@ -87,14 +93,7 @@ class ConversationCog(commands.Cog):
             answer = truncate_for_discord(response.text.strip())
             reply_content = f"{interaction.user.mention} 問了：{question}\n\n{answer}"
 
-            record = build_summary_record(
-                channel_id=str(channel.name),
-                user_id=str(interaction.user.global_name or interaction.user.name),
-                command="你要不要聽聽看你現在在講什麼",
-                question=question,
-                prompt=message_text,
-                summary=answer,
-            )
+            record["summary"] = answer
             summary_repository.insert_summary(record)
 
             await notification_service.dispatch(
@@ -111,7 +110,8 @@ class ConversationCog(commands.Cog):
                 bot_client=interaction.client,
                 error=exc,
             )
-            await interaction.followup.send(f"發生錯誤：{exc}", ephemeral=True)
+            public_message = gemini_user_message(exc) or "SERN 系統暫時發生問題，請稍後再試一次。"
+            await interaction.followup.send(public_message, ephemeral=True)
 
     @app_commands.command(name="解答之書", description="取樣最近20則訊息，向本地 LLM 詢問")
     async def answer_book(self, interaction: discord.Interaction, 問題: str) -> None:
@@ -170,7 +170,8 @@ class ConversationCog(commands.Cog):
                 bot_client=interaction.client,
                 error=exc,
             )
-            await interaction.followup.send(f"發生錯誤：{exc}", ephemeral=True)
+            public_message = gemini_user_message(exc) or "SERN 系統暫時發生問題，請稍後再試一次。"
+            await interaction.followup.send(public_message, ephemeral=True)
 
     @app_commands.command(name="el_psy_kongroo", description="一切都是命運石之門的選擇！")
     async def el_psy_kongroo(self, interaction: discord.Interaction, 問題: str) -> None:
@@ -230,7 +231,8 @@ class ConversationCog(commands.Cog):
                 bot_client=interaction.client,
                 error=exc,
             )
-            await interaction.followup.send(f"發生錯誤：{exc}", ephemeral=True)
+            public_message = gemini_user_message(exc) or "SERN 系統暫時發生問題，請稍後再試一次。"
+            await interaction.followup.send(public_message, ephemeral=True)
 
     async def _send_as_amadeus(self, channel: discord.TextChannel, content: str) -> None:
         """Send a webhook message that impersonates the Amadeus persona."""
