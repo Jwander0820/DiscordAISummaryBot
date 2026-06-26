@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import json
@@ -14,7 +14,7 @@ from typing import Any, Optional
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 logger = logging.getLogger("discord_digest_bot")
 
@@ -63,6 +63,8 @@ DEFAULT_CORRECT_SCORE_ODDS_BPS = 800
 MATCHES_PAGE_LIMIT = 10
 MY_BETS_LIMIT = 10
 LEADERBOARD_LIMIT = 10
+AUTO_SETTLED_BY = "auto"
+AUTO_SETTLEMENT_LOOP_NAME = "world_cup_auto_settlement"
 
 
 SQLITE_DDL = (
@@ -210,6 +212,15 @@ class BetResult:
 
 
 @dataclass(frozen=True)
+class SettlementPayout:
+    user_id: str
+    amount: int
+    selection: str
+    payout: int
+    profit: int
+
+
+@dataclass(frozen=True)
 class SettlementMarketResult:
     market: str
     winning_selection: Optional[str]
@@ -218,6 +229,7 @@ class SettlementMarketResult:
     winner_count: int
     refunded_count: int
     already_settled: bool = False
+    winner_payouts: tuple[SettlementPayout, ...] = ()
 
 
 def _now_utc() -> datetime:
@@ -266,6 +278,13 @@ def _env_int(name: str, default: int) -> int:
     return value
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _choice_value(value: Any) -> str:
     return str(getattr(value, "value", value))
 
@@ -287,32 +306,32 @@ def _is_world_cup_admin(interaction: discord.Interaction) -> bool:
 
 def normalize_selection(market: str, selection: str) -> str:
     market = market.strip()
-    normalized = selection.strip().upper().replace(" ", "").replace("：", ":")
+    normalized = selection.strip().upper().replace(" ", "").replace("\uff1a", ":")
     aliases = {
-        "主勝": SELECTION_HOME,
+        "\u4e3b\u52dd": SELECTION_HOME,
         "HOME": SELECTION_HOME,
         "H": SELECTION_HOME,
         "1": SELECTION_HOME,
-        "平手": SELECTION_DRAW,
-        "平": SELECTION_DRAW,
+        "\u5e73\u624b": SELECTION_DRAW,
+        "\u5e73": SELECTION_DRAW,
         "DRAW": SELECTION_DRAW,
         "D": SELECTION_DRAW,
         "X": SELECTION_DRAW,
-        "客勝": SELECTION_AWAY,
+        "\u5ba2\u52dd": SELECTION_AWAY,
         "AWAY": SELECTION_AWAY,
         "A": SELECTION_AWAY,
         "2": SELECTION_AWAY,
-        "大": SELECTION_OVER_2_5,
-        "大2.5": SELECTION_OVER_2_5,
+        "\u5927": SELECTION_OVER_2_5,
+        "\u59272.5": SELECTION_OVER_2_5,
         "OVER": SELECTION_OVER_2_5,
         "OVER2.5": SELECTION_OVER_2_5,
         "OVER_2_5": SELECTION_OVER_2_5,
-        "小": SELECTION_UNDER_2_5,
-        "小2.5": SELECTION_UNDER_2_5,
+        "\u5c0f": SELECTION_UNDER_2_5,
+        "\u5c0f2.5": SELECTION_UNDER_2_5,
         "UNDER": SELECTION_UNDER_2_5,
         "UNDER2.5": SELECTION_UNDER_2_5,
         "UNDER_2_5": SELECTION_UNDER_2_5,
-        "其他": SELECTION_OTHER,
+        "\u5176\u4ed6": SELECTION_OTHER,
         "OTHER": SELECTION_OTHER,
     }
     normalized = aliases.get(normalized, normalized)
@@ -331,11 +350,9 @@ def normalize_selection(market: str, selection: str) -> str:
             if 0 <= home <= 7 and 0 <= away <= 7:
                 return f"{home}-{away}"
     raise ValueError(
-        "投注選項不符合玩法規則。勝平負請填：主勝 / 平手 / 客勝；"
-        "總進球 2.5 請填：大 / 小；正確比分請填「主隊-客隊」，"
-        "例如 2-1 代表主隊 2 分、客隊 1 分；高比分請填 OTHER。"
+        "\u9078\u9805\u683c\u5f0f\u4e0d\u6b63\u78ba\u3002\u52dd\u5e73\u8ca0\u8acb\u586b\uff1a\u4e3b\u52dd / \u5e73\u624b / \u5ba2\u52dd\uff1b"
+        "\u7e3d\u9032\u7403 2.5 \u8acb\u586b\uff1a\u5927 / \u5c0f\uff1b\u6b63\u78ba\u6bd4\u5206\u8acb\u586b\u4e3b\u968a-\u5ba2\u968a\uff0c\u4f8b\u5982 2-1\uff1b\u9ad8\u6bd4\u5206\u8acb\u586b OTHER\u3002"
     )
-
 
 def resolve_winning_selection(market: str, home_score: int, away_score: int) -> str:
     if market == MARKET_1X2:
@@ -689,13 +706,13 @@ class WorldCupBettingRepository:
         player = self.ensure_player(guild_id, user_id)
         balance = int(player["balance"])
         if balance < amount:
-            return BetResult(False, f"代幣不足，目前餘額 {balance}", balance)
+            return BetResult(False, f"餘額不足，目前餘額：{balance}", balance)
 
         match = self.get_match(guild_id, match_id)
         if match is None:
             return BetResult(False, "找不到這場比賽", balance)
         if match["status"] in {MATCH_STATUS_FINISHED, MATCH_STATUS_CANCELLED, MATCH_STATUS_POSTPONED}:
-            return BetResult(False, "這場比賽已不可下注", balance)
+            return BetResult(False, "這場比賽已完賽、取消或延期，不能下注", balance)
 
         current = now or _now_utc()
         if current.tzinfo is None:
@@ -728,7 +745,7 @@ class WorldCupBettingRepository:
             raise
 
         updated = self.get_player(guild_id, user_id)
-        return BetResult(True, "下注成功", int(updated["balance"]), bet_id)
+        return BetResult(True, "\u4e0b\u6ce8\u6210\u529f", int(updated["balance"]), bet_id)
 
     def list_user_bets(self, guild_id: str, user_id: str, *, limit: int = MY_BETS_LIMIT) -> list[dict[str, Any]]:
         sql = (
@@ -758,9 +775,9 @@ class WorldCupBettingRepository:
         if match is None:
             raise ValueError("找不到這場比賽")
         if match["status"] != MATCH_STATUS_FINISHED:
-            raise ValueError("只有 API 標記為完賽的比賽可以結算")
+            raise ValueError("API 尚未標記這場比賽為 FINISHED，不能結算。")
         if match["home_score_90"] is None or match["away_score_90"] is None:
-            raise ValueError("缺少比分，不能結算")
+            raise ValueError("缺少完賽比分，不能結算。")
 
         results = []
         try:
@@ -816,6 +833,7 @@ class WorldCupBettingRepository:
 
         winner_count = 0
         refunded_count = 0
+        winner_payouts: list[SettlementPayout] = []
         if bets and winning_pool <= 0:
             for bet in bets:
                 self._update_bet_status(int(bet["id"]), BET_STATUS_LOST, 0)
@@ -828,6 +846,15 @@ class WorldCupBettingRepository:
                     payout = fixed_payout + loser_pool_bonus
                     self._credit_player(str(bet["guild_id"]), str(bet["user_id"]), payout)
                     self._update_bet_status(int(bet["id"]), BET_STATUS_WON, payout)
+                    winner_payouts.append(
+                        SettlementPayout(
+                            user_id=str(bet["user_id"]),
+                            amount=amount,
+                            selection=str(bet["selection"]),
+                            payout=payout,
+                            profit=payout - amount,
+                        )
+                    )
                     winner_count += 1
                 else:
                     self._update_bet_status(int(bet["id"]), BET_STATUS_LOST, 0)
@@ -849,6 +876,7 @@ class WorldCupBettingRepository:
             winning_pool,
             winner_count,
             refunded_count,
+            winner_payouts=tuple(winner_payouts),
         )
 
     def _credit_player(self, guild_id: str, user_id: str, amount: int) -> None:
@@ -883,6 +911,14 @@ class WorldCupBettingService:
     @property
     def bet_lock_minutes(self) -> int:
         return _env_int("WORLD_CUP_BET_LOCK_MINUTES", 10)
+
+    @property
+    def auto_settlement_enabled(self) -> bool:
+        return _env_bool("WORLD_CUP_AUTO_SETTLEMENT_ENABLED", True)
+
+    @property
+    def auto_sync_interval_minutes(self) -> int:
+        return max(5, _env_int("WORLD_CUP_AUTO_SYNC_INTERVAL_MINUTES", 60))
 
     def claim_daily(self, guild_id: str, user_id: str, *, now: Optional[datetime] = None) -> ClaimResult:
         return self.repository.claim_daily(guild_id, user_id, self.daily_claim_amount, now=now)
@@ -961,37 +997,36 @@ async def world_cup_selection_autocomplete(
 
 def _market_label(market: str) -> str:
     return {
-        MARKET_1X2: "勝平負",
-        MARKET_TOTAL_GOALS_2_5: "總進球 2.5",
-        MARKET_CORRECT_SCORE: "正確比分",
+        MARKET_1X2: "\u52dd\u5e73\u8ca0",
+        MARKET_TOTAL_GOALS_2_5: "\u7e3d\u9032\u7403 2.5",
+        MARKET_CORRECT_SCORE: "\u6b63\u78ba\u6bd4\u5206",
     }.get(market, market)
 
 
 def _selection_label(selection: str) -> str:
     return {
-        SELECTION_HOME: "主勝",
-        SELECTION_DRAW: "平手",
-        SELECTION_AWAY: "客勝",
-        SELECTION_OVER_2_5: "大 2.5",
-        SELECTION_UNDER_2_5: "小 2.5",
-        SELECTION_OTHER: "其他比分",
+        SELECTION_HOME: "\u4e3b\u52dd",
+        SELECTION_DRAW: "\u5e73\u624b",
+        SELECTION_AWAY: "\u5ba2\u52dd",
+        SELECTION_OVER_2_5: "\u5927 2.5",
+        SELECTION_UNDER_2_5: "\u5c0f 2.5",
+        SELECTION_OTHER: "\u5176\u4ed6\u6bd4\u5206",
     }.get(selection, selection)
 
 
 def _bet_status_label(status: str) -> str:
     return {
-        BET_STATUS_OPEN: "未結算",
-        BET_STATUS_WON: "中獎",
-        BET_STATUS_LOST: "未中",
-        BET_STATUS_REFUNDED: "已退款",
+        BET_STATUS_OPEN: "\u672a\u7d50\u7b97",
+        BET_STATUS_WON: "\u4e2d\u734e",
+        BET_STATUS_LOST: "\u672a\u4e2d",
+        BET_STATUS_REFUNDED: "\u9000\u6b3e",
     }.get(status, status)
 
 
 def _match_choice_name(match: dict[str, Any], *, lock_minutes: int) -> str:
-    kickoff = _parse_datetime(match["kickoff_at"])
     current = _now_utc()
     locked = not _match_is_bettable(match, lock_minutes=lock_minutes, now=current)
-    state = "鎖盤" if locked else "可下注"
+    state = "\u9396\u76e4" if locked else "\u53ef\u4e0b\u6ce8"
     name = (
         f"#{match['id']} {_format_datetime_taipei(match['kickoff_at'])} "
         f"{match['home_team']} vs {match['away_team']} [{state}]"
@@ -1024,34 +1059,34 @@ def _correct_score_choices(current: str) -> list[app_commands.Choice[str]]:
                 continue
             choices.append(
                 app_commands.Choice(
-                    name=f"{value}（主隊 {home}：客隊 {away}）",
+                    name=f"{value}\uff08\u4e3b\u968a {home}\uff0c\u5ba2\u968a {away}\uff09",
                     value=value,
                 )
             )
-    if "OTHER".startswith(query) or "其他".startswith(current.strip()):
-        choices.append(app_commands.Choice(name="OTHER（任一隊超過 7 球）", value=SELECTION_OTHER))
+    if "OTHER".startswith(query) or "\u5176\u4ed6".startswith(current.strip()):
+        choices.append(app_commands.Choice(name="OTHER\uff08\u4efb\u4e00\u968a\u8d85\u904e 7 \u7403\uff09", value=SELECTION_OTHER))
     return choices[:25]
 
 
 def _selection_choices_for_market(market: str, current: str) -> list[app_commands.Choice[str]]:
     if market == MARKET_1X2:
         choices = [
-            app_commands.Choice(name="主勝（主隊贏）", value=SELECTION_HOME),
-            app_commands.Choice(name="平手", value=SELECTION_DRAW),
-            app_commands.Choice(name="客勝（客隊贏）", value=SELECTION_AWAY),
+            app_commands.Choice(name="\u4e3b\u52dd\uff08\u4e3b\u968a\u8d0f\uff09", value=SELECTION_HOME),
+            app_commands.Choice(name="\u5e73\u624b", value=SELECTION_DRAW),
+            app_commands.Choice(name="\u5ba2\u52dd\uff08\u5ba2\u968a\u8d0f\uff09", value=SELECTION_AWAY),
         ]
     elif market == MARKET_TOTAL_GOALS_2_5:
         choices = [
-            app_commands.Choice(name="大 2.5（兩隊合計 3 球以上）", value=SELECTION_OVER_2_5),
-            app_commands.Choice(name="小 2.5（兩隊合計 0 到 2 球）", value=SELECTION_UNDER_2_5),
+            app_commands.Choice(name="\u5927 2.5\uff08\u5169\u968a\u5408\u8a08 3 \u7403\u4ee5\u4e0a\uff09", value=SELECTION_OVER_2_5),
+            app_commands.Choice(name="\u5c0f 2.5\uff08\u5169\u968a\u5408\u8a08 0 \u5230 2 \u7403\uff09", value=SELECTION_UNDER_2_5),
         ]
     elif market == MARKET_CORRECT_SCORE:
         return _correct_score_choices(current)
     else:
         choices = [
-            app_commands.Choice(name="勝平負：選項填 主勝 / 平手 / 客勝", value=SELECTION_HOME),
-            app_commands.Choice(name="總進球 2.5：選項填 大 / 小", value=SELECTION_OVER_2_5),
-            app_commands.Choice(name="正確比分：填 主隊-客隊，例如 2-1；高比分 OTHER", value="2-1"),
+            app_commands.Choice(name="\u52dd\u5e73\u8ca0\uff1a\u9078\u9805\u586b \u4e3b\u52dd / \u5e73\u624b / \u5ba2\u52dd", value=SELECTION_HOME),
+            app_commands.Choice(name="\u7e3d\u9032\u7403 2.5\uff1a\u9078\u9805\u586b \u5927 / \u5c0f", value=SELECTION_OVER_2_5),
+            app_commands.Choice(name="\u6b63\u78ba\u6bd4\u5206\uff1a\u586b \u4e3b\u968a-\u5ba2\u968a\uff0c\u4f8b\u5982 2-1\uff1b\u9ad8\u6bd4\u5206 OTHER", value="2-1"),
         ]
 
     query = current.strip().lower()
@@ -1062,7 +1097,7 @@ def _selection_choices_for_market(market: str, current: str) -> list[app_command
 
 def _format_matches(matches: list[dict[str, Any]], *, lock_minutes: int, now: Optional[datetime] = None) -> str:
     if not matches:
-        return "今明兩天沒有已同步的世足賽事。"
+        return "\u76ee\u524d\u6c92\u6709\u5df2\u540c\u6b65\u7684\u4eca\u660e\u8cfd\u4e8b\u3002"
     current = now or _now_utc()
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
@@ -1073,7 +1108,7 @@ def _format_matches(matches: list[dict[str, Any]], *, lock_minutes: int, now: Op
         score = ""
         if match["home_score_90"] is not None and match["away_score_90"] is not None:
             score = f" {match['home_score_90']}-{match['away_score_90']}"
-        state = "鎖盤" if locked else "可下注"
+        state = "\u9396\u76e4" if locked else "\u53ef\u4e0b\u6ce8"
         lines.append(
             f"#{match['id']} {_format_datetime_taipei(match['kickoff_at'])} "
             f"{match['home_team']} vs {match['away_team']} [{match['status']}/{state}]{score}"
@@ -1096,23 +1131,64 @@ def _format_bet_confirmation(
         normalized_selection = selection
 
     if match is None:
-        match_line = f"比賽：#{match_id}"
+        match_line = f"\u6bd4\u8cfd\uff1a#{match_id}"
     else:
         match_line = (
-            f"比賽：#{match['id']} {_format_datetime_taipei(match['kickoff_at'])} "
+            f"\u6bd4\u8cfd\uff1a#{match['id']} {_format_datetime_taipei(match['kickoff_at'])} "
             f"{match['home_team']} vs {match['away_team']}"
         )
 
     return "\n".join(
         [
-            "下注成功！",
+            "\u4e0b\u6ce8\u6210\u529f\uff01",
             match_line,
-            f"玩法：{_market_label(market)}",
-            f"選項：{_selection_label(normalized_selection)}",
-            f"金額：{amount}",
-            f"剩餘餘額：{balance}",
+            f"\u73a9\u6cd5\uff1a{_market_label(market)}",
+            f"\u9078\u9805\uff1a{_selection_label(normalized_selection)}",
+            f"\u91d1\u984d\uff1a{amount}",
+            f"\u5269\u9918\u9918\u984d\uff1a{balance}",
         ]
     )
+
+
+def _format_settlement_announcement(match: dict[str, Any], results: list[SettlementMarketResult]) -> str:
+    score = f"{match['home_score_90']}-{match['away_score_90']}"
+    lines = [
+        "\u4e16\u8db3\u7d50\u7b97\u5b8c\u6210\uff01",
+        (
+            f"\u6bd4\u8cfd\uff1a#{match['id']} {_format_datetime_taipei(match['kickoff_at'])} "
+            f"{match['home_team']} vs {match['away_team']}"
+        ),
+        f"\u5b8c\u8cfd\u6bd4\u5206\uff1a{match['home_team']} {score} {match['away_team']}",
+        "\u7d50\u7b97\u57fa\u6e96\uff1aAPI \u72c0\u614b\u70ba FINISHED\uff0c\u4f7f\u7528 90 \u5206\u9418\u542b\u50b7\u505c\u88dc\u6642\u6bd4\u5206\u3002",
+    ]
+
+    for result in results:
+        status = "\uff08\u5df2\u7d50\u7b97\u904e\uff09" if result.already_settled else ""
+        winning_selection = _selection_label(str(result.winning_selection))
+        lines.append(
+            f"{_market_label(result.market)}\uff1a{winning_selection}{status}\uff0c"
+            f"\u7e3d\u6c60 {result.total_pool}\uff0c\u731c\u4e2d\u6c60 {result.winning_pool}\u3002"
+        )
+        if result.already_settled:
+            continue
+        if result.winner_payouts:
+            ranked = sorted(result.winner_payouts, key=lambda payout: payout.profit, reverse=True)
+            for payout in ranked[:10]:
+                lines.append(
+                    f"\u3000<@{payout.user_id}> \u8cfa {payout.profit}\uff0c\u6d3e\u5f69 {payout.payout}"
+                    f"\uff08\u4e0b\u6ce8 {payout.amount}\uff09"
+                )
+            if len(ranked) > 10:
+                lines.append(f"\u3000\u9084\u6709 {len(ranked) - 10} \u4f4d\u8d0f\u5bb6\u3002")
+        elif result.total_pool > 0:
+            lines.append("\u3000\u6c92\u4eba\u731c\u4e2d\uff0c\u6574\u6c60\u6c92\u6536\u3002")
+        else:
+            lines.append("\u3000\u672c\u76e4\u7121\u4e0b\u6ce8\u3002")
+
+    content = "\n".join(lines)
+    if len(content) <= 1900:
+        return content
+    return content[:1897] + "..."
 
 
 class WorldCupBettingCog(commands.Cog):
@@ -1121,46 +1197,127 @@ class WorldCupBettingCog(commands.Cog):
     def __init__(self, bot: commands.Bot, *, service: Optional[WorldCupBettingService] = None) -> None:
         self.bot = bot
         self.service = service or world_cup_betting_service
+        if self.service.auto_settlement_enabled:
+            self.world_cup_auto_settlement.change_interval(minutes=self.service.auto_sync_interval_minutes)
+            self.world_cup_auto_settlement.start()
 
-    @app_commands.command(name="世足領代幣", description="每天領取一次世足娛樂代幣")
+    def cog_unload(self) -> None:
+        self.world_cup_auto_settlement.cancel()
+
+    @tasks.loop(minutes=60)
+    async def world_cup_auto_settlement(self) -> None:
+        await self._run_auto_sync_and_settle()
+
+    @world_cup_auto_settlement.before_loop
+    async def before_world_cup_auto_settlement(self) -> None:
+        wait_until_ready = getattr(self.bot, "wait_until_ready", None)
+        if wait_until_ready is not None:
+            await wait_until_ready()
+
+    async def _run_auto_sync_and_settle(self) -> None:
+        guilds = list(getattr(self.bot, "guilds", []) or [])
+        if not guilds:
+            return
+
+        try:
+            matches = await asyncio.to_thread(self.service.football_client.fetch_matches)
+        except Exception as exc:
+            logger.error("World Cup automatic match sync failed: %s", exc, exc_info=True)
+            return
+
+        for guild in guilds:
+            guild_id = str(getattr(guild, "id", ""))
+            if not guild_id:
+                continue
+            try:
+                self.service.repository.upsert_matches(guild_id, matches)
+                pending_matches = self.service.repository.list_pending_settlements(guild_id)
+                for pending_match in pending_matches:
+                    match_id = int(pending_match["id"])
+                    results = self.service.settle_match(guild_id, match_id, settled_by=AUTO_SETTLED_BY)
+                    if all(result.already_settled for result in results):
+                        continue
+                    settled_match = self.service.repository.get_match(guild_id, match_id) or pending_match
+                    await self._send_settlement_announcement(guild, settled_match, results)
+            except Exception as exc:
+                logger.error("World Cup automatic settlement failed for guild %s: %s", guild_id, exc, exc_info=True)
+
+    async def _send_settlement_announcement(
+        self,
+        guild: discord.Guild,
+        match: dict[str, Any],
+        results: list[SettlementMarketResult],
+    ) -> None:
+        channel = self._resolve_announcement_channel(guild)
+        if channel is None:
+            logger.warning("World Cup settlement announcement skipped; no channel for guild %s", getattr(guild, "id", None))
+            return
+        try:
+            await channel.send(_format_settlement_announcement(match, results))
+        except Exception as exc:
+            logger.error("World Cup settlement announcement failed: %s", exc, exc_info=True)
+
+    def _resolve_announcement_channel(self, guild: discord.Guild) -> Optional[Any]:
+        channel_id = os.getenv("WORLD_CUP_BETTING_ANNOUNCE_CHANNEL_ID")
+        if channel_id:
+            try:
+                parsed_channel_id = int(channel_id)
+            except ValueError:
+                logger.warning("WORLD_CUP_BETTING_ANNOUNCE_CHANNEL_ID must be a Discord channel id")
+            else:
+                get_channel = getattr(guild, "get_channel", None)
+                channel = get_channel(parsed_channel_id) if get_channel is not None else None
+                if channel is None:
+                    channel = getattr(self.bot, "get_channel", lambda _channel_id: None)(parsed_channel_id)
+                if channel is not None:
+                    return channel
+
+        system_channel = getattr(guild, "system_channel", None)
+        if system_channel is not None:
+            return system_channel
+
+        text_channels = list(getattr(guild, "text_channels", []) or [])
+        return text_channels[0] if text_channels else None
+
+    @app_commands.command(name="\u4e16\u8db3\u9818\u4ee3\u5e63", description="\u6bcf\u5929\u9818\u53d6\u4e00\u6b21\u4e16\u8db3\u5a1b\u6a02\u4ee3\u5e63")
     async def claim_tokens(self, interaction: discord.Interaction) -> None:
         guild_id = _guild_id_or_none(interaction)
         if guild_id is None:
-            await interaction.response.send_message("這個活動只能在伺服器內使用。", ephemeral=True)
+            await interaction.response.send_message("\u9019\u500b\u529f\u80fd\u53ea\u80fd\u5728\u4f3a\u670d\u5668\u5167\u4f7f\u7528\u3002", ephemeral=True)
             return
 
         result = self.service.claim_daily(guild_id, str(interaction.user.id))
         if result.claimed:
-            message = f"領取成功，今天拿到 {result.amount} 代幣。目前餘額：{result.balance}"
+            message = f"\u9818\u53d6\u6210\u529f\uff01\u7372\u5f97 {result.amount} \u4ee3\u5e63\uff0c\u76ee\u524d\u9918\u984d\uff1a{result.balance}"
         else:
-            message = f"今天已經領過囉。目前餘額：{result.balance}"
+            message = f"\u4eca\u5929\u5df2\u7d93\u9818\u904e\u4e86\uff0c\u76ee\u524d\u9918\u984d\uff1a{result.balance}"
         await interaction.response.send_message(message, ephemeral=True)
 
-    @app_commands.command(name="世足今日賽事", description="查看今明兩天已同步的世足賽事")
+    @app_commands.command(name="\u4e16\u8db3\u4eca\u65e5\u8cfd\u4e8b", description="\u67e5\u770b\u4eca\u660e\u5169\u5929\u5df2\u540c\u6b65\u7684\u4e16\u8db3\u8cfd\u4e8b")
     async def todays_matches(self, interaction: discord.Interaction) -> None:
         guild_id = _guild_id_or_none(interaction)
         if guild_id is None:
-            await interaction.response.send_message("這個活動只能在伺服器內使用。", ephemeral=True)
+            await interaction.response.send_message("\u9019\u500b\u529f\u80fd\u53ea\u80fd\u5728\u4f3a\u670d\u5668\u5167\u4f7f\u7528\u3002", ephemeral=True)
             return
 
         matches = self.service.repository.list_today_matches(guild_id)
         content = _format_matches(matches, lock_minutes=self.service.bet_lock_minutes)
         await interaction.response.send_message(content, ephemeral=True)
 
-    @app_commands.command(name="世足下注", description="使用娛樂代幣下注世足賽事")
-    @app_commands.rename(match_id="比賽編號", market="玩法", selection="選項", amount="金額")
+    @app_commands.command(name="\u4e16\u8db3\u4e0b\u6ce8", description="\u4f7f\u7528\u5a1b\u6a02\u4ee3\u5e63\u4e0b\u6ce8\u4e16\u8db3\u8cfd\u4e8b")
+    @app_commands.rename(match_id="\u6bd4\u8cfd\u7de8\u865f", market="\u73a9\u6cd5", selection="\u9078\u9805", amount="\u91d1\u984d")
     @app_commands.describe(
-        match_id="用 /世足今日賽事 看到的比賽編號，也可直接輸入隊名搜尋",
-        market="玩法",
-        selection="勝平負填主勝/平手/客勝；大小填大/小；比分填主隊-客隊如2-1；高比分OTHER",
-        amount="下注代幣數量",
+        match_id="\u5f9e /\u4e16\u8db3\u4eca\u65e5\u8cfd\u4e8b \u6216\u81ea\u52d5\u5b8c\u6210\u4e2d\u9078\u64c7\u53ef\u4e0b\u6ce8\u6bd4\u8cfd\u3002",
+        market="\u73a9\u6cd5",
+        selection="\u52dd\u5e73\u8ca0\u586b\u4e3b\u52dd/\u5e73\u624b/\u5ba2\u52dd\uff1b\u5927\u5c0f\u586b\u5927/\u5c0f\uff1b\u6bd4\u5206\u586b\u4e3b\u968a-\u5ba2\u968a\u5982 2-1\uff0c\u9ad8\u6bd4\u5206 OTHER\u3002",
+        amount="\u4e0b\u6ce8\u4ee3\u5e63\u6578\u91cf",
     )
     @app_commands.autocomplete(match_id=world_cup_match_autocomplete, selection=world_cup_selection_autocomplete)
     @app_commands.choices(
         market=[
-            app_commands.Choice(name="勝平負（選項：主勝 / 平手 / 客勝）", value=MARKET_1X2),
-            app_commands.Choice(name="總進球 2.5（選項：大 / 小）", value=MARKET_TOTAL_GOALS_2_5),
-            app_commands.Choice(name="正確比分（選項：主隊-客隊，例如 2-1）", value=MARKET_CORRECT_SCORE),
+            app_commands.Choice(name="\u52dd\u5e73\u8ca0\uff08\u9078\u9805\uff1a\u4e3b\u52dd / \u5e73\u624b / \u5ba2\u52dd\uff09", value=MARKET_1X2),
+            app_commands.Choice(name="\u7e3d\u9032\u7403 2.5\uff08\u9078\u9805\uff1a\u5927 / \u5c0f\uff09", value=MARKET_TOTAL_GOALS_2_5),
+            app_commands.Choice(name="\u6b63\u78ba\u6bd4\u5206\uff08\u9078\u9805\uff1a\u4e3b\u968a-\u5ba2\u968a\uff0c\u4f8b\u5982 2-1\uff09", value=MARKET_CORRECT_SCORE),
         ]
     )
     async def place_bet(
@@ -1173,7 +1330,7 @@ class WorldCupBettingCog(commands.Cog):
     ) -> None:
         guild_id = _guild_id_or_none(interaction)
         if guild_id is None:
-            await interaction.response.send_message("這個活動只能在伺服器內使用。", ephemeral=True)
+            await interaction.response.send_message("\u9019\u500b\u529f\u80fd\u53ea\u80fd\u5728\u4f3a\u670d\u5668\u5167\u4f7f\u7528\u3002", ephemeral=True)
             return
 
         result = self.service.place_bet(
@@ -1198,48 +1355,48 @@ class WorldCupBettingCog(commands.Cog):
         else:
             await interaction.response.send_message(result.message, ephemeral=True)
 
-    @app_commands.command(name="世足我的下注", description="查看自己的世足下注紀錄")
+    @app_commands.command(name="\u4e16\u8db3\u6211\u7684\u4e0b\u6ce8", description="\u67e5\u770b\u81ea\u5df1\u7684\u4e16\u8db3\u4e0b\u6ce8\u7d00\u9304")
     async def my_bets(self, interaction: discord.Interaction) -> None:
         guild_id = _guild_id_or_none(interaction)
         if guild_id is None:
-            await interaction.response.send_message("這個活動只能在伺服器內使用。", ephemeral=True)
+            await interaction.response.send_message("\u9019\u500b\u529f\u80fd\u53ea\u80fd\u5728\u4f3a\u670d\u5668\u5167\u4f7f\u7528\u3002", ephemeral=True)
             return
 
         bets = self.service.repository.list_user_bets(guild_id, str(interaction.user.id))
         if not bets:
-            await interaction.response.send_message("目前沒有下注紀錄。", ephemeral=True)
+            await interaction.response.send_message("\u76ee\u524d\u6c92\u6709\u4e0b\u6ce8\u7d00\u9304\u3002", ephemeral=True)
             return
         lines = []
         for bet in bets:
             lines.append(
                 f"#{bet['id']} {bet['home_team']} vs {bet['away_team']} "
                 f"{_market_label(bet['market'])}/{_selection_label(bet['selection'])} "
-                f"{bet['amount']} -> {_bet_status_label(bet['status'])} 派彩={bet['payout']}"
+                f"{bet['amount']} -> {_bet_status_label(bet['status'])} \u6d3e\u5f69={bet['payout']}"
             )
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
-    @app_commands.command(name="世足排行榜", description="查看本伺服器世足代幣排行榜")
+    @app_commands.command(name="\u4e16\u8db3\u6392\u884c\u699c", description="\u67e5\u770b\u672c\u4f3a\u670d\u5668\u4e16\u8db3\u4ee3\u5e63\u6392\u884c\u699c")
     async def leaderboard(self, interaction: discord.Interaction) -> None:
         guild_id = _guild_id_or_none(interaction)
         if guild_id is None:
-            await interaction.response.send_message("這個活動只能在伺服器內使用。", ephemeral=True)
+            await interaction.response.send_message("\u9019\u500b\u529f\u80fd\u53ea\u80fd\u5728\u4f3a\u670d\u5668\u5167\u4f7f\u7528\u3002", ephemeral=True)
             return
 
         rows = self.service.repository.leaderboard(guild_id)
         if not rows:
-            await interaction.response.send_message("目前還沒有玩家領取代幣。", ephemeral=True)
+            await interaction.response.send_message("\u76ee\u524d\u9084\u6c92\u6709\u73a9\u5bb6\u8cc7\u6599\u3002", ephemeral=True)
             return
-        lines = [f"{idx}. <@{row['user_id']}>：{row['balance']}" for idx, row in enumerate(rows, start=1)]
+        lines = [f"{idx}. <@{row['user_id']}>\uff1a{row['balance']}" for idx, row in enumerate(rows, start=1)]
         await interaction.response.send_message("\n".join(lines), ephemeral=False)
 
-    @app_commands.command(name="世足同步賽程", description="管理員：從足球 API 同步世足賽程與比分")
+    @app_commands.command(name="\u4e16\u8db3\u540c\u6b65\u8cfd\u7a0b", description="\u7ba1\u7406\u54e1\uff1a\u5f9e\u8db3\u7403 API \u540c\u6b65\u4e16\u8db3\u8cfd\u7a0b\u8207\u6bd4\u5206")
     async def sync_matches(self, interaction: discord.Interaction) -> None:
         guild_id = _guild_id_or_none(interaction)
         if guild_id is None:
-            await interaction.response.send_message("這個活動只能在伺服器內使用。", ephemeral=True)
+            await interaction.response.send_message("\u9019\u500b\u529f\u80fd\u53ea\u80fd\u5728\u4f3a\u670d\u5668\u5167\u4f7f\u7528\u3002", ephemeral=True)
             return
         if not _is_world_cup_admin(interaction):
-            await interaction.response.send_message("需要管理伺服器權限或世足活動管理員 ID。", ephemeral=True)
+            await interaction.response.send_message("\u9700\u8981\u7ba1\u7406\u6b0a\u9650\u6216\u767d\u540d\u55ae\u7ba1\u7406\u54e1 ID\u3002", ephemeral=True)
             return
 
         await interaction.response.defer(ephemeral=True)
@@ -1248,23 +1405,23 @@ class WorldCupBettingCog(commands.Cog):
             count = self.service.repository.upsert_matches(guild_id, matches)
         except Exception as exc:
             logger.error("World Cup match sync failed: %s", exc, exc_info=True)
-            await interaction.followup.send(f"同步失敗：{exc}", ephemeral=True)
+            await interaction.followup.send(f"\u540c\u6b65\u5931\u6557\uff1a{exc}", ephemeral=True)
             return
-        await interaction.followup.send(f"同步完成，共更新 {count} 場比賽。", ephemeral=True)
+        await interaction.followup.send(f"\u540c\u6b65\u5b8c\u6210\uff1a\u66f4\u65b0 {count} \u5834\u8cfd\u4e8b\u3002", ephemeral=True)
 
-    @app_commands.command(name="世足待結算", description="管理員：查看已完賽但尚未結算的世足比賽")
+    @app_commands.command(name="\u4e16\u8db3\u5f85\u7d50\u7b97", description="\u7ba1\u7406\u54e1\uff1a\u67e5\u770b\u5df2\u5b8c\u8cfd\u4f46\u5c1a\u672a\u7d50\u7b97\u7684\u4e16\u8db3\u6bd4\u8cfd")
     async def pending_settlements(self, interaction: discord.Interaction) -> None:
         guild_id = _guild_id_or_none(interaction)
         if guild_id is None:
-            await interaction.response.send_message("這個活動只能在伺服器內使用。", ephemeral=True)
+            await interaction.response.send_message("\u9019\u500b\u529f\u80fd\u53ea\u80fd\u5728\u4f3a\u670d\u5668\u5167\u4f7f\u7528\u3002", ephemeral=True)
             return
         if not _is_world_cup_admin(interaction):
-            await interaction.response.send_message("需要管理伺服器權限或世足活動管理員 ID。", ephemeral=True)
+            await interaction.response.send_message("\u9700\u8981\u7ba1\u7406\u6b0a\u9650\u6216\u767d\u540d\u55ae\u7ba1\u7406\u54e1 ID\u3002", ephemeral=True)
             return
 
         matches = self.service.repository.list_pending_settlements(guild_id)
         if not matches:
-            await interaction.response.send_message("目前沒有待結算比賽。", ephemeral=True)
+            await interaction.response.send_message("\u76ee\u524d\u6c92\u6709\u5f85\u7d50\u7b97\u8cfd\u4e8b\u3002", ephemeral=True)
             return
         lines = []
         for match in matches:
@@ -1274,15 +1431,15 @@ class WorldCupBettingCog(commands.Cog):
             )
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
-    @app_commands.command(name="世足確認結算", description="管理員：確認比分並發放分池獎金")
-    @app_commands.rename(match_id="比賽編號")
+    @app_commands.command(name="\u4e16\u8db3\u78ba\u8a8d\u7d50\u7b97", description="\u7ba1\u7406\u54e1\uff1a\u78ba\u8a8d\u6bd4\u5206\u4e26\u767c\u653e\u734e\u91d1")
+    @app_commands.rename(match_id="\u6bd4\u8cfd\u7de8\u865f")
     async def confirm_settlement(self, interaction: discord.Interaction, match_id: int) -> None:
         guild_id = _guild_id_or_none(interaction)
         if guild_id is None:
-            await interaction.response.send_message("這個活動只能在伺服器內使用。", ephemeral=True)
+            await interaction.response.send_message("\u9019\u500b\u529f\u80fd\u53ea\u80fd\u5728\u4f3a\u670d\u5668\u5167\u4f7f\u7528\u3002", ephemeral=True)
             return
         if not _is_world_cup_admin(interaction):
-            await interaction.response.send_message("需要管理伺服器權限或世足活動管理員 ID。", ephemeral=True)
+            await interaction.response.send_message("\u9700\u8981\u7ba1\u7406\u6b0a\u9650\u6216\u767d\u540d\u55ae\u7ba1\u7406\u54e1 ID\u3002", ephemeral=True)
             return
 
         try:
@@ -1290,16 +1447,14 @@ class WorldCupBettingCog(commands.Cog):
         except ValueError as exc:
             await interaction.response.send_message(str(exc), ephemeral=True)
             return
-        lines = []
-        for result in results:
-            suffix = "（已結算，略過）" if result.already_settled else ""
-            lines.append(
-                f"{_market_label(result.market)}：{_selection_label(str(result.winning_selection))} "
-                f"固定倍率={fixed_odds_label(result.market, str(result.winning_selection))} "
-                f"池={result.total_pool} 勝池={result.winning_pool} "
-                f"贏家={result.winner_count} 退款={result.refunded_count}{suffix}"
-            )
-        await interaction.response.send_message("結算完成：\n" + "\n".join(lines), ephemeral=True)
+        match = self.service.repository.get_match(guild_id, match_id)
+        if match is None:
+            await interaction.response.send_message("\u7d50\u7b97\u5b8c\u6210\uff0c\u4f46\u627e\u4e0d\u5230\u8cfd\u4e8b\u8cc7\u6599\u53ef\u516c\u544a\u3002", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            _format_settlement_announcement(match, results),
+            ephemeral=all(result.already_settled for result in results),
+        )
 
 
 async def setup(bot: commands.Bot) -> None:

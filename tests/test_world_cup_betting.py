@@ -371,6 +371,83 @@ class WorldCupBettingTests(unittest.TestCase):
                 self.assertEqual(repository.get_player("guild", "alice")["balance"], 19500)
                 repository.close()
 
+    def test_auto_sync_settles_finished_matches_and_announces_payouts(self):
+        class FakeFootballClient:
+            def __init__(self, payloads):
+                self.payloads = payloads
+
+            def fetch_matches(self):
+                return self.payloads
+
+        class FakeChannel:
+            def __init__(self):
+                self.messages = []
+
+            async def send(self, content):
+                self.messages.append(content)
+
+        class FakeGuild:
+            def __init__(self, channel):
+                self.id = "guild"
+                self.system_channel = channel
+                self.text_channels = [channel]
+
+        class FakeBot:
+            def __init__(self, guild):
+                self.guilds = [guild]
+
+            async def wait_until_ready(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sqlite_path = os.path.join(temp_dir, "worldcup.db")
+            with patch.dict(
+                os.environ,
+                {
+                    "DB_TYPE": "sqlite",
+                    "SQLITE_PATH": sqlite_path,
+                    "WORLD_CUP_AUTO_SETTLEMENT_ENABLED": "0",
+                },
+                clear=False,
+            ):
+                repository = self._repository(sqlite_path)
+                now = datetime(2026, 6, 10, 1, 0, tzinfo=timezone.utc)
+                kickoff = now + timedelta(hours=4)
+                repository.upsert_matches("guild", [self._match_payload(kickoff_at=kickoff.isoformat())])
+                match_id = repository.list_today_matches("guild", now=now)[0]["id"]
+                repository.claim_daily("guild", "alice", 20000, now=now)
+                repository.place_bet(
+                    "guild",
+                    "alice",
+                    match_id,
+                    self.module.MARKET_1X2,
+                    "HOME",
+                    100,
+                    lock_minutes=10,
+                    now=now,
+                )
+
+                finished_payload = self._match_payload(
+                    kickoff_at=kickoff.isoformat(),
+                    status="FINISHED",
+                    home_score=2,
+                    away_score=1,
+                )
+                channel = FakeChannel()
+                service = self.module.WorldCupBettingService(
+                    repository=repository,
+                    football_client=FakeFootballClient([finished_payload]),
+                )
+                cog = self.module.WorldCupBettingCog(FakeBot(FakeGuild(channel)), service=service)
+
+                asyncio.run(cog._run_auto_sync_and_settle())
+
+                self.assertEqual(repository.get_player("guild", "alice")["balance"], 20100)
+                self.assertEqual(len(channel.messages), 1)
+                self.assertIn("世足結算完成", channel.messages[0])
+                self.assertIn("<@alice> 賺 100", channel.messages[0])
+                repository.close()
+
     def test_extension_loader_is_env_gated(self):
         install_discord_stub()
         sys.modules.pop("discord_bot.cogs", None)
