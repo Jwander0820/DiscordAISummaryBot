@@ -24,10 +24,12 @@ class WorldCupBettingTests(unittest.TestCase):
         class FakeCursor:
             def __init__(self):
                 self.queries = []
+                self.params = []
                 self.description = (("id",),)
 
             def execute(self, sql, params=()):
                 self.queries.append(sql)
+                self.params.append(params)
 
             def fetchall(self):
                 return []
@@ -58,6 +60,31 @@ class WorldCupBettingTests(unittest.TestCase):
         self.assertIn("guild_id = %s", query)
         self.assertNotIn("guild_id = ?", query)
         self.assertEqual(repository.placeholder, "%s")
+        self.assertIsInstance(fake_connection.cursor_obj.params[-1][1], datetime)
+        self.assertIsInstance(fake_connection.cursor_obj.params[-1][2], datetime)
+
+    def test_match_formatting_accepts_postgres_datetime_values(self):
+        kickoff = datetime(2026, 6, 26, 19, 0, tzinfo=timezone.utc)
+        match = {
+            "id": 61,
+            "home_team": "Norway",
+            "away_team": "France",
+            "kickoff_at": kickoff,
+            "status": "TIMED",
+            "home_score_90": None,
+            "away_score_90": None,
+        }
+
+        formatted = self.module._format_matches(
+            [match],
+            lock_minutes=10,
+            now=datetime(2026, 6, 26, 12, 0, tzinfo=timezone.utc),
+        )
+        choice_name = self.module._match_choice_name(match, lock_minutes=10)
+
+        self.assertIn("Norway vs France", formatted)
+        self.assertIn("06/27 03:00", formatted)
+        self.assertIn("Norway vs France", choice_name)
 
     def _match_payload(
         self,

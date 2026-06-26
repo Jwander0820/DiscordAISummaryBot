@@ -235,7 +235,13 @@ def _today_taipei(now: Optional[datetime] = None) -> str:
     return current.astimezone(TAIPEI_TZ).date().isoformat()
 
 
-def _parse_datetime(value: str) -> datetime:
+def _parse_datetime(value: str | datetime) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
     normalized = value.replace("Z", "+00:00")
     parsed = datetime.fromisoformat(normalized)
     if parsed.tzinfo is None:
@@ -243,7 +249,7 @@ def _parse_datetime(value: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def _format_datetime_taipei(value: str) -> str:
+def _format_datetime_taipei(value: str | datetime) -> str:
     parsed = _parse_datetime(value).astimezone(TAIPEI_TZ)
     return parsed.strftime("%m/%d %H:%M")
 
@@ -518,6 +524,15 @@ class WorldCupBettingRepository:
         if self.conn is not None:
             self.conn.rollback()
 
+    def _db_datetime(self, value: str | datetime) -> str | datetime:
+        parsed = _parse_datetime(value)
+        if self.db_type == "postgres":
+            return parsed
+        return parsed.isoformat()
+
+    def _db_now(self) -> str | datetime:
+        return self._db_datetime(_now_utc())
+
     def get_player(self, guild_id: str, user_id: str) -> Optional[dict[str, Any]]:
         sql = (
             "SELECT guild_id, user_id, balance, claimed_date FROM world_cup_players "
@@ -531,7 +546,7 @@ class WorldCupBettingRepository:
         player = self.get_player(guild_id, user_id)
         if player is not None:
             return player
-        now = _iso_now()
+        now = self._db_now()
         sql = (
             "INSERT INTO world_cup_players (guild_id, user_id, balance, claimed_date, created_at, updated_at) "
             f"VALUES ({self.placeholder}, {self.placeholder}, {self.placeholder}, {self.placeholder}, "
@@ -552,7 +567,7 @@ class WorldCupBettingRepository:
         if player.get("claimed_date") == claim_date:
             return ClaimResult(False, int(player["balance"]), claim_date, amount)
 
-        updated_at = _iso_now()
+        updated_at = self._db_now()
         sql = (
             "UPDATE world_cup_players SET balance = balance + "
             f"{self.placeholder}, claimed_date = {self.placeholder}, updated_at = {self.placeholder} "
@@ -564,7 +579,7 @@ class WorldCupBettingRepository:
         return ClaimResult(True, int(updated["balance"]), claim_date, amount)
 
     def upsert_matches(self, guild_id: str, matches: list[FootballMatchPayload]) -> int:
-        now = _iso_now()
+        now = self._db_now()
         count = 0
         for match in matches:
             score_updates = (
@@ -594,7 +609,7 @@ class WorldCupBettingRepository:
                     match.provider_match_id,
                     match.home_team,
                     match.away_team,
-                    match.kickoff_at,
+                    self._db_datetime(match.kickoff_at),
                     match.status,
                     score_updates[0],
                     score_updates[1],
@@ -629,7 +644,14 @@ class WorldCupBettingRepository:
             f"WHERE guild_id = {self.placeholder} AND kickoff_at >= {self.placeholder} AND kickoff_at < {self.placeholder} "
             "ORDER BY kickoff_at ASC LIMIT 20;"
         )
-        self._execute(sql, (guild_id, start.astimezone(timezone.utc).isoformat(), end.astimezone(timezone.utc).isoformat()))
+        self._execute(
+            sql,
+            (
+                guild_id,
+                self._db_datetime(start.astimezone(timezone.utc)),
+                self._db_datetime(end.astimezone(timezone.utc)),
+            ),
+        )
         return [_row_to_dict(self.cursor, row) for row in self.cursor.fetchall()]
 
     def list_pending_settlements(self, guild_id: str) -> list[dict[str, Any]]:
@@ -682,7 +704,7 @@ class WorldCupBettingRepository:
         if current.astimezone(timezone.utc) >= kickoff - timedelta(minutes=lock_minutes):
             return BetResult(False, f"這場比賽已鎖盤（開賽前 {lock_minutes} 分鐘）", balance)
 
-        created_at = _iso_now()
+        created_at = self._db_now()
         try:
             update_sql = (
                 f"UPDATE world_cup_players SET balance = balance - {self.placeholder}, updated_at = {self.placeholder} "
@@ -749,7 +771,7 @@ class WorldCupBettingRepository:
                 self._commit()
                 return results
 
-            settled_at = _iso_now()
+            settled_at = self._db_now()
             sql = (
                 f"UPDATE world_cup_matches SET settlement_status = {self.placeholder}, settled_at = {self.placeholder} "
                 f"WHERE guild_id = {self.placeholder} AND id = {self.placeholder};"
@@ -818,7 +840,7 @@ class WorldCupBettingRepository:
         )
         self._execute(
             settlement_sql,
-            (match["id"], market, winning_selection, total_pool, winning_pool, settled_by, _iso_now()),
+            (match["id"], market, winning_selection, total_pool, winning_pool, settled_by, self._db_now()),
         )
         return SettlementMarketResult(
             market,
@@ -834,7 +856,7 @@ class WorldCupBettingRepository:
             f"UPDATE world_cup_players SET balance = balance + {self.placeholder}, updated_at = {self.placeholder} "
             f"WHERE guild_id = {self.placeholder} AND user_id = {self.placeholder};"
         )
-        self._execute(sql, (amount, _iso_now(), guild_id, user_id))
+        self._execute(sql, (amount, self._db_now(), guild_id, user_id))
 
     def _update_bet_status(self, bet_id: int, status: str, payout: int) -> None:
         sql = (
