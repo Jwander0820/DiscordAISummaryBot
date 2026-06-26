@@ -412,7 +412,7 @@ class WorldCupBettingRepository:
     def __init__(self, *, retry_interval_seconds: float = 30.0) -> None:
         self.db_type = (os.getenv("DB_TYPE", "sqlite") or "sqlite").lower()
         self.db_enabled = True
-        self.placeholder = "?"
+        self.placeholder = "%s" if self.db_type == "postgres" else "?"
         self.conn: Optional[Any] = None
         self.cursor: Optional[Any] = None
         self._initialized = False
@@ -432,6 +432,7 @@ class WorldCupBettingRepository:
             logger.error("Unsupported DB_TYPE for World Cup betting: %s; falling back to sqlite", self.db_type)
             self.db_type = "sqlite"
 
+        self.placeholder = "%s" if self.db_type == "postgres" else "?"
         if self.db_type == "postgres":
             self._init_postgres()
         else:
@@ -455,6 +456,7 @@ class WorldCupBettingRepository:
             self.db_enabled = False
 
     def _init_postgres(self) -> None:
+        self.placeholder = "%s"
         if psycopg2 is None:
             logger.error("psycopg2 is unavailable; World Cup betting DB disabled")
             self.db_enabled = False

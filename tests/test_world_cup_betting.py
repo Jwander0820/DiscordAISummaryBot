@@ -20,6 +20,45 @@ class WorldCupBettingTests(unittest.TestCase):
     def _repository(self, sqlite_path):
         return self.module.WorldCupBettingRepository(retry_interval_seconds=0)
 
+    def test_postgres_queries_use_psycopg2_placeholders(self):
+        class FakeCursor:
+            def __init__(self):
+                self.queries = []
+                self.description = (("id",),)
+
+            def execute(self, sql, params=()):
+                self.queries.append(sql)
+
+            def fetchall(self):
+                return []
+
+        class FakeConnection:
+            def __init__(self):
+                self.cursor_obj = FakeCursor()
+
+            def cursor(self):
+                return self.cursor_obj
+
+            def commit(self):
+                pass
+
+            def close(self):
+                pass
+
+        fake_connection = FakeConnection()
+        fake_psycopg2 = types.SimpleNamespace(connect=lambda *_args, **_kwargs: fake_connection)
+
+        with patch.dict(os.environ, {"DB_TYPE": "postgres", "DATABASE_URL": "postgres://example"}, clear=False):
+            with patch.object(self.module, "psycopg2", fake_psycopg2):
+                repository = self.module.WorldCupBettingRepository(retry_interval_seconds=0)
+                self.assertEqual(repository.placeholder, "%s")
+                repository.list_today_matches("guild")
+
+        query = fake_connection.cursor_obj.queries[-1]
+        self.assertIn("guild_id = %s", query)
+        self.assertNotIn("guild_id = ?", query)
+        self.assertEqual(repository.placeholder, "%s")
+
     def _match_payload(
         self,
         provider_match_id="m1",
