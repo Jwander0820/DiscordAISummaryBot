@@ -166,6 +166,7 @@ def install_discord_stub():
     app_commands_stub.default_permissions = identity_decorator
     app_commands_stub.rename = identity_decorator
     app_commands_stub.describe = identity_decorator
+    app_commands_stub.autocomplete = identity_decorator
     app_commands_stub.Choice = Choice
 
     sys.modules["discord"] = discord_stub
