@@ -10,7 +10,6 @@ def install_discord_stub():
     discord_stub = types.ModuleType("discord")
     ext_stub = types.ModuleType("discord.ext")
     commands_stub = types.ModuleType("discord.ext.commands")
-    tasks_stub = types.ModuleType("discord.ext.tasks")
     app_commands_stub = types.ModuleType("discord.app_commands")
     errors_stub = types.ModuleType("discord.errors")
     ui_stub = types.ModuleType("discord.ui")
@@ -111,49 +110,6 @@ def install_discord_stub():
     class Bot:
         pass
 
-    class Loop:
-        def __init__(self, func, **_kwargs):
-            self.func = func
-            self.before_loop_func = None
-            self.started = False
-            self.cancelled = False
-            self.interval = None
-
-        def __get__(self, instance, owner):
-            if instance is None:
-                return self
-            bound = Loop(self.func)
-            bound.before_loop_func = self.before_loop_func
-            bound.instance = instance
-            return bound
-
-        async def __call__(self, *args, **kwargs):
-            instance = getattr(self, "instance", None)
-            if instance is not None:
-                return await self.func(instance, *args, **kwargs)
-            return await self.func(*args, **kwargs)
-
-        def before_loop(self, func):
-            self.before_loop_func = func
-            return func
-
-        def change_interval(self, **kwargs):
-            self.interval = kwargs
-
-        def start(self):
-            self.started = True
-
-        def cancel(self):
-            self.cancelled = True
-
-    def loop(*args, **kwargs):
-        def decorator(func):
-            return Loop(func, **kwargs)
-
-        if args and callable(args[0]) and not kwargs:
-            return Loop(args[0])
-        return decorator
-
     def identity_decorator(*args, **kwargs):
         def decorator(func):
             return func
@@ -204,20 +160,17 @@ def install_discord_stub():
 
     commands_stub.Cog = Cog
     commands_stub.Bot = Bot
-    tasks_stub.loop = loop
 
     app_commands_stub.command = identity_decorator
     app_commands_stub.choices = choices
     app_commands_stub.default_permissions = identity_decorator
     app_commands_stub.rename = identity_decorator
     app_commands_stub.describe = identity_decorator
-    app_commands_stub.autocomplete = identity_decorator
     app_commands_stub.Choice = Choice
 
     sys.modules["discord"] = discord_stub
     sys.modules["discord.ext"] = ext_stub
     sys.modules["discord.ext.commands"] = commands_stub
-    sys.modules["discord.ext.tasks"] = tasks_stub
     sys.modules["discord.app_commands"] = app_commands_stub
     sys.modules["discord.errors"] = errors_stub
     sys.modules["discord.ui"] = ui_stub

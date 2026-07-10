@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import io
 import logging
 import os
@@ -280,41 +279,15 @@ async def _fetch_html_with_aiohttp(url: str) -> Tuple[str, str, List[str], List[
     raise RuntimeError(last_error if last_status else "Facebook 頁面讀取失敗（無有效回應）")
 
 
-def _fetch_og_with_playwright_sync(url: str) -> Tuple[str, str, List[str], List[str], str]:
-    """用 Playwright 取得動態渲染後的 Facebook Open Graph 資料。"""
-    from playwright.sync_api import sync_playwright
-
-    with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
-        context = browser.new_context(user_agent=DEFAULT_HEADERS["User-Agent"], locale="zh-TW")
-        page = context.new_page()
-        page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        page.wait_for_timeout(1200)
-
-        html = page.content()
-        title, description, image_urls, video_urls = _extract_og_data(html)
-        final_url = page.url
-
-        context.close()
-        browser.close()
-        return title, description, image_urls, video_urls, final_url
-
-
 async def _fetch_og_data(url: str) -> Tuple[str, str, List[str], List[str], str]:
-    """統一 Facebook OG 抓取入口，依序嘗試 aiohttp 與 Playwright。"""
+    """使用 aiohttp 擷取 Facebook Open Graph；失敗時回傳安全 fallback。"""
     try:
         title, description, image_urls, video_urls, final_url, status = await _fetch_html_with_aiohttp(url)
         if status >= 400 and not (title or description or image_urls or video_urls):
             raise RuntimeError(f"HTTP {status} 且無可用 Open Graph")
         return title, description, image_urls, video_urls, final_url or url
     except Exception as http_error:
-        logger.warning("aiohttp 抓 Facebook Open Graph 失敗，改用 Playwright: %s", http_error)
-
-    try:
-        title, description, image_urls, video_urls, final_url = await asyncio.to_thread(_fetch_og_with_playwright_sync, url)
-        return title, description, image_urls, video_urls, final_url or url
-    except Exception as playwright_error:
-        logger.warning("Playwright 擷取 Facebook Open Graph 失敗: %s", playwright_error)
+        logger.warning("aiohttp 擷取 Facebook Open Graph 失敗: %s", http_error)
         return "Facebook 貼文", "", [], [], url
 
 
