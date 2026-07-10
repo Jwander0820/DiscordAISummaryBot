@@ -1,4 +1,5 @@
 import importlib
+from importlib.machinery import ModuleSpec
 import sys
 import types
 
@@ -13,6 +14,9 @@ def install_discord_stub():
     app_commands_stub = types.ModuleType("discord.app_commands")
     errors_stub = types.ModuleType("discord.errors")
     ui_stub = types.ModuleType("discord.ui")
+
+    for module in (discord_stub, ext_stub, commands_stub, app_commands_stub, errors_stub, ui_stub):
+        module.__spec__ = ModuleSpec(module.__name__, loader=None)
 
     class TextChannel:
         pass

@@ -12,6 +12,7 @@ import aiohttp
 import discord
 from bs4 import BeautifulSoup
 from discord.errors import HTTPException, InteractionResponded, NotFound
+from .download import MAX_IMAGE_DOWNLOAD_BYTES, MAX_VIDEO_DOWNLOAD_BYTES, download_bytes_limited
 from .sender import cleanup_source_message, send_preview_as_author
 from .text import extract_message_commentary
 
@@ -53,9 +54,6 @@ DEFAULT_HEADERS = {
     "Sec-Fetch-Mode": "navigate",
     "Sec-Fetch-Dest": "document",
 }
-
-MAX_VIDEO_UPLOAD_BYTES = 20 * 1024 * 1024
-
 
 @dataclass
 class FacebookPreview:
@@ -198,15 +196,15 @@ def _build_candidate_urls(url: str) -> List[str]:
     return uniq
 
 
-async def _download_bytes(session: aiohttp.ClientSession, url: str, timeout_sec: int = 20) -> Optional[bytes]:
+async def _download_bytes(
+    session: aiohttp.ClientSession,
+    url: str,
+    timeout_sec: int = 20,
+    *,
+    max_bytes: int = MAX_IMAGE_DOWNLOAD_BYTES,
+) -> Optional[bytes]:
     """下載圖片或影片位元組，失敗時回傳 `None`。"""
-    try:
-        async with session.get(url, timeout=timeout_sec) as resp:
-            if resp.status == 200:
-                return await resp.read()
-    except Exception:
-        return None
-    return None
+    return await download_bytes_limited(session, url, max_bytes=max_bytes, timeout_sec=timeout_sec)
 
 
 def _meta_contents(soup: BeautifulSoup, key: str) -> List[str]:
@@ -233,7 +231,7 @@ def _meta_contents(soup: BeautifulSoup, key: str) -> List[str]:
 def _extract_og_data(html: str) -> Tuple[str, str, List[str], List[str]]:
     """從 HTML 抽出 Facebook Open Graph 標題、描述、圖片與影片網址。"""
     soup = BeautifulSoup(html, "html.parser")
-    title = (_meta_contents(soup, "og:title") or ["Facebook 貼文"])[0]
+    title = (_meta_contents(soup, "og:title") or [""])[0]
     description = (_meta_contents(soup, "og:description") or [""])[0]
     image_urls = _meta_contents(soup, "og:image")
 
@@ -266,13 +264,14 @@ async def _fetch_html_with_aiohttp(url: str) -> Tuple[str, str, List[str], List[
                     html = await resp.text(errors="ignore")
                     title, description, image_urls, video_urls = _extract_og_data(html)
 
-                    if title or description or image_urls or video_urls:
+                    has_metadata = bool(title or description or image_urls or video_urls)
+                    if resp.status < 400 and has_metadata:
                         return title, description, image_urls, video_urls, str(resp.url), resp.status
 
-                    if resp.status < 400:
-                        return title, description, image_urls, video_urls, str(resp.url), resp.status
-
-                    last_error = f"Facebook 頁面讀取失敗（HTTP {resp.status}）"
+                    if resp.status >= 400:
+                        last_error = f"Facebook 頁面讀取失敗（HTTP {resp.status}）"
+                    else:
+                        last_error = "Facebook 頁面未提供可用的 Open Graph metadata"
             except Exception as exc:
                 last_error = f"Facebook 頁面讀取失敗（{exc}）"
 
@@ -303,7 +302,7 @@ async def build_facebook_preview(
     title, description, image_urls, video_urls, final_url = await _fetch_og_data(url)
 
     embed = discord.Embed(
-        title=title[:256],
+        title=(title or "Facebook 貼文")[:256],
         description=description[:4096],
         url=final_url,
     )
@@ -338,8 +337,13 @@ async def build_facebook_preview(
         mp4_urls = [u for u in video_urls if u.lower().endswith(".mp4")]
         if allow_video_upload and mp4_urls:
             async with aiohttp.ClientSession(headers=DEFAULT_HEADERS) as session:
-                video_data = await _download_bytes(session, mp4_urls[0], timeout_sec=40)
-            if video_data and len(video_data) <= MAX_VIDEO_UPLOAD_BYTES:
+                video_data = await _download_bytes(
+                    session,
+                    mp4_urls[0],
+                    timeout_sec=40,
+                    max_bytes=MAX_VIDEO_DOWNLOAD_BYTES,
+                )
+            if video_data:
                 files.append(discord.File(io.BytesIO(video_data), filename="facebook_preview_video.mp4", spoiler=spoiler))
             else:
                 extra_lines.append(f"影片連結：{mp4_urls[0]}")
@@ -448,5 +452,5 @@ async def handle_facebook_in_message(message: discord.Message) -> bool:
         return True
     except Exception as exc:
         logger.error("Facebook 預覽失敗: %s", exc, exc_info=True)
-        await message.reply(f"Facebook 預覽失敗：{exc}", mention_author=False)
+        await message.reply("Facebook 預覽失敗，請稍後再試或直接開啟原連結。", mention_author=False)
         return False

@@ -31,6 +31,7 @@ from discord.errors import HTTPException, InteractionResponded, NotFound
 
 # 你已有的抓取器
 from .threads_fetch import fetch_threads_post
+from .download import MAX_IMAGE_DOWNLOAD_BYTES, MAX_VIDEO_DOWNLOAD_BYTES, download_bytes_limited
 from .sender import cleanup_source_message, send_preview_as_author
 from .text import extract_message_commentary
 
@@ -235,17 +236,17 @@ def _extract_threads_commentary(content: str, url: str) -> str:
 
 # --- 下載媒體 ---
 
-async def _download_bytes(session: aiohttp.ClientSession, url: str, timeout_sec: int = 20) -> Optional[bytes]:
+async def _download_bytes(
+    session: aiohttp.ClientSession,
+    url: str,
+    timeout_sec: int = 20,
+    *,
+    max_bytes: int = MAX_IMAGE_DOWNLOAD_BYTES,
+) -> Optional[bytes]:
     """
     下載二進位內容（圖片/影片），失敗回 None。
     """
-    try:
-        async with session.get(url, timeout=timeout_sec) as resp:
-            if resp.status == 200:
-                return await resp.read()
-    except Exception:
-        return None
-    return None
+    return await download_bytes_limited(session, url, max_bytes=max_bytes, timeout_sec=timeout_sec)
 
 
 # --- 建立預覽 ---
@@ -331,8 +332,13 @@ async def build_threads_preview(
         if allow_video_upload and mp4s:
             # （可選）小檔案才建議上傳，避免觸發檔案大小限制
             async with aiohttp.ClientSession() as sess:
-                data = await _download_bytes(sess, mp4s[0], timeout_sec=40)
-            if data and len(data) < 20 * 1024 * 1024:  # 20MB 只是範例，依你的機器人等級調整
+                data = await _download_bytes(
+                    sess,
+                    mp4s[0],
+                    timeout_sec=40,
+                    max_bytes=MAX_VIDEO_DOWNLOAD_BYTES,
+                )
+            if data:
                 vname = "threads_video.mp4"
                 files.append(discord.File(io.BytesIO(data), filename=vname, spoiler=spoiler))
                 # Discord 無法把影片當 embed.image，直接上傳附件即可
@@ -465,5 +471,5 @@ async def handle_threads_in_message(message: discord.Message) -> bool:
         return True
     except Exception as e:
         logger.error(e, exc_info=True)
-        await message.reply(f"Threads 預覽失敗：{e}", mention_author=False)
+        await message.reply("Threads 預覽失敗，請稍後再試或直接開啟原連結。", mention_author=False)
         return False

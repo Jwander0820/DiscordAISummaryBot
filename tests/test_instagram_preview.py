@@ -84,7 +84,9 @@ class InstagramPreviewTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(preview.embed.title, "Instagram @demo")
         self.assertEqual(preview.embed.description, "caption")
         self.assertEqual(preview.files[0].filename, "instagram_image.jpg")
-        self.assertEqual(preview.embed.image["url"], "attachment://instagram_image.jpg")
+        image = preview.embed.image
+        image_url = getattr(image, "url", None) if not isinstance(image, dict) else image["url"]
+        self.assertEqual(image_url, "attachment://instagram_image.jpg")
 
     @patch("discord_bot.features.social_preview.instagram_preview.asyncio.to_thread")
     async def test_build_instagram_preview_rejects_generic_empty_metadata(self, mock_to_thread):

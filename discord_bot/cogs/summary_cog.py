@@ -11,6 +11,7 @@ from ..features.chat.history import collect_non_bot_messages, truncate_for_disco
 from ..features.summaries.service import summarize_messages
 
 logger = logging.getLogger("discord_digest_bot")
+UNEXPECTED_COMMAND_ERROR_MESSAGE = "SERN 系統暫時發生問題，請稍後再試一次。"
 
 
 def _require_text_channel(interaction: discord.Interaction) -> discord.TextChannel | None:
@@ -65,7 +66,7 @@ class SummaryCog(commands.Cog):
             )
         except Exception as exc:
             logger.error("An unexpected error occurred during summarization command: %s", exc, exc_info=True)
-            await interaction.followup.send(f"An unexpected error occurred: {exc}", ephemeral=True)
+            await interaction.followup.send(UNEXPECTED_COMMAND_ERROR_MESSAGE, ephemeral=True)
 
     @app_commands.command(name="整理廢話的魔法", description="總結頻道中的1小時內所有訊息")
     async def magic_summarize(self, interaction: discord.Interaction, len_msg: int = 5000) -> None:
@@ -101,7 +102,7 @@ class SummaryCog(commands.Cog):
             )
         except Exception as exc:
             logger.error("An unexpected error occurred during summarization command: %s", exc, exc_info=True)
-            await interaction.followup.send(f"An unexpected error occurred: {exc}", ephemeral=True)
+            await interaction.followup.send(UNEXPECTED_COMMAND_ERROR_MESSAGE, ephemeral=True)
 
     @app_commands.command(name="命運探知之魔眼", description="總結頻道中七天內一萬則訊息的精華(實驗性)")
     async def deep_summary(self, interaction: discord.Interaction, len_msg: int = 10000) -> None:
@@ -141,7 +142,7 @@ class SummaryCog(commands.Cog):
             await interaction.followup.send("權限錯誤：無法讀取或發送訊息至此頻道。", ephemeral=True)
         except Exception as exc:
             logger.error("Unexpected error in /命運探知之魔眼: %s", exc, exc_info=True)
-            await interaction.followup.send(f"發生錯誤：{exc}", ephemeral=True)
+            await interaction.followup.send(UNEXPECTED_COMMAND_ERROR_MESSAGE, ephemeral=True)
 
 
 async def setup(bot: commands.Bot) -> None:

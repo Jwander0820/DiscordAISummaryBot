@@ -131,7 +131,7 @@ class FunCog(commands.Cog):
             return
         except discord.HTTPException as http_err:
             logger.error("DeepFaker webhook 發送失敗: %s", http_err, exc_info=True)
-            await interaction.followup.send(f"DeepFaker 發送失敗：{http_err}", ephemeral=True)
+            await interaction.followup.send("DeepFaker 發送失敗，請稍後再試一次。", ephemeral=True)
             return
 
         log_message = (

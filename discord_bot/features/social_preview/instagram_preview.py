@@ -14,6 +14,7 @@ import discord
 from discord.errors import HTTPException, InteractionResponded, NotFound
 
 from .instagram_fetch import InstagramPost, fetch_instagram_post, normalize_instagram_url
+from .download import MAX_IMAGE_DOWNLOAD_BYTES, MAX_VIDEO_DOWNLOAD_BYTES, download_bytes_limited
 from .sender import cleanup_source_message, send_preview_as_author
 from .text import extract_message_commentary
 
@@ -25,9 +26,6 @@ INSTAGRAM_URL_RE = re.compile(
     re.IGNORECASE,
 )
 SPOILER_BLOCK_RE = re.compile(r"\|\|(.+?)\|\|", re.DOTALL)
-MAX_VIDEO_UPLOAD_BYTES = 20 * 1024 * 1024
-
-
 @dataclass
 class InstagramPreview:
     embed: Optional[discord.Embed]
@@ -173,14 +171,14 @@ def _extract_instagram_commentary(content: str, url: str) -> str:
     )
 
 
-async def _download_bytes(session: aiohttp.ClientSession, url: str, timeout_sec: int = 20) -> Optional[bytes]:
-    try:
-        async with session.get(url, timeout=timeout_sec) as response:
-            if response.status == 200:
-                return await response.read()
-    except Exception:
-        return None
-    return None
+async def _download_bytes(
+    session: aiohttp.ClientSession,
+    url: str,
+    timeout_sec: int = 20,
+    *,
+    max_bytes: int = MAX_IMAGE_DOWNLOAD_BYTES,
+) -> Optional[bytes]:
+    return await download_bytes_limited(session, url, max_bytes=max_bytes, timeout_sec=timeout_sec)
 
 
 def _format_link(label: str, url: str) -> str:
@@ -255,8 +253,13 @@ async def build_instagram_preview(
 
         if allow_video_upload and mp4_urls:
             async with aiohttp.ClientSession() as session:
-                video_data = await _download_bytes(session, mp4_urls[0], timeout_sec=40)
-            if video_data and len(video_data) <= MAX_VIDEO_UPLOAD_BYTES:
+                video_data = await _download_bytes(
+                    session,
+                    mp4_urls[0],
+                    timeout_sec=40,
+                    max_bytes=MAX_VIDEO_DOWNLOAD_BYTES,
+                )
+            if video_data:
                 files.append(discord.File(io.BytesIO(video_data), filename="instagram_video.mp4", spoiler=spoiler))
                 inline_video_url = None
             else:
