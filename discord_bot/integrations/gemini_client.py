@@ -135,10 +135,10 @@ def _create_models() -> tuple[Optional[GeminiAsyncModel], Optional[GeminiAsyncMo
 
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
-        summary_model = GeminiAsyncModel(client, "gemini-3-flash-preview")
+        summary_model = GeminiAsyncModel(client, "gemini-3.5-flash")
         logger.info("Initialized Gemini Model: %s", summary_model.model_name)
 
-        cloud_role_model = GeminiAsyncModel(client, "gemini-2.5-flash-lite")
+        cloud_role_model = GeminiAsyncModel(client, "gemini-3.1-flash-lite")
         logger.info("Initialized Gemma Model: %s", cloud_role_model.model_name)
         return summary_model, cloud_role_model
     except Exception as exc:
