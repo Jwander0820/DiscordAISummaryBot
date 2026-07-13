@@ -65,8 +65,24 @@ class GeminiClientTests(unittest.IsolatedAsyncioTestCase):
             module = importlib.import_module("discord_bot.integrations.gemini_client")
 
         self.assertEqual(FakeClient.instances[0].api_key, "test-key")
-        self.assertEqual(module.gemini_model.model_name, "gemini-3-flash-preview")
-        self.assertEqual(module.role_model.model_name, "gemini-2.5-flash-lite")
+        self.assertEqual(module.gemini_model.model_name, "gemini-3.5-flash")
+        self.assertEqual(
+            module.gemini_model.model_names,
+            (
+                "gemini-3.5-flash",
+                "gemini-3-flash-preview",
+                "gemini-3.1-flash-lite",
+            ),
+        )
+        self.assertEqual(module.role_model.model_name, "gemini-3.1-flash-lite")
+        self.assertEqual(
+            module.role_model.model_names,
+            (
+                "gemini-3.1-flash-lite",
+                "gemini-3.5-flash",
+                "gemini-3-flash-preview",
+            ),
+        )
 
     async def test_adapter_normalizes_legacy_contents_and_generation_config(self):
         with patch.dict(os.environ, {"GOOGLE_GENAI_API_KEY": "test-key"}, clear=False):
@@ -82,10 +98,66 @@ class GeminiClientTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.text, "ok")
         call_kwargs = FakeClient.instances[0].aio.models.generate_content.await_args.kwargs
-        self.assertEqual(call_kwargs["model"], "gemini-3-flash-preview")
+        self.assertEqual(call_kwargs["model"], "gemini-3.5-flash")
         self.assertIn("System:\nsystem prompt", call_kwargs["contents"])
         self.assertIn("User:\nuser prompt", call_kwargs["contents"])
         self.assertEqual(call_kwargs["config"].kwargs, {"temperature": 0.7})
+
+    async def test_adapter_falls_back_in_order_when_model_is_busy(self):
+        with patch.dict(os.environ, {"GOOGLE_GENAI_API_KEY": "test-key"}, clear=False):
+            module = importlib.import_module("discord_bot.integrations.gemini_client")
+
+        server_error_type = type("ServerError", (Exception,), {"__module__": "google.genai.errors"})
+        busy_error = server_error_type("503 UNAVAILABLE: model is experiencing high demand")
+        busy_error.code = 503
+        fallback_response = types.SimpleNamespace(text="fallback ok")
+        fake_generate = FakeClient.instances[0].aio.models.generate_content
+        fake_generate.side_effect = [busy_error, fallback_response]
+
+        response = await module.gemini_model.generate_content_async("prompt")
+
+        self.assertEqual(response.text, "fallback ok")
+        self.assertEqual(
+            [call.kwargs["model"] for call in fake_generate.await_args_list],
+            ["gemini-3.5-flash", "gemini-3-flash-preview"],
+        )
+
+    async def test_adapter_raises_after_all_busy_models_fail(self):
+        with patch.dict(os.environ, {"GOOGLE_GENAI_API_KEY": "test-key"}, clear=False):
+            module = importlib.import_module("discord_bot.integrations.gemini_client")
+
+        server_error_type = type("ServerError", (Exception,), {"__module__": "google.genai.errors"})
+        busy_errors = []
+        for model_name in module.gemini_model.model_names:
+            error = server_error_type(f"503 UNAVAILABLE: {model_name}")
+            error.code = 503
+            busy_errors.append(error)
+        fake_generate = FakeClient.instances[0].aio.models.generate_content
+        fake_generate.side_effect = busy_errors
+
+        with self.assertRaises(server_error_type) as context:
+            await module.gemini_model.generate_content_async("prompt")
+
+        self.assertIs(context.exception, busy_errors[-1])
+        self.assertEqual(
+            [call.kwargs["model"] for call in fake_generate.await_args_list],
+            list(module.gemini_model.model_names),
+        )
+
+    async def test_adapter_does_not_fall_back_on_rate_limit(self):
+        with patch.dict(os.environ, {"GOOGLE_GENAI_API_KEY": "test-key"}, clear=False):
+            module = importlib.import_module("discord_bot.integrations.gemini_client")
+
+        client_error_type = type("ClientError", (Exception,), {"__module__": "google.genai.errors"})
+        rate_limit_error = client_error_type("429 RESOURCE_EXHAUSTED")
+        rate_limit_error.code = 429
+        fake_generate = FakeClient.instances[0].aio.models.generate_content
+        fake_generate.side_effect = rate_limit_error
+
+        with self.assertRaises(client_error_type):
+            await module.gemini_model.generate_content_async("prompt")
+
+        self.assertEqual(fake_generate.await_count, 1)
 
     def test_missing_api_key_disables_models(self):
         with patch.dict(os.environ, {}, clear=True):

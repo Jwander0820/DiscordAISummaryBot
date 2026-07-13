@@ -21,6 +21,17 @@ GEMINI_RATE_LIMIT_MESSAGE = "SERN 收到的請求太多了，請稍後再試一�
 GEMINI_TIMEOUT_MESSAGE = "SERN 的回應超時了，請稍後再試一次。"
 GEMINI_ERROR_MESSAGE = "SERN 暫時無法連上 AI 服務，請稍後再試一次。"
 
+SUMMARY_MODEL_NAMES = (
+    "gemini-3.5-flash",
+    "gemini-3-flash-preview",
+    "gemini-3.1-flash-lite",
+)
+ROLE_MODEL_NAMES = (
+    "gemini-3.1-flash-lite",
+    "gemini-3.5-flash",
+    "gemini-3-flash-preview",
+)
+
 
 def _error_status_code(exc: Exception) -> Optional[int]:
     """Best-effort extraction across google-genai error versions."""
@@ -55,22 +66,57 @@ def gemini_user_message(exc: Exception) -> Optional[str]:
     return GEMINI_ERROR_MESSAGE
 
 
-class GeminiAsyncModel:
-    """Small adapter that preserves the project's previous async model interface."""
+def _is_gemini_busy_error(exc: Exception) -> bool:
+    """Return whether a Gemini request can safely move to the next model."""
+    status_code = _error_status_code(exc)
+    error_text = str(exc).upper()
+    error_module = exc.__class__.__module__
+    is_gemini_error = error_module.startswith("google.genai") or status_code is not None
+    return is_gemini_error and (
+        status_code == 503 or "UNAVAILABLE" in error_text or "HIGH DEMAND" in error_text
+    )
 
-    def __init__(self, client: Any, model_name: str) -> None:
+
+class GeminiAsyncModel:
+    """Async Gemini adapter with ordered failover for temporary model overloads."""
+
+    def __init__(
+        self,
+        client: Any,
+        model_name: str,
+        fallback_model_names: tuple[str, ...] = (),
+    ) -> None:
         self.client = client
         self.model_name = model_name
+        self.model_names = tuple(dict.fromkeys((model_name, *fallback_model_names)))
 
     async def generate_content_async(self, contents: Any, generation_config: Optional[Any] = None) -> Any:
-        kwargs = {
-            "model": self.model_name,
-            "contents": _normalize_contents(contents),
-        }
+        normalized_contents = _normalize_contents(contents)
         config = _normalize_generation_config(generation_config)
-        if config is not None:
-            kwargs["config"] = config
-        return await self.client.aio.models.generate_content(**kwargs)
+
+        for index, model_name in enumerate(self.model_names):
+            kwargs = {
+                "model": model_name,
+                "contents": normalized_contents,
+            }
+            if config is not None:
+                kwargs["config"] = config
+
+            try:
+                return await self.client.aio.models.generate_content(**kwargs)
+            except Exception as exc:
+                has_fallback = index + 1 < len(self.model_names)
+                if not has_fallback or not _is_gemini_busy_error(exc):
+                    raise
+
+                next_model = self.model_names[index + 1]
+                logger.warning(
+                    "Gemini model %s is temporarily unavailable; falling back to %s.",
+                    model_name,
+                    next_model,
+                )
+
+        raise RuntimeError("Gemini model failover chain was unexpectedly empty.")
 
 
 def _normalize_contents(contents: Any) -> Any:
@@ -135,11 +181,19 @@ def _create_models() -> tuple[Optional[GeminiAsyncModel], Optional[GeminiAsyncMo
 
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
-        summary_model = GeminiAsyncModel(client, "gemini-3.5-flash")
-        logger.info("Initialized Gemini Model: %s", summary_model.model_name)
+        summary_model = GeminiAsyncModel(
+            client,
+            SUMMARY_MODEL_NAMES[0],
+            SUMMARY_MODEL_NAMES[1:],
+        )
+        logger.info("Initialized Gemini Models: %s", " -> ".join(summary_model.model_names))
 
-        cloud_role_model = GeminiAsyncModel(client, "gemini-3.1-flash-lite")
-        logger.info("Initialized Gemma Model: %s", cloud_role_model.model_name)
+        cloud_role_model = GeminiAsyncModel(
+            client,
+            ROLE_MODEL_NAMES[0],
+            ROLE_MODEL_NAMES[1:],
+        )
+        logger.info("Initialized Gemini Role Models: %s", " -> ".join(cloud_role_model.model_names))
         return summary_model, cloud_role_model
     except Exception as exc:
         logger.error("Error initializing Gemini model: %s. Summarization might fail.", exc)
