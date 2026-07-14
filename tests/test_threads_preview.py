@@ -19,12 +19,21 @@ from discord_bot.features.social_preview.threads_preview import (
     DeletePreviewView,
     PreviewResult,
     build_threads_preview,
+    extract_threads_urls,
     handle_threads_in_message,
 )
 import discord
 
 
 class ThreadsPreviewTests(unittest.IsolatedAsyncioTestCase):
+    def test_extract_threads_urls_accepts_share_link(self):
+        url = "https://www.threads.com/share/BATCH_yt4N/"
+
+        self.assertEqual(
+            extract_threads_urls(f"看看這篇 {url}"),
+            ["https://www.threads.com/share/BATCH_yt4N"],
+        )
+
     @patch("discord_bot.features.social_preview.threads_preview.asyncio.to_thread")
     async def test_build_threads_preview_replaces_invalid_post_meta_with_failure_message(self, mock_to_thread):
         url = "https://www.threads.com/@demo/post/abc"
@@ -68,6 +77,70 @@ class ThreadsPreviewTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent_kwargs["embed"].description, THREADS_INVALID_POST_MESSAGE)
         original_link = next(item for item in sent_kwargs["view"].children if getattr(item, "label", None) == "原連結")
         self.assertEqual(original_link.url, url)
+        mock_cleanup_source_message.assert_awaited_once()
+
+    @patch("discord_bot.features.social_preview.threads_preview.cleanup_source_message", new_callable=AsyncMock)
+    @patch("discord_bot.features.social_preview.threads_preview.send_preview_as_author", new_callable=AsyncMock)
+    @patch("discord_bot.features.social_preview.threads_preview.build_threads_preview", new_callable=AsyncMock)
+    async def test_share_link_button_uses_clean_canonical_post_url(
+        self,
+        mock_build_threads_preview,
+        mock_send_preview_as_author,
+        mock_cleanup_source_message,
+    ):
+        share_url = "https://www.threads.com/share/BATCH_yt4N"
+        canonical_url = "https://www.threads.com/@waiteryoshie/post/DavTjGCEwon"
+        mock_build_threads_preview.return_value = PreviewResult(
+            embed=discord.Embed(title="Threads", url=canonical_url),
+            files=[],
+        )
+        mock_send_preview_as_author.return_value = types.SimpleNamespace(id=123)
+        message = types.SimpleNamespace(
+            author=types.SimpleNamespace(bot=False, nick="demo", global_name="demo"),
+            channel=types.SimpleNamespace(name="general"),
+            content=share_url,
+        )
+
+        handled = await handle_threads_in_message(message)
+
+        self.assertTrue(handled)
+        view = mock_send_preview_as_author.await_args.kwargs["view"]
+        original_link = next(
+            item for item in view.children if getattr(item, "label", None) == "原連結"
+        )
+        self.assertEqual(original_link.url, canonical_url)
+        mock_cleanup_source_message.assert_awaited_once()
+
+    @patch("discord_bot.features.social_preview.threads_preview.cleanup_source_message", new_callable=AsyncMock)
+    @patch("discord_bot.features.social_preview.threads_preview.send_preview_as_author", new_callable=AsyncMock)
+    @patch("discord_bot.features.social_preview.threads_preview.build_threads_preview", new_callable=AsyncMock)
+    async def test_spoiler_share_link_button_uses_clean_canonical_post_url(
+        self,
+        mock_build_threads_preview,
+        mock_send_preview_as_author,
+        mock_cleanup_source_message,
+    ):
+        share_url = "https://www.threads.com/share/BATCH_yt4N"
+        canonical_url = "https://www.threads.com/@waiteryoshie/post/DavTjGCEwon"
+        mock_build_threads_preview.return_value = PreviewResult(
+            embed=discord.Embed(title="Threads", description="spoiler", url=canonical_url),
+            files=[],
+        )
+        mock_send_preview_as_author.return_value = types.SimpleNamespace(id=123)
+        message = types.SimpleNamespace(
+            author=types.SimpleNamespace(bot=False, nick="demo", global_name="demo"),
+            channel=types.SimpleNamespace(name="general"),
+            content=f"||{share_url}||",
+        )
+
+        handled = await handle_threads_in_message(message)
+
+        self.assertTrue(handled)
+        view = mock_send_preview_as_author.await_args.kwargs["view"]
+        original_link = next(
+            item for item in view.children if getattr(item, "label", None) == "原連結"
+        )
+        self.assertEqual(original_link.url, canonical_url)
         mock_cleanup_source_message.assert_awaited_once()
 
     @patch("discord_bot.features.social_preview.threads_preview.asyncio.to_thread")

@@ -8,6 +8,7 @@ from discord_bot.features.social_preview.threads_fetch import (
     _best_src_from_srcset,
     _extract_dom_text,
     _is_probable_profile_image,
+    _resolve_threads_share_url,
     _try_requests,
     _video_mime_from_url,
     fetch_threads_post,
@@ -73,6 +74,71 @@ class FakeSoup:
 
 
 class ThreadsFetchTests(unittest.TestCase):
+    def test_resolve_threads_share_url_returns_canonical_post_url(self):
+        share_url = "https://www.threads.com/share/BATCH_yt4N"
+        canonical_url = (
+            "https://www.threads.com/@waiteryoshie/post/DavTjGCEwon"
+            "?xmt=tracking&slof=1"
+        )
+        response = SimpleNamespace(url=canonical_url, close=Mock())
+        requests_stub = SimpleNamespace(get=Mock(return_value=response))
+
+        with patch.dict("sys.modules", {"requests": requests_stub}):
+            resolved = _resolve_threads_share_url(share_url)
+
+        self.assertEqual(
+            resolved,
+            "https://www.threads.com/@waiteryoshie/post/DavTjGCEwon",
+        )
+        requests_stub.get.assert_called_once_with(
+            share_url,
+            headers=unittest.mock.ANY,
+            timeout=unittest.mock.ANY,
+            allow_redirects=True,
+            stream=True,
+        )
+        self.assertNotIn("User-Agent", requests_stub.get.call_args.kwargs["headers"])
+        response.close.assert_called_once()
+
+    def test_resolve_threads_share_url_rejects_non_post_redirect(self):
+        share_url = "https://www.threads.com/share/BATCH_invalid"
+        response = SimpleNamespace(
+            url="https://example.com/not-a-threads-post",
+            close=Mock(),
+        )
+        requests_stub = SimpleNamespace(get=Mock(return_value=response))
+
+        with patch.dict("sys.modules", {"requests": requests_stub}):
+            with self.assertRaisesRegex(ValueError, "標準 Threads 貼文"):
+                _resolve_threads_share_url(share_url)
+
+        response.close.assert_called_once()
+
+    @patch("discord_bot.features.social_preview.threads_fetch._try_oembed_fill")
+    @patch("discord_bot.features.social_preview.threads_fetch._try_requests")
+    @patch("discord_bot.features.social_preview.threads_fetch._resolve_threads_share_url")
+    def test_fetch_threads_post_resolves_share_url_before_parsing(
+        self,
+        mock_resolve_share_url,
+        mock_try_requests,
+        mock_try_oembed_fill,
+    ):
+        share_url = "https://www.threads.com/share/BATCH_yt4N"
+        canonical_url = "https://www.threads.com/@waiteryoshie/post/DavTjGCEwon"
+        mock_resolve_share_url.return_value = canonical_url
+        mock_try_requests.return_value = ThreadsPost(
+            url=canonical_url,
+            text="分享連結貼文",
+            media=[ThreadsMedia("video", "https://cdn.example.com/video.mp4")],
+        )
+
+        post = fetch_threads_post(share_url)
+
+        self.assertEqual(post.url, canonical_url)
+        mock_resolve_share_url.assert_called_once_with(share_url)
+        mock_try_requests.assert_called_once_with(canonical_url)
+        mock_try_oembed_fill.assert_not_called()
+
     def test_best_src_from_srcset_prefers_largest_width(self):
         srcset = ",".join(
             [
@@ -176,6 +242,35 @@ class ThreadsFetchTests(unittest.TestCase):
         self.assertIsNone(post.text)
         self.assertEqual(post.media, [])
         mock_parse_html.assert_not_called()
+
+    @patch("discord_bot.features.social_preview.threads_fetch._parse_html")
+    @patch(
+        "discord_bot.features.social_preview.threads_fetch.build_candidate_urls",
+        return_value=["https://www.threads.com/@demo/post/abc"],
+    )
+    def test_try_requests_strips_tracking_from_final_response_url(
+        self,
+        _mock_build_candidate_urls,
+        mock_parse_html,
+    ):
+        clean_url = "https://www.threads.com/@demo/post/abc"
+        tracked_url = f"{clean_url}?xmt=tracking&slof=1"
+        requests_stub = SimpleNamespace(
+            get=Mock(
+                return_value=SimpleNamespace(
+                    status_code=200,
+                    url=tracked_url,
+                    text="<html>post</html>",
+                )
+            )
+        )
+        mock_parse_html.side_effect = lambda url, _html: ThreadsPost(url=url, text="正常貼文")
+
+        with patch.dict("sys.modules", {"requests": requests_stub}):
+            post = _try_requests(clean_url)
+
+        self.assertEqual(post.url, clean_url)
+        mock_parse_html.assert_called_once_with(clean_url, "<html>post</html>")
 
     @patch("discord_bot.features.social_preview.threads_fetch._parse_html")
     @patch(

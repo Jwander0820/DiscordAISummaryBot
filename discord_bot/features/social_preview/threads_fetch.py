@@ -37,6 +37,10 @@ THREADS_RE = re.compile(
     r"https?://(www\.)?(threads\.net|threads\.com)/@[^/]+/post/[A-Za-z0-9_\-]+/?",
     re.IGNORECASE,
 )
+THREADS_SHARE_RE = re.compile(
+    r"https?://(www\.)?(threads\.net|threads\.com)/share/[A-Za-z0-9_\-]+/?",
+    re.IGNORECASE,
+)
 
 
 # =============== 資料結構 ===============
@@ -70,6 +74,33 @@ def _strip_tracking_query(url: str) -> str:
     parsed = urlparse(url.rstrip(").,>|"))
     path = parsed.path.rstrip("/")
     return urlunparse((parsed.scheme or "https", parsed.netloc, path, "", "", ""))
+
+
+def _resolve_threads_share_url(url: str) -> str:
+    """Resolve a Threads ``/share/<token>`` URL to its canonical post URL."""
+    import requests
+
+    share_url = _strip_tracking_query(url)
+    if not THREADS_SHARE_RE.fullmatch(share_url):
+        raise ValueError(f"不是 Threads 分享 URL：{url}")
+
+    response = requests.get(
+        share_url,
+        # Threads currently returns a 200 share page to browser-like UAs, but
+        # returns the canonical post as an HTTP redirect to requests-like UAs.
+        headers={"Accept": DEFAULT_ACCEPT, "Accept-Language": DEFAULT_LANG},
+        timeout=REQUEST_TIMEOUT,
+        allow_redirects=True,
+        stream=True,
+    )
+    try:
+        resolved_url = _strip_tracking_query(response.url)
+    finally:
+        response.close()
+
+    if not THREADS_RE.fullmatch(resolved_url):
+        raise ValueError(f"Threads 分享 URL 未導向標準 Threads 貼文：{resolved_url}")
+    return resolved_url
 
 
 def build_candidate_urls(url: str) -> list[str]:
@@ -748,7 +779,7 @@ def _try_requests(url: str) -> ThreadsPost:
                         last_threads_error = redirect_error
                         break
                     if resp.status_code == 200 and "<html" in resp.text.lower():
-                        post = _parse_html(resp.url, resp.text)
+                        post = _parse_html(_strip_tracking_query(resp.url), resp.text)
                         # 判斷是否已拿到有效資料
                         if post.text or post.media:
                             return post
@@ -799,8 +830,12 @@ def _try_oembed_fill(post: ThreadsPost, *, allow_thumbnail: bool = True):
 # =============== 外部主函數 ===============
 def fetch_threads_post(url: str) -> ThreadsPost:
     """Threads parser 對外主入口。"""
+    clean_url = _strip_tracking_query(url)
+    if THREADS_SHARE_RE.fullmatch(clean_url):
+        clean_url = _resolve_threads_share_url(clean_url)
+
     # 1) requests（多 UA、多網域變體）
-    post = _try_requests(url)
+    post = _try_requests(clean_url)
 
     # 2) 不足 → oEmbed 補資料（作者名、縮圖、嵌入 HTML）
     if not post.preview_error and (not post.text or not post.media):

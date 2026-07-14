@@ -37,7 +37,7 @@ from .text import extract_message_commentary
 
 
 THREADS_URL_RE = re.compile(
-    r"https?://(?:www\.)?threads\.(?:net|com)/@[^\s/]+/post/[A-Za-z0-9_\-]+(?:\?[^\s<>()|]+)?(?:#[^\s<>()|]+)?",
+    r"https?://(?:www\.)?threads\.(?:net|com)/(?:@[^\s/]+/post/[A-Za-z0-9_\-]+|share/[A-Za-z0-9_\-]+)/*(?:\?[^\s<>()|]+)?(?:#[^\s<>()|]+)?",
     re.IGNORECASE,
 )
 SPOILER_BLOCK_RE = re.compile(r"\|\|(.+?)\|\|", re.DOTALL)
@@ -416,7 +416,10 @@ async def handle_threads_in_message(message: discord.Message) -> bool:
                 content_lines.append(_spoiler_wrap(preview.extra_text))
             spoiler_content = "\n".join(content_lines) if content_lines else None
 
-            view = DeletePreviewView(original_url=url, video_url=preview.video_url)
+            view = DeletePreviewView(
+                original_url=preview.embed.url or url,
+                video_url=preview.video_url,
+            )
             sent = await send_preview_as_author(
                 message,
                 content=spoiler_content,
@@ -440,7 +443,10 @@ async def handle_threads_in_message(message: discord.Message) -> bool:
             spoiler=False,
         )
 
-        view = DeletePreviewView(original_url=url, video_url=preview.video_url)
+        view = DeletePreviewView(
+            original_url=preview.embed.url or url,
+            video_url=preview.video_url,
+        )
         reply_kwargs = {
             "embed": preview.embed,
             "view": view,
