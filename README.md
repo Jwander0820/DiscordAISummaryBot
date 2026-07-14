@@ -63,7 +63,7 @@ DISABLE_DISCORD_BOT=0
 # PostgreSQL 連線字串（Render 範例）
 DATABASE_URL=postgresql://user:password@host:port/database
 
-# PostgreSQL summaries 備份成本地 SQLite 的輸出路徑
+# PostgreSQL summaries / deepfaker_events 備份成本地 SQLite 的輸出路徑
 LOCAL_BACKUP_SQLITE_PATH=postgres_summaries_backup.db
 
 # 本地 LLM 的 API 端點（選用）
@@ -118,3 +118,19 @@ DISCORD_NOTIFY_FORWARD_CHANNEL_ID=12345678
 DISCORD_NOTIFY_FORWARD_GUILD_ID=12345678
 
 ```
+
+## PostgreSQL 歷史紀錄同步到本地 SQLite
+
+同步工具保留原檔名 `sync_postgres_summaries_to_sqlite.py`，預設會同時拉取 `summaries` 與 `deepfaker_events`：
+
+```bash
+python3 tools/sync_postgres_summaries_to_sqlite.py
+```
+
+也可以只同步 DeepFaker 紀錄：
+
+```bash
+python3 tools/sync_postgres_summaries_to_sqlite.py --table deepfaker_events
+```
+
+預設為 incremental，各資料表會分別依本地最大 `id` 拉取新紀錄。`channel_name` 會原樣同步事件發生時保存的頻道名稱快照；穩定識別與敏感頻道過濾請使用 `channel_id`。

@@ -78,3 +78,9 @@ render.yaml
 _threads_debug/
 test_code.py
 data/
+docs/
+AGENTS.md
+
+# Local-only Discord bot guild manager
+tools/RUN_GUILD_MANAGER.cmd
+tools/manage_bot_guilds.ps1

@@ -8,8 +8,10 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from ..db.deepfaker_repository import deepfaker_repository
 from ..db.repository import summary_repository
 from ..features.chat.records import build_summary_record
+from ..features.deepfaker.records import build_deepfaker_event
 from ..features.notifications.service import notification_service
 
 logger = logging.getLogger("discord_digest_bot")
@@ -94,7 +96,9 @@ class FunCog(commands.Cog):
 
         await interaction.response.defer(ephemeral=True)
 
-        should_fail = random.random() < float(DEEPFAKER_FAILURE_PROB)
+        failure_probability = float(DEEPFAKER_FAILURE_PROB)
+        random_roll = random.random()
+        should_fail = random_roll < failure_probability
         parts = [segment.strip() for segment in str(DEEPFAKER_FAILURE_NOTICE).split("|") if segment.strip()]
         failure_text = random.choice(parts) if parts else "抓到你了！炸彈魔！"
         fake_message_content = ""
@@ -123,16 +127,37 @@ class FunCog(commands.Cog):
             success = True
             target_for_log = username
 
+        def record_deepfaker_event(delivery_status: str) -> None:
+            event = build_deepfaker_event(
+                guild=channel.guild,
+                channel=channel,
+                actor=interaction.user,
+                target=冒牌對象,
+                outcome_success=success,
+                failure_probability=failure_probability,
+                random_roll=random_roll,
+                requested_content=trimmed_content,
+                webhook_content=message_content,
+                failure_notice=failure_text if should_fail else None,
+                failure_exposed_content=fake_message_content or None,
+                delivery_status=delivery_status,
+            )
+            deepfaker_repository.insert_event(event)
+
         try:
             await self._send_with_webhook(channel, message_content, username, avatar_url, "DeepFaker")
         except discord.Forbidden:
+            record_deepfaker_event("forbidden")
             logger.error("DeepFaker 需要 Manage Webhooks 權限才能發送訊息。")
             await interaction.followup.send("無法使用 DeepFaker，缺少建立或使用 Webhook 的權限。", ephemeral=True)
             return
         except discord.HTTPException as http_err:
+            record_deepfaker_event("http_error")
             logger.error("DeepFaker webhook 發送失敗: %s", http_err, exc_info=True)
             await interaction.followup.send("DeepFaker 發送失敗，請稍後再試一次。", ephemeral=True)
             return
+
+        record_deepfaker_event("sent")
 
         log_message = (
             f"DeepFaker invoked by {interaction.user.display_name or interaction.user.name} "

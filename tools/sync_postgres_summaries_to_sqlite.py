@@ -13,7 +13,27 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from discord_bot.db.schema import SQLITE_CREATE_SUMMARIES_SQL, SUMMARY_COLUMNS
+from discord_bot.db.schema import (
+    CREATE_DEEPFAKER_EVENT_INDEXES_SQL,
+    DEEPFAKER_EVENT_COLUMNS,
+    SQLITE_CREATE_DEEPFAKER_EVENTS_SQL,
+    SQLITE_CREATE_SUMMARIES_SQL,
+    SUMMARY_COLUMNS,
+)
+
+DEEPFAKER_SYNC_COLUMNS = ("id", *DEEPFAKER_EVENT_COLUMNS)
+SYNC_TABLES = {
+    "summaries": {
+        "columns": SUMMARY_COLUMNS,
+        "create_sql": SQLITE_CREATE_SUMMARIES_SQL,
+        "indexes": (),
+    },
+    "deepfaker_events": {
+        "columns": DEEPFAKER_SYNC_COLUMNS,
+        "create_sql": SQLITE_CREATE_DEEPFAKER_EVENTS_SQL,
+        "indexes": CREATE_DEEPFAKER_EVENT_INDEXES_SQL,
+    },
+}
 
 
 def _load_simple_env(path: Path) -> None:
@@ -44,7 +64,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     """Parse CLI arguments for the backup tool."""
     default_output = os.getenv("LOCAL_BACKUP_SQLITE_PATH", "postgres_summaries_backup.db")
     parser = argparse.ArgumentParser(
-        description="Copy the PostgreSQL summaries table into a local SQLite database."
+        description="Copy PostgreSQL history tables into a local SQLite database."
     )
     parser.add_argument(
         "--database-url",
@@ -57,19 +77,25 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="SQLite output path. Defaults to LOCAL_BACKUP_SQLITE_PATH or postgres_summaries_backup.db.",
     )
     parser.add_argument(
+        "--table",
+        choices=("all", *SYNC_TABLES),
+        default="all",
+        help="Table to sync. Defaults to all supported history tables.",
+    )
+    parser.add_argument(
         "--mode",
         choices=("incremental", "replace", "upsert"),
         default="incremental",
         help=(
             "incremental fetches rows newer than the local max id; "
-            "replace recreates summaries; upsert fetches all rows and INSERT OR REPLACE by id."
+            "replace recreates selected tables; upsert fetches all rows and INSERT OR REPLACE by id."
         ),
     )
     parser.add_argument(
         "--limit",
         type=int,
         default=None,
-        help="Optional max number of rows to copy, useful for smoke tests.",
+        help="Optional max number of rows to copy per selected table, useful for smoke tests.",
     )
     parser.add_argument(
         "--dry-run",
@@ -91,23 +117,26 @@ def _coerce_row(row: Sequence[object]) -> tuple[object, ...]:
     return tuple(_coerce_sqlite_value(value) for value in row)
 
 
-def fetch_summaries(
+def fetch_table(
     database_url: str,
+    table: str,
     *,
     min_id: Optional[int] = None,
     limit: Optional[int] = None,
 ) -> list[tuple[object, ...]]:
-    """Fetch rows from PostgreSQL in summaries-table order, optionally incrementally."""
+    """Fetch a supported PostgreSQL table in schema order, optionally incrementally."""
+    if table not in SYNC_TABLES:
+        raise ValueError(f"Unsupported sync table: {table}")
     try:
         import psycopg2
     except ModuleNotFoundError as exc:
         raise RuntimeError("psycopg2 is not installed. Install requirements.txt before syncing PostgreSQL.") from exc
 
-    columns = ", ".join(SUMMARY_COLUMNS)
-    sql = f"SELECT {columns} FROM summaries ORDER BY id"
+    columns = ", ".join(SYNC_TABLES[table]["columns"])
+    sql = f"SELECT {columns} FROM {table} ORDER BY id"
     params: list[object] = []
     if min_id is not None:
-        sql = f"SELECT {columns} FROM summaries WHERE id > %s ORDER BY id"
+        sql = f"SELECT {columns} FROM {table} WHERE id > %s ORDER BY id"
         params.append(min_id)
     if limit is not None:
         if limit <= 0:
@@ -121,8 +150,20 @@ def fetch_summaries(
             return [_coerce_row(row) for row in cur.fetchall()]
 
 
-def get_local_max_summary_id(sqlite_path: Path) -> Optional[int]:
-    """Read the local backup's latest summaries.id for incremental sync mode."""
+def fetch_summaries(
+    database_url: str,
+    *,
+    min_id: Optional[int] = None,
+    limit: Optional[int] = None,
+) -> list[tuple[object, ...]]:
+    """Backward-compatible summaries fetch helper."""
+    return fetch_table(database_url, "summaries", min_id=min_id, limit=limit)
+
+
+def get_local_max_id(sqlite_path: Path, table: str) -> Optional[int]:
+    """Read a supported local backup table's latest id for incremental sync mode."""
+    if table not in SYNC_TABLES:
+        raise ValueError(f"Unsupported sync table: {table}")
     if not sqlite_path.exists():
         return None
 
@@ -130,11 +171,12 @@ def get_local_max_summary_id(sqlite_path: Path) -> Optional[int]:
     try:
         conn = sqlite3.connect(sqlite_path)
         exists = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'summaries'"
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
         ).fetchone()
         if not exists:
             return None
-        row = conn.execute("SELECT MAX(id) FROM summaries").fetchone()
+        row = conn.execute(f"SELECT MAX(id) FROM {table}").fetchone()
     except sqlite3.DatabaseError:
         return None
     finally:
@@ -146,32 +188,68 @@ def get_local_max_summary_id(sqlite_path: Path) -> Optional[int]:
     return int(row[0])
 
 
-def write_summaries_to_sqlite(rows: Iterable[Sequence[object]], sqlite_path: Path, *, mode: str) -> int:
-    """Write fetched PostgreSQL rows into the local SQLite backup."""
+def get_local_max_summary_id(sqlite_path: Path) -> Optional[int]:
+    """Backward-compatible summaries incremental cursor helper."""
+    return get_local_max_id(sqlite_path, "summaries")
+
+
+def _write_table(
+    conn: sqlite3.Connection,
+    table: str,
+    rows: Iterable[Sequence[object]],
+    *,
+    mode: str,
+) -> int:
+    if table not in SYNC_TABLES:
+        raise ValueError(f"Unsupported sync table: {table}")
+
+    definition = SYNC_TABLES[table]
+    columns = definition["columns"]
     rows = [tuple(row) for row in rows]
-    sqlite_path.parent.mkdir(parents=True, exist_ok=True)
-
-    placeholders = ", ".join(["?"] * len(SUMMARY_COLUMNS))
-    columns = ", ".join(SUMMARY_COLUMNS)
-
-    conn = sqlite3.connect(sqlite_path)
-    try:
-        if mode == "replace":
-            conn.execute("DROP TABLE IF EXISTS summaries")
-        conn.execute(SQLITE_CREATE_SUMMARIES_SQL)
-        conn.executemany(
-            f"INSERT OR REPLACE INTO summaries ({columns}) VALUES ({placeholders})",
-            rows,
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
+    if mode == "replace":
+        conn.execute(f"DROP TABLE IF EXISTS {table}")
+    conn.execute(definition["create_sql"])
+    for index_sql in definition["indexes"]:
+        conn.execute(index_sql)
+    placeholders = ", ".join(["?"] * len(columns))
+    column_sql = ", ".join(columns)
+    conn.executemany(
+        f"INSERT OR REPLACE INTO {table} ({column_sql}) VALUES ({placeholders})",
+        rows,
+    )
     return len(rows)
 
 
+def write_tables_to_sqlite(
+    rows_by_table: dict[str, Iterable[Sequence[object]]],
+    sqlite_path: Path,
+    *,
+    mode: str,
+) -> dict[str, int]:
+    """Write selected tables into one SQLite transaction."""
+    sqlite_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(sqlite_path)
+    try:
+        written = {
+            table: _write_table(conn, table, rows, mode=mode)
+            for table, rows in rows_by_table.items()
+        }
+        conn.commit()
+        return written
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def write_summaries_to_sqlite(rows: Iterable[Sequence[object]], sqlite_path: Path, *, mode: str) -> int:
+    """Backward-compatible summaries SQLite writer."""
+    return write_tables_to_sqlite({"summaries": rows}, sqlite_path, mode=mode)["summaries"]
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    """CLI entry point for syncing the cloud summaries table into a local SQLite file."""
+    """CLI entry point for syncing supported cloud history tables to SQLite."""
     load_local_env()
     args = parse_args(argv)
 
@@ -181,33 +259,38 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
 
     output = Path(args.output)
-    min_id = None
-    if args.mode == "incremental":
-        max_id = get_local_max_summary_id(output)
-        if max_id is not None:
-            min_id = max_id
-            print(f"Incremental mode: local max summaries.id is {max_id}; fetching rows with id > {max_id}.")
-        else:
-            print("Incremental mode: no local summaries table found; fetching all rows.")
+    selected_tables = list(SYNC_TABLES) if args.table == "all" else [args.table]
+    rows_by_table: dict[str, list[tuple[object, ...]]] = {}
+    for table in selected_tables:
+        min_id = None
+        if args.mode == "incremental":
+            max_id = get_local_max_id(output, table)
+            if max_id is not None:
+                min_id = max_id
+                print(f"Incremental mode: local max {table}.id is {max_id}; fetching rows with id > {max_id}.")
+            else:
+                print(f"Incremental mode: no local {table} table found; fetching all rows.")
 
-    try:
-        rows = fetch_summaries(database_url, min_id=min_id, limit=args.limit)
-    except Exception as exc:
-        print(f"Failed to fetch PostgreSQL summaries: {exc}", file=sys.stderr)
-        return 1
+        try:
+            rows = fetch_table(database_url, table, min_id=min_id, limit=args.limit)
+        except Exception as exc:
+            print(f"Failed to fetch PostgreSQL {table}: {exc}", file=sys.stderr)
+            return 1
+        rows_by_table[table] = rows
+        print(f"Fetched {len(rows)} row(s) from PostgreSQL {table}.")
 
-    print(f"Fetched {len(rows)} row(s) from PostgreSQL summaries.")
     if args.dry_run:
         print("Dry run enabled; SQLite was not written.")
         return 0
 
     try:
-        written = write_summaries_to_sqlite(rows, output, mode=args.mode)
+        written = write_tables_to_sqlite(rows_by_table, output, mode=args.mode)
     except Exception as exc:
         print(f"Failed to write SQLite backup: {exc}", file=sys.stderr)
         return 1
 
-    print(f"Wrote {written} row(s) to {output}")
+    for table, count in written.items():
+        print(f"Wrote {count} {table} row(s) to {output}")
     return 0
 
 
