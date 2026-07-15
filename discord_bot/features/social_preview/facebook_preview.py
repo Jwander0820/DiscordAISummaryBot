@@ -6,7 +6,7 @@ import os
 import re
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urljoin, urlparse, urlunparse
 
 import aiohttp
 import discord
@@ -37,10 +37,16 @@ def _delete_view_timeout_from_env() -> Optional[float]:
 DELETE_VIEW_TIMEOUT = _delete_view_timeout_from_env()
 
 FACEBOOK_URL_RE = re.compile(
-    r"https?://(?:www\.|m\.|mbasic\.)?(?:facebook\.com|fb\.watch)/[^\s<>()]+",
+    r"https?://(?:(?:[a-z0-9-]+\.)*facebook\.com|(?:www\.)?fb\.com|(?:www\.)?fb\.watch)/[^\s<>()]+",
     re.IGNORECASE,
 )
 SPOILER_BLOCK_RE = re.compile(r"\|\|(.+?)\|\|", re.DOTALL)
+
+FACEBOOK_CONTENT_HOSTS = ("www.facebook.com", "m.facebook.com", "mbasic.facebook.com")
+FACEBOOK_REDIRECT_ONLY_HOSTS = {"l.facebook.com", "lm.facebook.com", "fb.watch", "www.fb.watch"}
+FACEBOOK_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+FACEBOOK_MAX_REDIRECTS = 8
+FACEBOOK_ACCESS_WALL_PATHS = ("/login", "/checkpoint", "/recover", "/unsupportedbrowser")
 
 DEFAULT_HEADERS = {
     "User-Agent": (
@@ -60,6 +66,10 @@ class FacebookPreview:
     embed: discord.Embed
     files: List[discord.File]
     extra_text: Optional[str] = None
+
+
+class FacebookPreviewUnavailable(RuntimeError):
+    """Facebook 頁面無法在不登入、不繞過限制的前提下建立預覽。"""
 
 
 class DeleteFacebookPreviewView(discord.ui.View):
@@ -179,13 +189,13 @@ def _build_candidate_urls(url: str) -> List[str]:
     if not parsed.scheme:
         parsed = parsed._replace(scheme="https")
 
-    hosts = ["www.facebook.com", "m.facebook.com", "mbasic.facebook.com"]
-    if parsed.netloc.lower() == "fb.watch":
+    host = (parsed.hostname or "").lower()
+    if host in FACEBOOK_REDIRECT_ONLY_HOSTS or host == "fb.com" or host.endswith(".fb.com"):
         return [url]
 
     candidates = [url]
-    for host in hosts:
-        candidates.append(urlunparse((parsed.scheme, host, parsed.path, "", parsed.query, "")))
+    for candidate_host in FACEBOOK_CONTENT_HOSTS:
+        candidates.append(urlunparse((parsed.scheme, candidate_host, parsed.path, "", parsed.query, "")))
 
     seen = set()
     uniq = []
@@ -194,6 +204,72 @@ def _build_candidate_urls(url: str) -> List[str]:
             seen.add(candidate)
             uniq.append(candidate)
     return uniq
+
+
+def _is_supported_facebook_url(url: str) -> bool:
+    """限制 redirect 只能停留在 Facebook 自有 HTTP(S) 網域。"""
+    parsed = urlparse(url)
+    if parsed.scheme.lower() not in {"http", "https"}:
+        return False
+
+    host = (parsed.hostname or "").lower().rstrip(".")
+    return (
+        host == "facebook.com"
+        or host.endswith(".facebook.com")
+        or host in {"fb.watch", "www.fb.watch", "fb.com", "www.fb.com"}
+    )
+
+
+def _is_facebook_access_wall(url: str, html: str) -> bool:
+    """辨識明確的登入／checkpoint 頁面，不把通用 metadata 當貼文。"""
+    path = urlparse(url).path.lower()
+    if any(path == prefix or path.startswith(f"{prefix}/") for prefix in FACEBOOK_ACCESS_WALL_PATHS):
+        return True
+
+    html_lower = html.lower()
+    return any(
+        marker in html_lower
+        for marker in (
+            'id="login_form"',
+            "id='login_form'",
+            'name="login"',
+            "name='login'",
+            "you must log in to continue",
+        )
+    )
+
+
+async def _fetch_candidate_following_redirects(
+    session: aiohttp.ClientSession,
+    url: str,
+) -> Tuple[str, int, str]:
+    """逐段跟隨受限的 Facebook redirect，回傳最終 URL、狀態與 HTML。"""
+    current_url = url
+    visited = set()
+
+    for _ in range(FACEBOOK_MAX_REDIRECTS + 1):
+        if current_url in visited:
+            raise FacebookPreviewUnavailable("Facebook 重新導向形成循環")
+        if not _is_supported_facebook_url(current_url):
+            raise FacebookPreviewUnavailable("Facebook 重新導向指向非 Facebook 網域")
+        visited.add(current_url)
+
+        async with session.get(current_url, timeout=25, allow_redirects=False) as resp:
+            status = resp.status
+            response_url = str(resp.url)
+            if status not in FACEBOOK_REDIRECT_STATUSES:
+                return response_url, status, await resp.text(errors="ignore")
+
+            location = resp.headers.get("Location")
+            if not location:
+                raise FacebookPreviewUnavailable("Facebook 重新導向缺少 Location")
+
+            next_url = urljoin(response_url, location)
+            if not _is_supported_facebook_url(next_url):
+                raise FacebookPreviewUnavailable("Facebook 重新導向指向非 Facebook 網域")
+            current_url = next_url
+
+    raise FacebookPreviewUnavailable("Facebook 重新導向次數超過上限")
 
 
 async def _download_bytes(
@@ -252,26 +328,47 @@ def _extract_og_data(html: str) -> Tuple[str, str, List[str], List[str]]:
 
 
 async def _fetch_html_with_aiohttp(url: str) -> Tuple[str, str, List[str], List[str], Optional[str], int]:
-    """先用 aiohttp 抓 OG 資料，若失敗再交給上層 fallback。"""
+    """展開受限 redirect 後抓 OG 資料，登入牆與外部目的地直接失敗。"""
     last_error = "Facebook 頁面讀取失敗"
     last_status = 0
 
     async with aiohttp.ClientSession(headers=DEFAULT_HEADERS) as session:
-        for candidate in _build_candidate_urls(url):
+        candidates = _build_candidate_urls(url)
+        attempted = set()
+        index = 0
+        while index < len(candidates):
+            candidate = candidates[index]
+            index += 1
+            if candidate in attempted:
+                continue
+            attempted.add(candidate)
+
             try:
-                async with session.get(candidate, timeout=25, allow_redirects=True) as resp:
-                    last_status = resp.status
-                    html = await resp.text(errors="ignore")
-                    title, description, image_urls, video_urls = _extract_og_data(html)
+                final_url, status, html = await _fetch_candidate_following_redirects(session, candidate)
+                attempted.add(final_url)
+                last_status = status
+                if _is_facebook_access_wall(final_url, html):
+                    raise FacebookPreviewUnavailable("Facebook 頁面要求登入或存取限制")
 
-                    has_metadata = bool(title or description or image_urls or video_urls)
-                    if resp.status < 400 and has_metadata:
-                        return title, description, image_urls, video_urls, str(resp.url), resp.status
+                title, description, image_urls, video_urls = _extract_og_data(html)
+                has_metadata = bool(title or description or image_urls or video_urls)
+                if status < 400 and has_metadata:
+                    return title, description, image_urls, video_urls, final_url, status
 
-                    if resp.status >= 400:
-                        last_error = f"Facebook 頁面讀取失敗（HTTP {resp.status}）"
-                    else:
-                        last_error = "Facebook 頁面未提供可用的 Open Graph metadata"
+                resolved_candidates = [
+                    resolved_candidate
+                    for resolved_candidate in _build_candidate_urls(final_url)
+                    if resolved_candidate not in attempted and resolved_candidate not in candidates
+                ]
+                if resolved_candidates:
+                    candidates[index:index] = resolved_candidates
+
+                if status >= 400:
+                    last_error = f"Facebook 頁面讀取失敗（HTTP {status}）"
+                else:
+                    last_error = "Facebook 頁面未提供可用的 Open Graph metadata"
+            except FacebookPreviewUnavailable:
+                raise
             except Exception as exc:
                 last_error = f"Facebook 頁面讀取失敗（{exc}）"
 
@@ -279,15 +376,15 @@ async def _fetch_html_with_aiohttp(url: str) -> Tuple[str, str, List[str], List[
 
 
 async def _fetch_og_data(url: str) -> Tuple[str, str, List[str], List[str], str]:
-    """使用 aiohttp 擷取 Facebook Open Graph；失敗時回傳安全 fallback。"""
+    """使用 aiohttp 擷取 Facebook Open Graph；不可公開讀取時明確失敗。"""
     try:
         title, description, image_urls, video_urls, final_url, status = await _fetch_html_with_aiohttp(url)
         if status >= 400 and not (title or description or image_urls or video_urls):
-            raise RuntimeError(f"HTTP {status} 且無可用 Open Graph")
+            raise FacebookPreviewUnavailable(f"HTTP {status} 且無可用 Open Graph")
         return title, description, image_urls, video_urls, final_url or url
     except Exception as http_error:
         logger.warning("aiohttp 擷取 Facebook Open Graph 失敗: %s", http_error)
-        return "Facebook 貼文", "", [], [], url
+        raise
 
 
 async def build_facebook_preview(
@@ -452,5 +549,5 @@ async def handle_facebook_in_message(message: discord.Message) -> bool:
         return True
     except Exception as exc:
         logger.error("Facebook 預覽失敗: %s", exc, exc_info=True)
-        await message.reply("Facebook 預覽失敗，請稍後再試或直接開啟原連結。", mention_author=False)
+        await message.reply("Facebook預覽失敗 爛meta", mention_author=False)
         return False

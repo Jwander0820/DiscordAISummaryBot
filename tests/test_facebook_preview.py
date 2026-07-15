@@ -1,14 +1,20 @@
 import unittest
 from unittest.mock import patch
 
-from discord_bot.features.social_preview.facebook_preview import _extract_og_data, _fetch_html_with_aiohttp
+from discord_bot.features.social_preview.facebook_preview import (
+    _build_candidate_urls,
+    _extract_og_data,
+    _fetch_html_with_aiohttp,
+    extract_facebook_urls,
+)
 
 
 class FakeResponse:
-    def __init__(self, url, html, *, status=200):
+    def __init__(self, url, html, *, status=200, headers=None):
         self.url = url
         self._html = html
         self.status = status
+        self.headers = headers or {}
 
     async def text(self, *, errors):
         return self._html
@@ -37,6 +43,25 @@ class FakeSession:
 
 
 class FacebookPreviewTests(unittest.TestCase):
+    def test_extract_urls_supports_mobile_redirect_host(self):
+        content = "看看 https://lm.facebook.com/l.php?u=https%3A%2F%2Fwww.facebook.com%2Fshare%2Fp%2Fabc"
+
+        self.assertEqual(
+            extract_facebook_urls(content),
+            ["https://lm.facebook.com/l.php?u=https%3A%2F%2Fwww.facebook.com%2Fshare%2Fp%2Fabc"],
+        )
+
+    def test_build_candidates_uses_resolved_content_path(self):
+        candidates = _build_candidate_urls("https://www.facebook.com/example/posts/123?story_fbid=123")
+
+        self.assertIn("https://m.facebook.com/example/posts/123?story_fbid=123", candidates)
+        self.assertIn("https://mbasic.facebook.com/example/posts/123?story_fbid=123", candidates)
+
+    def test_redirect_host_is_not_rewritten_before_resolution(self):
+        url = "https://lm.facebook.com/l.php?u=https%3A%2F%2Fwww.facebook.com%2Fshare%2Fp%2Fabc"
+
+        self.assertEqual(_build_candidate_urls(url), [url])
+
     def test_empty_html_does_not_report_placeholder_as_fetched_metadata(self):
         title, description, image_urls, video_urls = _extract_og_data("<html><body></body></html>")
 
@@ -54,6 +79,100 @@ class FacebookPreviewTests(unittest.TestCase):
 
 
 class FacebookPreviewAsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_fetch_follows_facebook_redirect_to_final_post(self):
+        share_url = "https://www.facebook.com/share/p/abc"
+        final_url = "https://www.facebook.com/example/posts/123"
+        session = FakeSession(
+            [
+                FakeResponse(share_url, "", status=302, headers={"Location": final_url}),
+                FakeResponse(final_url, '<meta property="og:title" content="Resolved post">'),
+            ]
+        )
+
+        with (
+            patch(
+                "discord_bot.features.social_preview.facebook_preview._build_candidate_urls",
+                return_value=[share_url],
+            ),
+            patch(
+                "discord_bot.features.social_preview.facebook_preview.aiohttp.ClientSession",
+                return_value=session,
+            ),
+        ):
+            title, _, _, _, resolved_url, status = await _fetch_html_with_aiohttp(share_url)
+
+        self.assertEqual(title, "Resolved post")
+        self.assertEqual(resolved_url, final_url)
+        self.assertEqual(status, 200)
+        self.assertEqual(session.requested_urls, [share_url, final_url])
+
+    async def test_fetch_retries_hosts_using_resolved_post_path(self):
+        share_url = "https://www.facebook.com/share/p/abc"
+        final_url = "https://www.facebook.com/example/posts/123"
+        mobile_final_url = "https://m.facebook.com/example/posts/123"
+        session = FakeSession(
+            [
+                FakeResponse(share_url, "", status=302, headers={"Location": final_url}),
+                FakeResponse(final_url, "<html><body>no metadata</body></html>"),
+                FakeResponse(mobile_final_url, '<meta property="og:title" content="Mobile post">'),
+            ]
+        )
+
+        with patch(
+            "discord_bot.features.social_preview.facebook_preview.aiohttp.ClientSession",
+            return_value=session,
+        ):
+            title, _, _, _, resolved_url, status = await _fetch_html_with_aiohttp(share_url)
+
+        self.assertEqual(title, "Mobile post")
+        self.assertEqual(resolved_url, mobile_final_url)
+        self.assertEqual(status, 200)
+        self.assertEqual(session.requested_urls, [share_url, final_url, mobile_final_url])
+
+    async def test_fetch_rejects_redirect_to_external_domain(self):
+        share_url = "https://lm.facebook.com/l.php?u=https%3A%2F%2Fexample.com"
+        session = FakeSession(
+            [FakeResponse(share_url, "", status=302, headers={"Location": "https://example.com/private"})]
+        )
+
+        with (
+            patch(
+                "discord_bot.features.social_preview.facebook_preview._build_candidate_urls",
+                return_value=[share_url],
+            ),
+            patch(
+                "discord_bot.features.social_preview.facebook_preview.aiohttp.ClientSession",
+                return_value=session,
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "非 Facebook 網域"):
+                await _fetch_html_with_aiohttp(share_url)
+
+        self.assertEqual(session.requested_urls, [share_url])
+
+    async def test_fetch_rejects_login_wall(self):
+        url = "https://www.facebook.com/share/p/private"
+        login_url = "https://www.facebook.com/login/?next=%2Fshare%2Fp%2Fprivate"
+        session = FakeSession(
+            [
+                FakeResponse(url, "", status=302, headers={"Location": login_url}),
+                FakeResponse(login_url, '<form id="login_form"></form>'),
+            ]
+        )
+
+        with (
+            patch(
+                "discord_bot.features.social_preview.facebook_preview._build_candidate_urls",
+                return_value=[url],
+            ),
+            patch(
+                "discord_bot.features.social_preview.facebook_preview.aiohttp.ClientSession",
+                return_value=session,
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "登入或存取限制"):
+                await _fetch_html_with_aiohttp(url)
+
     async def test_fetch_tries_next_candidate_when_first_page_has_no_metadata(self):
         first_url = "https://www.facebook.com/post/123"
         second_url = "https://m.facebook.com/post/123"
