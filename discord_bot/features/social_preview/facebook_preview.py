@@ -41,6 +41,7 @@ FACEBOOK_URL_RE = re.compile(
     re.IGNORECASE,
 )
 SPOILER_BLOCK_RE = re.compile(r"\|\|(.+?)\|\|", re.DOTALL)
+FACEBOOK_INVALID_POST_MESSAGE = "Facebook預覽失敗 爛meta"
 
 FACEBOOK_CONTENT_HOSTS = ("www.facebook.com", "m.facebook.com", "mbasic.facebook.com")
 FACEBOOK_REDIRECT_ONLY_HOSTS = {"l.facebook.com", "lm.facebook.com", "fb.watch", "www.fb.watch"}
@@ -348,7 +349,8 @@ async def _fetch_html_with_aiohttp(url: str) -> Tuple[str, str, List[str], List[
                 attempted.add(final_url)
                 last_status = status
                 if _is_facebook_access_wall(final_url, html):
-                    raise FacebookPreviewUnavailable("Facebook 頁面要求登入或存取限制")
+                    last_error = "Facebook 頁面要求登入或存取限制"
+                    continue
 
                 title, description, image_urls, video_urls = _extract_og_data(html)
                 has_metadata = bool(title or description or image_urls or video_urls)
@@ -463,9 +465,9 @@ async def handle_facebook_in_message(message: discord.Message) -> bool:
         return False
 
     url = urls[0]
+    use_spoiler = _is_facebook_url_spoilered(message.content or "", url)
+    user_commentary = _extract_facebook_commentary(message.content or "", url)
     try:
-        use_spoiler = _is_facebook_url_spoilered(message.content or "", url)
-        user_commentary = _extract_facebook_commentary(message.content or "", url)
         logger.info(
             "%s 在 %s 貼了 Facebook url %s",
             message.author.nick or message.author.global_name,
@@ -549,5 +551,19 @@ async def handle_facebook_in_message(message: discord.Message) -> bool:
         return True
     except Exception as exc:
         logger.error("Facebook 預覽失敗: %s", exc, exc_info=True)
-        await message.reply("Facebook預覽失敗 爛meta", mention_author=False)
-        return False
+        description = FACEBOOK_INVALID_POST_MESSAGE
+        if use_spoiler:
+            description = _spoiler_wrap(description)
+
+        embed = discord.Embed(title="Facebook", description=description, url=url)
+        embed.set_author(name="Facebook")
+        view = DeleteFacebookPreviewView(original_url=url)
+        sent = await send_preview_as_author(
+            message,
+            content=user_commentary or None,
+            embed=embed,
+            view=view,
+        )
+        view.message = sent
+        await cleanup_source_message(message, platform="Facebook", url=url)
+        return True

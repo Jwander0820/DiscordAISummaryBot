@@ -1,11 +1,13 @@
 import unittest
-from unittest.mock import patch
+import types
+from unittest.mock import AsyncMock, patch
 
 from discord_bot.features.social_preview.facebook_preview import (
     _build_candidate_urls,
     _extract_og_data,
     _fetch_html_with_aiohttp,
     extract_facebook_urls,
+    handle_facebook_in_message,
 )
 
 
@@ -79,6 +81,27 @@ class FacebookPreviewTests(unittest.TestCase):
 
 
 class FacebookPreviewAsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_fetch_tries_mobile_candidate_after_www_access_wall(self):
+        share_url = "https://www.facebook.com/share/p/14kUyp62jLg/"
+        mobile_url = "https://m.facebook.com/share/p/14kUyp62jLg/"
+        session = FakeSession(
+            [
+                FakeResponse(share_url, '<form id="login_form"></form>'),
+                FakeResponse(mobile_url, '<meta property="og:title" content="Mobile post">'),
+            ]
+        )
+
+        with patch(
+            "discord_bot.features.social_preview.facebook_preview.aiohttp.ClientSession",
+            return_value=session,
+        ):
+            title, _, _, _, final_url, status = await _fetch_html_with_aiohttp(share_url)
+
+        self.assertEqual(title, "Mobile post")
+        self.assertEqual(final_url, mobile_url)
+        self.assertEqual(status, 200)
+        self.assertEqual(session.requested_urls, [share_url, mobile_url])
+
     async def test_fetch_follows_facebook_redirect_to_final_post(self):
         share_url = "https://www.facebook.com/share/p/abc"
         final_url = "https://www.facebook.com/example/posts/123"
@@ -199,6 +222,40 @@ class FacebookPreviewAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(final_url, second_url)
         self.assertEqual(status, 200)
         self.assertEqual(session.requested_urls, [first_url, second_url])
+
+    async def test_handler_uses_threads_style_fallback_preview_instead_of_reply(self):
+        url = "https://www.facebook.com/share/p/14kUyp62jLg/"
+        message = types.SimpleNamespace(
+            author=types.SimpleNamespace(bot=False, nick="Jwander", global_name="Jwander"),
+            channel=types.SimpleNamespace(name="general"),
+            content=url,
+            reply=AsyncMock(),
+        )
+        sent_message = types.SimpleNamespace(id=123)
+
+        with (
+            patch(
+                "discord_bot.features.social_preview.facebook_preview.build_facebook_preview",
+                new=AsyncMock(side_effect=RuntimeError("Facebook 頁面要求登入或存取限制")),
+            ),
+            patch(
+                "discord_bot.features.social_preview.facebook_preview.send_preview_as_author",
+                new=AsyncMock(return_value=sent_message),
+            ) as send_preview,
+            patch(
+                "discord_bot.features.social_preview.facebook_preview.cleanup_source_message",
+                new=AsyncMock(),
+            ) as cleanup_source,
+        ):
+            handled = await handle_facebook_in_message(message)
+
+        self.assertTrue(handled)
+        message.reply.assert_not_awaited()
+        send_preview.assert_awaited_once()
+        sent_kwargs = send_preview.await_args.kwargs
+        self.assertEqual(sent_kwargs["embed"].description, "Facebook預覽失敗 爛meta")
+        self.assertEqual(sent_kwargs["embed"].url, url)
+        cleanup_source.assert_awaited_once_with(message, platform="Facebook", url=url)
 
 
 if __name__ == "__main__":
