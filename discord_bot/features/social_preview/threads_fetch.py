@@ -9,7 +9,7 @@ import time
 import html
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
-from urllib.parse import parse_qs, urlparse, urlunparse, urlencode
+from urllib.parse import parse_qs, urljoin, urlparse, urlunparse, urlencode
 
 # =============== 配置 ===============
 REQUEST_TIMEOUT = 15
@@ -41,6 +41,8 @@ THREADS_SHARE_RE = re.compile(
     r"https?://(www\.)?(threads\.net|threads\.com)/share/[A-Za-z0-9_\-]+/?",
     re.IGNORECASE,
 )
+THREADS_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+THREADS_SHARE_MAX_REDIRECTS = 5
 
 
 # =============== 資料結構 ===============
@@ -84,23 +86,56 @@ def _resolve_threads_share_url(url: str) -> str:
     if not THREADS_SHARE_RE.fullmatch(share_url):
         raise ValueError(f"不是 Threads 分享 URL：{url}")
 
-    response = requests.get(
-        share_url,
-        # Threads currently returns a 200 share page to browser-like UAs, but
-        # returns the canonical post as an HTTP redirect to requests-like UAs.
-        headers={"Accept": DEFAULT_ACCEPT, "Accept-Language": DEFAULT_LANG},
-        timeout=REQUEST_TIMEOUT,
-        allow_redirects=True,
-        stream=True,
-    )
-    try:
-        resolved_url = _strip_tracking_query(response.url)
-    finally:
-        response.close()
+    current_url = share_url
+    last_url = share_url
 
-    if not THREADS_RE.fullmatch(resolved_url):
-        raise ValueError(f"Threads 分享 URL 未導向標準 Threads 貼文：{resolved_url}")
-    return resolved_url
+    for _ in range(THREADS_SHARE_MAX_REDIRECTS + 1):
+        response = requests.get(
+            current_url,
+            # Do not automatically follow the canonical post URL. Threads can
+            # redirect that second request to ``/?error=invalid_post`` even
+            # though the share response already exposed the correct post URL.
+            headers={"Accept": DEFAULT_ACCEPT, "Accept-Language": DEFAULT_LANG},
+            timeout=REQUEST_TIMEOUT,
+            allow_redirects=False,
+            stream=True,
+        )
+        try:
+            response_url = getattr(response, "url", None) or current_url
+            resolved_url = _strip_tracking_query(response_url)
+            if THREADS_RE.fullmatch(resolved_url):
+                return resolved_url
+
+            status_code = getattr(response, "status_code", None)
+            headers = getattr(response, "headers", {}) or {}
+            location = headers.get("Location") or headers.get("location")
+            if status_code not in THREADS_REDIRECT_STATUSES or not location:
+                last_url = resolved_url
+                break
+
+            next_url = urljoin(response_url, location)
+            parsed_next = urlparse(next_url)
+            next_host = parsed_next.netloc.lower().split(":", 1)[0]
+            if parsed_next.scheme not in {"http", "https"} or next_host not in {
+                "threads.net",
+                "www.threads.net",
+                "threads.com",
+                "www.threads.com",
+            }:
+                raise ValueError("Threads 分享 URL 導向非 Threads 網域")
+
+            resolved_url = _strip_tracking_query(next_url)
+            if THREADS_RE.fullmatch(resolved_url):
+                return resolved_url
+            if not THREADS_SHARE_RE.fullmatch(resolved_url):
+                last_url = resolved_url
+                break
+            current_url = resolved_url
+            last_url = resolved_url
+        finally:
+            response.close()
+
+    raise ValueError(f"Threads 分享 URL 未導向標準 Threads 貼文：{last_url}")
 
 
 def build_candidate_urls(url: str) -> list[str]:

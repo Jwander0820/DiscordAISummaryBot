@@ -80,7 +80,12 @@ class ThreadsFetchTests(unittest.TestCase):
             "https://www.threads.com/@waiteryoshie/post/DavTjGCEwon"
             "?xmt=tracking&slof=1"
         )
-        response = SimpleNamespace(url=canonical_url, close=Mock())
+        response = SimpleNamespace(
+            url=share_url,
+            status_code=302,
+            headers={"Location": canonical_url},
+            close=Mock(),
+        )
         requests_stub = SimpleNamespace(get=Mock(return_value=response))
 
         with patch.dict("sys.modules", {"requests": requests_stub}):
@@ -94,7 +99,7 @@ class ThreadsFetchTests(unittest.TestCase):
             share_url,
             headers=unittest.mock.ANY,
             timeout=unittest.mock.ANY,
-            allow_redirects=True,
+            allow_redirects=False,
             stream=True,
         )
         self.assertNotIn("User-Agent", requests_stub.get.call_args.kwargs["headers"])
@@ -103,16 +108,42 @@ class ThreadsFetchTests(unittest.TestCase):
     def test_resolve_threads_share_url_rejects_non_post_redirect(self):
         share_url = "https://www.threads.com/share/BATCH_invalid"
         response = SimpleNamespace(
-            url="https://example.com/not-a-threads-post",
+            url=share_url,
+            status_code=302,
+            headers={"Location": "https://example.com/not-a-threads-post"},
             close=Mock(),
         )
         requests_stub = SimpleNamespace(get=Mock(return_value=response))
 
         with patch.dict("sys.modules", {"requests": requests_stub}):
-            with self.assertRaisesRegex(ValueError, "標準 Threads 貼文"):
+            with self.assertRaisesRegex(ValueError, "非 Threads 網域"):
                 _resolve_threads_share_url(share_url)
 
         response.close.assert_called_once()
+
+    def test_resolve_threads_share_url_stops_before_canonical_post_redirects_to_error(self):
+        share_url = "https://www.threads.com/share/TEST_share_123"
+        canonical_url = (
+            "https://www.threads.com/@example_user/post/TEST_post_456"
+            "?xmt=tracking"
+        )
+        share_response = SimpleNamespace(
+            url=share_url,
+            status_code=302,
+            headers={"Location": canonical_url},
+            close=Mock(),
+        )
+        requests_stub = SimpleNamespace(get=Mock(return_value=share_response))
+
+        with patch.dict("sys.modules", {"requests": requests_stub}):
+            resolved = _resolve_threads_share_url(share_url)
+
+        self.assertEqual(
+            resolved,
+            "https://www.threads.com/@example_user/post/TEST_post_456",
+        )
+        requests_stub.get.assert_called_once()
+        share_response.close.assert_called_once()
 
     @patch("discord_bot.features.social_preview.threads_fetch._try_oembed_fill")
     @patch("discord_bot.features.social_preview.threads_fetch._try_requests")
