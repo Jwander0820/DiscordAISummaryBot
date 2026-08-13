@@ -14,7 +14,12 @@ import discord
 from discord.errors import HTTPException, InteractionResponded, NotFound
 
 from .instagram_fetch import InstagramPost, fetch_instagram_post, normalize_instagram_url
-from .download import MAX_IMAGE_DOWNLOAD_BYTES, MAX_VIDEO_DOWNLOAD_BYTES, download_bytes_limited
+from .download import (
+    MAX_IMAGE_DOWNLOAD_BYTES,
+    MAX_VIDEO_DOWNLOAD_BYTES,
+    download_bytes_limited,
+    is_trusted_media_url,
+)
 from .sender import cleanup_source_message, send_preview_as_author
 from .text import extract_message_commentary
 
@@ -177,8 +182,15 @@ async def _download_bytes(
     timeout_sec: int = 20,
     *,
     max_bytes: int = MAX_IMAGE_DOWNLOAD_BYTES,
+    media_type: str = "image",
 ) -> Optional[bytes]:
-    return await download_bytes_limited(session, url, max_bytes=max_bytes, timeout_sec=timeout_sec)
+    return await download_bytes_limited(
+        session,
+        url,
+        max_bytes=max_bytes,
+        timeout_sec=timeout_sec,
+        media_type=media_type,
+    )
 
 
 def _format_link(label: str, url: str) -> str:
@@ -218,7 +230,11 @@ async def build_instagram_preview(
     if spoiler:
         embed.description = _spoiler_wrap(description)
 
-    image_urls = [media.url for media in post.media if media.type == "image"]
+    image_urls = [
+        media.url
+        for media in post.media
+        if media.type == "image" and is_trusted_media_url(media.url)
+    ]
     files: List[discord.File] = []
 
     if image_urls:
@@ -234,12 +250,16 @@ async def build_instagram_preview(
                         embed.set_image(url=f"attachment://{file.filename}")
                         break
                     logger.info("Instagram image candidate unavailable: %s", image_url)
-            if not files and not spoiler:
-                embed.set_image(url=selected_image_url)
+            if not files:
+                logger.info("Instagram images omitted after safe downloads rejected all candidates")
         elif not spoiler:
             embed.set_image(url=selected_image_url)
 
-    video_urls = [media.url for media in post.media if media.type == "video"]
+    video_urls = [
+        media.url
+        for media in post.media
+        if media.type == "video" and is_trusted_media_url(media.url)
+    ]
     primary_video_url: Optional[str] = None
     inline_video_url: Optional[str] = None
     extra_lines: list[str] = []
@@ -258,6 +278,7 @@ async def build_instagram_preview(
                     mp4_urls[0],
                     timeout_sec=40,
                     max_bytes=MAX_VIDEO_DOWNLOAD_BYTES,
+                    media_type="video",
                 )
             if video_data:
                 files.append(discord.File(io.BytesIO(video_data), filename="instagram_video.mp4", spoiler=spoiler))

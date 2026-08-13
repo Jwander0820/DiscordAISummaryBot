@@ -75,7 +75,7 @@ class InstagramPreviewTests(unittest.IsolatedAsyncioTestCase):
             shortcode="ABC123",
             author_username="demo",
             text="caption",
-            media=[InstagramMedia("image", "https://cdn.example.com/post.jpg")],
+            media=[InstagramMedia("image", "https://scontent.cdninstagram.com/post.jpg")],
         )
         mock_download_bytes.return_value = b"image-bytes"
 

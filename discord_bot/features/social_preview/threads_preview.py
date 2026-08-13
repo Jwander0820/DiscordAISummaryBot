@@ -31,7 +31,12 @@ from discord.errors import HTTPException, InteractionResponded, NotFound
 
 # 你已有的抓取器
 from .threads_fetch import fetch_threads_post
-from .download import MAX_IMAGE_DOWNLOAD_BYTES, MAX_VIDEO_DOWNLOAD_BYTES, download_bytes_limited
+from .download import (
+    MAX_IMAGE_DOWNLOAD_BYTES,
+    MAX_VIDEO_DOWNLOAD_BYTES,
+    download_bytes_limited,
+    is_trusted_media_url,
+)
 from .sender import cleanup_source_message, send_preview_as_author
 from .text import extract_message_commentary
 
@@ -242,11 +247,18 @@ async def _download_bytes(
     timeout_sec: int = 20,
     *,
     max_bytes: int = MAX_IMAGE_DOWNLOAD_BYTES,
+    media_type: str = "image",
 ) -> Optional[bytes]:
     """
     下載二進位內容（圖片/影片），失敗回 None。
     """
-    return await download_bytes_limited(session, url, max_bytes=max_bytes, timeout_sec=timeout_sec)
+    return await download_bytes_limited(
+        session,
+        url,
+        max_bytes=max_bytes,
+        timeout_sec=timeout_sec,
+        media_type=media_type,
+    )
 
 
 # --- 建立預覽 ---
@@ -295,7 +307,11 @@ async def build_threads_preview(
     #     embed.set_footer(text=post.created_at)
 
     # --- 圖片處理 ---
-    image_urls = [m.url for m in (post.media or []) if m.type == "image"]
+    image_urls = [
+        media.url
+        for media in (post.media or [])
+        if media.type == "image" and is_trusted_media_url(media.url)
+    ]
     files: List[discord.File] = []
 
     if image_urls:
@@ -311,15 +327,17 @@ async def build_threads_preview(
                 # 注意：spoiler=True 時 discord 可能改寫成 SPOILER_ 前綴，需用 file.filename
                 embed.set_image(url=f"attachment://{file.filename}")
             else:
-                # 下載失敗就直接熱鏈接
-                if not spoiler:
-                    embed.set_image(url=first_img)
+                logger.info("Threads image omitted after safe download rejected it")
         else:
             if not spoiler:
                 embed.set_image(url=first_img)
 
     # --- 影片處理 ---
-    video_urls = [m.url for m in (post.media or []) if m.type == "video"]
+    video_urls = [
+        media.url
+        for media in (post.media or [])
+        if media.type == "video" and is_trusted_media_url(media.url)
+    ]
 
     extra_lines = []
     primary_video_url: Optional[str] = None
@@ -337,6 +355,7 @@ async def build_threads_preview(
                     mp4s[0],
                     timeout_sec=40,
                     max_bytes=MAX_VIDEO_DOWNLOAD_BYTES,
+                    media_type="video",
                 )
             if data:
                 vname = "threads_video.mp4"

@@ -31,7 +31,11 @@ class DiscordSummaryBot(commands.Bot):
         intents = discord.Intents.default()
         intents.message_content = True
         intents.messages = True
-        super().__init__(command_prefix="!", intents=intents)
+        super().__init__(
+            command_prefix="!",
+            intents=intents,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
         self._synced = False
 
     async def setup_hook(self) -> None:

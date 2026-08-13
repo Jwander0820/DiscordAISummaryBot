@@ -58,6 +58,12 @@ def install_discord_stub():
             self.description = description
 
     class AllowedMentions:
+        def __init__(self, *, everyone=True, users=True, roles=True, replied_user=True):
+            self.everyone = everyone
+            self.users = users
+            self.roles = roles
+            self.replied_user = replied_user
+
         @staticmethod
         def none():
             return None

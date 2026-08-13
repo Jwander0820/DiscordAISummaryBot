@@ -201,7 +201,12 @@ class FunCog(commands.Cog):
         webhook = discord.utils.get(webhooks, name=webhook_name)
         if webhook is None:
             webhook = await channel.create_webhook(name=webhook_name)
-        await webhook.send(content, username=username, avatar_url=avatar_url)
+        await webhook.send(
+            content,
+            username=username,
+            avatar_url=avatar_url,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
 
 async def setup(bot: commands.Bot) -> None:

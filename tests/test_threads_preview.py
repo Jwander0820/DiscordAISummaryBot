@@ -145,7 +145,7 @@ class ThreadsPreviewTests(unittest.IsolatedAsyncioTestCase):
 
     @patch("discord_bot.features.social_preview.threads_preview.asyncio.to_thread")
     async def test_build_threads_preview_uses_clean_video_button_instead_of_raw_url(self, mock_to_thread):
-        video_url = "https://cdn.example.com/media/video.mp4?token=abc"
+        video_url = "https://video.xx.fbcdn.net/media/video.mp4?token=abc"
         mock_to_thread.return_value = ThreadsPost(
             url="https://www.threads.com/@demo/post/abc",
             author_username="demo",
@@ -163,7 +163,7 @@ class ThreadsPreviewTests(unittest.IsolatedAsyncioTestCase):
     def test_delete_preview_view_adds_video_link_button(self):
         view = DeletePreviewView(
             original_url="https://www.threads.com/@demo/post/abc",
-            video_url="https://cdn.example.com/media/video.mp4?token=abc",
+            video_url="https://video.xx.fbcdn.net/media/video.mp4?token=abc",
         )
 
         labels = [getattr(item, "label", None) for item in view.children]
@@ -182,7 +182,7 @@ class ThreadsPreviewTests(unittest.IsolatedAsyncioTestCase):
         mock_cleanup_source_message,
     ):
         url = "https://www.threads.com/@demo/post/abc"
-        video_url = "https://cdn.example.com/media/video.mp4?token=abc"
+        video_url = "https://video.xx.fbcdn.net/media/video.mp4?token=abc"
         mock_build_threads_preview.return_value = PreviewResult(
             embed=discord.Embed(title="Threads @demo"),
             files=[],

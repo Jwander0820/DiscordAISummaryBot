@@ -11,9 +11,11 @@ notify_forwarder = reload_module("discord_bot.features.notifications.discord_for
 class FakeChannel:
     def __init__(self):
         self.messages = []
+        self.send_kwargs = []
 
-    async def send(self, message):
+    async def send(self, message, **kwargs):
         self.messages.append(message)
+        self.send_kwargs.append(kwargs)
 
 
 class FakeGuild:
@@ -74,6 +76,7 @@ class NotifyForwarderTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result)
         self.assertEqual(len(channel.messages), 1)
+        self.assertIn("allowed_mentions", channel.send_kwargs[0])
         self.assertIn("SERN Notify 轉發", channel.messages[0])
         self.assertIn("Email: `sent`", channel.messages[0])
         self.assertIn("問題: `問題`", channel.messages[0])
@@ -109,7 +112,11 @@ class NotifyForwarderTests(unittest.IsolatedAsyncioTestCase):
             "call_time": "2026-04-10T10:00:00+08:00",
         }
 
-        with patch.dict(os.environ, {"DISCORD_NOTIFY_FORWARD_CHANNEL_ID": "123"}, clear=False):
+        with patch.dict(
+            os.environ,
+            {"DISCORD_NOTIFY_FORWARD_CHANNEL_ID": "123", "DISCORD_NOTIFY_FORWARD_GUILD_ID": ""},
+            clear=False,
+        ):
             result = await notify_forwarder.forward_notify_to_channel(record=record, guild=guild)
 
         self.assertTrue(result)

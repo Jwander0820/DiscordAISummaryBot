@@ -103,7 +103,10 @@ async def forward_notify_to_channel(
 
     message = "\n".join(lines)
     try:
-        await channel.send(message[:2000])
+        await channel.send(
+            message[:2000],
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
         return True
     except Exception as exc:
         logger.error("notify forward: 發送失敗: %s", exc, exc_info=True)

@@ -12,7 +12,12 @@ import aiohttp
 import discord
 from bs4 import BeautifulSoup
 from discord.errors import HTTPException, InteractionResponded, NotFound
-from .download import MAX_IMAGE_DOWNLOAD_BYTES, MAX_VIDEO_DOWNLOAD_BYTES, download_bytes_limited
+from .download import (
+    MAX_IMAGE_DOWNLOAD_BYTES,
+    MAX_VIDEO_DOWNLOAD_BYTES,
+    download_bytes_limited,
+    is_trusted_media_url,
+)
 from .sender import cleanup_source_message, send_preview_as_author
 from .text import extract_message_commentary
 
@@ -279,9 +284,16 @@ async def _download_bytes(
     timeout_sec: int = 20,
     *,
     max_bytes: int = MAX_IMAGE_DOWNLOAD_BYTES,
+    media_type: str = "image",
 ) -> Optional[bytes]:
     """下載圖片或影片位元組，失敗時回傳 `None`。"""
-    return await download_bytes_limited(session, url, max_bytes=max_bytes, timeout_sec=timeout_sec)
+    return await download_bytes_limited(
+        session,
+        url,
+        max_bytes=max_bytes,
+        timeout_sec=timeout_sec,
+        media_type=media_type,
+    )
 
 
 def _meta_contents(soup: BeautifulSoup, key: str) -> List[str]:
@@ -412,7 +424,7 @@ async def build_facebook_preview(
     files: List[discord.File] = []
     extra_lines: List[str] = []
 
-    selected_image_urls = image_urls[:max(1, max_images)]
+    selected_image_urls = [url for url in image_urls if is_trusted_media_url(url)][:max(1, max_images)]
     if selected_image_urls:
         if reupload_image:
             async with aiohttp.ClientSession(headers=DEFAULT_HEADERS) as session:
@@ -426,12 +438,12 @@ async def build_facebook_preview(
             if files:
                 embed.set_image(url=f"attachment://{files[0].filename}")
             else:
-                if not spoiler:
-                    embed.set_image(url=selected_image_urls[0])
+                logger.info("Facebook images omitted after safe downloads rejected all candidates")
         else:
             if not spoiler:
                 embed.set_image(url=selected_image_urls[0])
 
+    video_urls = [url for url in video_urls if is_trusted_media_url(url)]
     if video_urls:
         mp4_urls = [u for u in video_urls if u.lower().endswith(".mp4")]
         if allow_video_upload and mp4_urls:
@@ -441,6 +453,7 @@ async def build_facebook_preview(
                     mp4_urls[0],
                     timeout_sec=40,
                     max_bytes=MAX_VIDEO_DOWNLOAD_BYTES,
+                    media_type="video",
                 )
             if video_data:
                 files.append(discord.File(io.BytesIO(video_data), filename="facebook_preview_video.mp4", spoiler=spoiler))

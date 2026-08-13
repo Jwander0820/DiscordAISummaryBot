@@ -26,6 +26,17 @@ def _require_text_channel(interaction: discord.Interaction) -> discord.TextChann
         return channel
     return None
 
+
+def _allowed_mentions_for_requester(user: object) -> discord.AllowedMentions:
+    """Allow only the slash-command requester to receive a mention notification."""
+    return discord.AllowedMentions(
+        everyone=False,
+        users=[user],
+        roles=False,
+        replied_user=False,
+    )
+
+
 class ConversationCog(commands.Cog):
     """Slash commands that answer questions based on recent conversation context."""
 
@@ -101,7 +112,7 @@ class ConversationCog(commands.Cog):
                 guild=interaction.guild,
                 bot_client=interaction.client,
             )
-            await interaction.followup.send(reply_content)
+            await self._send_requester_followup(interaction, reply_content)
         except Exception as exc:
             logger.error("Error in ask_about_conversation: %s", exc, exc_info=True)
             await notification_service.dispatch(
@@ -161,7 +172,7 @@ class ConversationCog(commands.Cog):
                 await interaction.followup.send("AI 罷工了捏 _(:з」∠)_", ephemeral=True)
                 return
 
-            await interaction.followup.send(reply)
+            await self._send_requester_followup(interaction, reply)
         except Exception as exc:
             logger.error("Error in answer_book: %s", exc, exc_info=True)
             await notification_service.dispatch(
@@ -221,7 +232,7 @@ class ConversationCog(commands.Cog):
                 await interaction.followup.send("Amadeus 罷工了捏 _(:з」∠)_", ephemeral=True)
                 return
 
-            await self._send_as_amadeus(channel, reply)
+            await self._send_as_amadeus(channel, reply, interaction.user)
             await interaction.delete_original_response()
         except Exception as exc:
             logger.error("Error in el_psy_kongroo: %s", exc, exc_info=True)
@@ -234,14 +245,33 @@ class ConversationCog(commands.Cog):
             public_message = gemini_user_message(exc) or "SERN 系統暫時發生問題，請稍後再試一次。"
             await interaction.followup.send(public_message, ephemeral=True)
 
-    async def _send_as_amadeus(self, channel: discord.TextChannel, content: str) -> None:
+    async def _send_requester_followup(self, interaction: discord.Interaction, content: str) -> None:
+        """Send a public response that notifies only the command requester."""
+        await interaction.followup.send(
+            content,
+            allowed_mentions=_allowed_mentions_for_requester(interaction.user),
+        )
+
+    async def _send_as_amadeus(
+        self,
+        channel: discord.TextChannel,
+        content: str,
+        requester: object,
+    ) -> None:
         """Send a webhook message that impersonates the Amadeus persona."""
         avatar_url = (
             "https://media.discordapp.net/attachments/1409948881822814450/1413559087609938031/Amadeus.png"
             "?ex=68bc5efd&is=68bb0d7d&hm=a9069c5e97de585f0d34479acee579394a52d69bc81445ff3a1fb7c5571e00fa"
             "&=&format=webp&quality=lossless&width=1084&height=1084"
         )
-        await self._send_with_webhook(channel, content, "Amadeus", avatar_url, "Amadeus")
+        await self._send_with_webhook(
+            channel,
+            content,
+            "Amadeus",
+            avatar_url,
+            "Amadeus",
+            allowed_mentions=_allowed_mentions_for_requester(requester),
+        )
 
     async def _send_with_webhook(
         self,
@@ -250,13 +280,22 @@ class ConversationCog(commands.Cog):
         username: str,
         avatar_url: str,
         webhook_name: str,
+        *,
+        allowed_mentions: discord.AllowedMentions | None = None,
     ) -> None:
         """Send a message through a named webhook, creating it on demand."""
         webhooks = await channel.webhooks()
         webhook = discord.utils.get(webhooks, name=webhook_name)
         if webhook is None:
             webhook = await channel.create_webhook(name=webhook_name)
-        await webhook.send(content, username=username, avatar_url=avatar_url)
+        if allowed_mentions is None:
+            allowed_mentions = discord.AllowedMentions.none()
+        await webhook.send(
+            content,
+            username=username,
+            avatar_url=avatar_url,
+            allowed_mentions=allowed_mentions,
+        )
 
 
 async def setup(bot: commands.Bot) -> None:
