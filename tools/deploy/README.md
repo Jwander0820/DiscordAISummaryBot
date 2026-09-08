@@ -68,9 +68,11 @@ unset GHCR_READ_TOKEN
 
 此處使用 sudo docker，因為部署腳本由 root 拉取 image。憑證存放在 VPS root 的 Docker 設定。Workflow 發布則使用 GitHub 自動提供的 GITHUB_TOKEN，不需要另外放一個可寫 Package 的 PAT。
 
-## 5. GitHub Repository Secrets
+## 5. GitHub production Environment Secrets
 
-Repository → Settings → Secrets and variables → Actions → New repository secret：
+Repository → Settings → Environments → production → Environment secrets → Add environment secret：
+
+部署 job 已指定 `environment: production`，因此可以讀取此環境內的 Secrets；不需要另外複製到 Repository secrets。建置 job 不引用此環境。若 production 設有必要審核者或分支限制，部署必須先滿足這些規則。
 
 | 名稱 | 值 |
 | --- | --- |
