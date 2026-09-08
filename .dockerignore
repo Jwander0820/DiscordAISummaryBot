@@ -14,6 +14,8 @@ __pycache__/
 .env.*
 **/.env
 **/.env.*
+secrets/
+runtime/
 *.db
 **/*.db
 *.sqlite

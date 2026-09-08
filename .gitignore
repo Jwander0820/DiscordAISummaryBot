@@ -17,6 +17,8 @@ venv.bak/
 discord_bot/.env
 
 # Local secrets / OAuth tokens
+secrets/
+runtime/
 *.pickle
 token.pickle
 client_secret.json
