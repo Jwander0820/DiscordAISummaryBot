@@ -9,7 +9,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from ..db.repository import summary_repository
-from ..features.chat.history import collect_non_bot_messages, format_message_history, truncate_for_discord
+from ..features.chat.history import MAX_HISTORY_MESSAGES, collect_non_bot_messages, format_message_history, truncate_for_discord
 from ..features.chat.records import build_summary_record
 from ..features.notifications.service import notification_service
 from ..features.summaries.service import call_cloud_llm
@@ -47,7 +47,7 @@ class ConversationCog(commands.Cog):
         name="你要不要聽聽看你現在在講什麼",
         description="取得24小時內最近1000則訊息，根據你問的問題回覆(實驗性)",
     )
-    async def ask_about_conversation(self, interaction: discord.Interaction, 想問些什麼: str, len_msg: int = 1000) -> None:
+    async def ask_about_conversation(self, interaction: discord.Interaction, 想問些什麼: str, len_msg: app_commands.Range[int, 1, MAX_HISTORY_MESSAGES] = 1000) -> None:
         """Answer a user's question by analyzing recent channel history with Gemini."""
         channel = _require_text_channel(interaction)
         if channel is None:

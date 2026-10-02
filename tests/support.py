@@ -136,6 +136,10 @@ def install_discord_stub():
             self.name = name
             self.value = value
 
+    class Range:
+        def __class_getitem__(cls, parameters):
+            return parameters[0]
+
     def get(iterable, **attrs):
         for item in iterable:
             if all(getattr(item, key, None) == value for key, value in attrs.items()):
@@ -177,6 +181,7 @@ def install_discord_stub():
     app_commands_stub.rename = identity_decorator
     app_commands_stub.describe = identity_decorator
     app_commands_stub.Choice = Choice
+    app_commands_stub.Range = Range
 
     sys.modules["discord"] = discord_stub
     sys.modules["discord.ext"] = ext_stub

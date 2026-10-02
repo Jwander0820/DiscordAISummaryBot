@@ -7,7 +7,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from ..features.chat.history import collect_non_bot_messages, truncate_for_discord
+from ..features.chat.history import MAX_HISTORY_MESSAGES, collect_non_bot_messages, truncate_for_discord
 from ..features.summaries.service import summarize_messages
 
 logger = logging.getLogger("discord_digest_bot")
@@ -29,7 +29,7 @@ class SummaryCog(commands.Cog):
         self.bot = bot
 
     @app_commands.command(name="聊那麼多誰看的完", description="總結頻道中的24小時內5000則訊息")
-    async def summarize(self, interaction: discord.Interaction, len_msg: int = 5000) -> None:
+    async def summarize(self, interaction: discord.Interaction, len_msg: app_commands.Range[int, 1, MAX_HISTORY_MESSAGES] = 5000) -> None:
         """Summarize up to the last 24 hours of non-bot messages."""
         channel = _require_text_channel(interaction)
         if channel is None:
@@ -69,7 +69,7 @@ class SummaryCog(commands.Cog):
             await interaction.followup.send(UNEXPECTED_COMMAND_ERROR_MESSAGE, ephemeral=True)
 
     @app_commands.command(name="整理廢話的魔法", description="總結頻道中的1小時內所有訊息")
-    async def magic_summarize(self, interaction: discord.Interaction, len_msg: int = 5000) -> None:
+    async def magic_summarize(self, interaction: discord.Interaction, len_msg: app_commands.Range[int, 1, MAX_HISTORY_MESSAGES] = 5000) -> None:
         """Summarize recent discussion from the last hour."""
         channel = _require_text_channel(interaction)
         if channel is None:
@@ -105,7 +105,7 @@ class SummaryCog(commands.Cog):
             await interaction.followup.send(UNEXPECTED_COMMAND_ERROR_MESSAGE, ephemeral=True)
 
     @app_commands.command(name="命運探知之魔眼", description="總結頻道中七天內一萬則訊息的精華(實驗性)")
-    async def deep_summary(self, interaction: discord.Interaction, len_msg: int = 10000) -> None:
+    async def deep_summary(self, interaction: discord.Interaction, len_msg: app_commands.Range[int, 1, MAX_HISTORY_MESSAGES] = 10000) -> None:
         """Summarize a longer seven-day window for high-volume channels."""
         channel = _require_text_channel(interaction)
         if channel is None:

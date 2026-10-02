@@ -5,6 +5,8 @@ from typing import Optional
 
 import discord
 
+MAX_HISTORY_MESSAGES = 20_000
+
 
 async def collect_non_bot_messages(
     channel: discord.TextChannel,
@@ -18,8 +20,10 @@ async def collect_non_bot_messages(
     `fetch_multiplier` lets callers over-fetch when they expect many bot/system messages
     so the final non-bot list can still reach the requested limit.
     """
+    if type(limit) is not int or not 1 <= limit <= MAX_HISTORY_MESSAGES:
+        raise ValueError(f"訊息數量必須介於 1～{MAX_HISTORY_MESSAGES:,} 則。")
     messages: list[discord.Message] = []
-    history_limit = max(limit, int(limit * fetch_multiplier))
+    history_limit = min(MAX_HISTORY_MESSAGES, max(limit, int(limit * fetch_multiplier)))
     async for message in channel.history(limit=history_limit, after=after, oldest_first=False):
         if message.author.bot:
             continue

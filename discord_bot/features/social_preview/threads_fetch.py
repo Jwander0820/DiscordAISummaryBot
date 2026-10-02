@@ -13,7 +13,8 @@ from urllib.parse import parse_qs, urljoin, urlparse, urlunparse, urlencode
 
 # =============== 配置 ===============
 REQUEST_TIMEOUT = 15
-RETRY = 3
+RETRY = 2
+MAX_PAGE_ATTEMPTS = 6
 RETRY_BACKOFF = 1.8
 
 UA_DESKTOP = (
@@ -801,41 +802,60 @@ def _try_requests(url: str) -> ThreadsPost:
     last_status = None
     last_url = None
     last_threads_error = None
-    for vurl in variants:
-        for hdr in headers_list:
-            err = None
-            for i in range(RETRY):
-                try:
-                    resp = requests.get(vurl, headers=hdr, timeout=REQUEST_TIMEOUT, allow_redirects=True)
-                    last_status = resp.status_code
-                    last_url = resp.url
-                    redirect_error = _threads_error_from_url(resp.url)
-                    if redirect_error:
-                        last_threads_error = redirect_error
-                        break
-                    if resp.status_code == 200 and "<html" in resp.text.lower():
-                        post = _parse_html(_strip_tracking_query(resp.url), resp.text)
-                        # 判斷是否已拿到有效資料
-                        if post.text or post.media:
-                            return post
-                        # 即便沒撈到，也記錄一下 HTML 供 fallback 使用
-                        last_html = resp.text
-                        break
-                    elif resp.status_code in (429, 500, 502, 503, 504):
-                        time.sleep(RETRY_BACKOFF * (i + 1))
-                    else:
-                        # 例如 403/404… 記錄一下
-                        last_html = resp.text
-                        break
-                except Exception as e:
-                    err = e
-                    time.sleep(RETRY_BACKOFF * (i + 1))
-            # 這個 UA/URL 過完重試了，換下一個
+    # Cover every URL and all UAs first, then retry transient primary failures.
+    # Permanent failures can use alternate UAs; every path shares one budget.
+    primary_pairs = [(vurl, index % len(headers_list)) for index, vurl in enumerate(variants)]
+    alternate_pairs = [
+        (vurl, header_index)
+        for header_index in range(len(headers_list))
+        for vurl in variants
+        if (vurl, header_index) not in primary_pairs
+    ]
+    plan = [
+        (vurl, header_index, retry_index)
+        for pairs in (primary_pairs, alternate_pairs)
+        for retry_index in range(RETRY)
+        for vurl, header_index in pairs
+    ]
+    completed_pairs = set()
+    attempts = 0
+    for index, (vurl, header_index, retry_index) in enumerate(plan):
+        if attempts >= MAX_PAGE_ATTEMPTS:
+            break
+        pair = (vurl, header_index)
+        if pair in completed_pairs:
+            continue
+        attempts += 1
+        retryable = False
+        try:
+            resp = requests.get(vurl, headers=headers_list[header_index], timeout=REQUEST_TIMEOUT, allow_redirects=True)
+            last_status = resp.status_code
+            last_url = resp.url
+            redirect_error = _threads_error_from_url(resp.url)
+            if redirect_error:
+                last_threads_error = redirect_error
+                completed_pairs.add(pair)
+            elif resp.status_code == 200 and "<html" in resp.text.lower():
+                post = _parse_html(_strip_tracking_query(resp.url), resp.text)
+                if post.text or post.media:
+                    return post
+                last_html = resp.text
+                completed_pairs.add(pair)
+            elif resp.status_code in (429, 500, 502, 503, 504):
+                retryable = True
+            else:
+                last_html = resp.text
+                completed_pairs.add(pair)
+        except Exception:
+            retryable = True
+        if retryable and attempts < MAX_PAGE_ATTEMPTS and index + 1 < len(plan):
+            time.sleep(RETRY_BACKOFF * (retry_index + 1))
     # 全部失敗，回傳空 post + debug
     p = ThreadsPost(url=_normalize(url))
     p.preview_error = last_threads_error
     p.debug["requests_last_status"] = last_status
     p.debug["requests_last_url"] = last_url
+    p.debug["requests_attempts"] = attempts
     if last_html and not p.preview_error:
         path = _save_debug_html("requests_last.html", last_html)
         p.debug["requests_last_html_path"] = path

@@ -1,5 +1,7 @@
 import unittest
 from datetime import datetime, timezone
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 from tests.support import install_discord_stub, reload_module
 
@@ -24,8 +26,10 @@ class FakeMessage:
 class FakeChannel:
     def __init__(self, messages):
         self._messages = list(messages)
+        self.requested_limits = []
 
     async def history(self, *, limit, after=None, oldest_first=False):
+        self.requested_limits.append(limit)
         emitted = 0
         for message in self._messages:
             if after and message.created_at <= after:
@@ -37,6 +41,30 @@ class FakeChannel:
 
 
 class ChatHistoryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_invalid_limits_reject_before_history_fetch(self):
+        for limit in (0, -1, 20001, 10**100, True, 1.5, "100", None):
+            with self.subTest(limit=limit):
+                channel = SimpleNamespace(history=Mock())
+                with self.assertRaises(ValueError):
+                    await history.collect_non_bot_messages(channel, limit=limit)
+                channel.history.assert_not_called()
+
+    async def test_generous_limits_preserve_small_results_and_bound_overfetch(self):
+        now = datetime.now(timezone.utc)
+        for limit in (1, 1000, 5000, 10000, 20000):
+            with self.subTest(limit=limit):
+                channel = FakeChannel([
+                    FakeMessage(name="user", display_name="User", content="hello", created_at=now),
+                ])
+                messages = await history.collect_non_bot_messages(channel, limit=limit, fetch_multiplier=1.1)
+                self.assertEqual([m.content for m in messages], ["hello"])
+                self.assertEqual(channel.requested_limits, [min(20000, max(limit, int(limit * 1.1)))])
+
+    async def test_twenty_message_flow_keeps_existing_overfetch(self):
+        channel = FakeChannel([])
+        await history.collect_non_bot_messages(channel, limit=20, fetch_multiplier=2.5)
+        self.assertEqual(channel.requested_limits, [50])
+
     async def test_collect_non_bot_messages_skips_bots_and_respects_limit(self):
         now = datetime.now(timezone.utc)
         channel = FakeChannel(

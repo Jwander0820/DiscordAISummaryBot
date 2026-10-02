@@ -74,6 +74,108 @@ class FakeSoup:
 
 
 class ThreadsFetchTests(unittest.TestCase):
+    def test_page_attempt_budget_limits_retryable_statuses_and_exceptions(self):
+        url = "https://www.threads.com/@demo/post/abc"
+        for result in (429, 503, RuntimeError("network unavailable")):
+            with self.subTest(result=result):
+                get = Mock(side_effect=result) if isinstance(result, Exception) else Mock(
+                    return_value=SimpleNamespace(status_code=result, url=url, text="")
+                )
+                with patch.dict("sys.modules", {"requests": SimpleNamespace(get=get)}), patch(
+                    "discord_bot.features.social_preview.threads_fetch.time.sleep"
+                ) as sleep:
+                    post = _try_requests(url)
+                self.assertEqual(get.call_count, 6)
+                self.assertIsNone(post.text)
+                self.assertEqual(sleep.call_count, 5)
+
+    def test_page_budget_preserves_every_url_variant_success(self):
+        from discord_bot.features.social_preview.threads_fetch import build_candidate_urls
+
+        url = "https://www.threads.com/@demo/post/abc"
+        for wanted in build_candidate_urls(url):
+            with self.subTest(wanted=wanted):
+                def respond(request_url, **_kwargs):
+                    return SimpleNamespace(
+                        status_code=200 if request_url == wanted else 403,
+                        url=request_url,
+                        text="<html>post</html>" if request_url == wanted else "",
+                    )
+                get = Mock(side_effect=respond)
+                with patch.dict("sys.modules", {"requests": SimpleNamespace(get=get)}), patch(
+                    "discord_bot.features.social_preview.threads_fetch._parse_html",
+                    side_effect=lambda parsed_url, _html: ThreadsPost(url=parsed_url, text="正文"),
+                ), patch("discord_bot.features.social_preview.threads_fetch._save_debug_html"):
+                    post = _try_requests(url)
+                self.assertEqual(post.text, "正文")
+                self.assertLessEqual(get.call_count, 6)
+
+    def test_exhausted_page_budget_keeps_single_oembed_fallback(self):
+        url = "https://www.threads.com/@demo/post/abc"
+        get = Mock(return_value=SimpleNamespace(status_code=503, url=url, text=""))
+        with patch.dict("sys.modules", {"requests": SimpleNamespace(get=get)}), patch(
+            "discord_bot.features.social_preview.threads_fetch.time.sleep"
+        ):
+            post = fetch_threads_post(url)
+        self.assertEqual(post.debug["requests_attempts"], 6)
+        self.assertEqual(get.call_count, 7)
+        self.assertIn("/oembed?", get.call_args.args[0])
+
+    def test_normal_variants_still_try_all_user_agents(self):
+        from discord_bot.features.social_preview.threads_fetch import UA_DESKTOP, UA_MOBILE, UA_INSTAGRAM
+
+        url = "https://www.threads.com/@demo/post/abc"
+        for wanted in (UA_DESKTOP, UA_MOBILE, UA_INSTAGRAM):
+            with self.subTest(user_agent=wanted):
+                def respond(request_url, *, headers, **_kwargs):
+                    success = headers["User-Agent"] == wanted
+                    return SimpleNamespace(status_code=200 if success else 403, url=request_url,
+                                           text="<html>post</html>" if success else "")
+                get = Mock(side_effect=respond)
+                with patch.dict("sys.modules", {"requests": SimpleNamespace(get=get)}), patch(
+                    "discord_bot.features.social_preview.threads_fetch._parse_html",
+                    side_effect=lambda parsed_url, _html: ThreadsPost(url=parsed_url, text="正文"),
+                ):
+                    self.assertEqual(_try_requests(url).text, "正文")
+                self.assertLessEqual(get.call_count, 6)
+
+    def test_normal_variants_retry_transient_primary_failure(self):
+        url = "https://www.threads.com/@demo/post/abc"
+        calls = {}
+        def respond(request_url, *, headers, **_kwargs):
+            pair = (request_url, headers["User-Agent"])
+            calls[pair] = calls.get(pair, 0) + 1
+            if pair == next(iter(calls)):
+                status = 503 if calls[pair] == 1 else 200
+            else:
+                status = 403
+            return SimpleNamespace(status_code=status, url=request_url, text="<html>post</html>" if status == 200 else "")
+        get = Mock(side_effect=respond)
+        with patch.dict("sys.modules", {"requests": SimpleNamespace(get=get)}), patch(
+            "discord_bot.features.social_preview.threads_fetch.time.sleep"
+        ), patch("discord_bot.features.social_preview.threads_fetch._parse_html",
+                 side_effect=lambda parsed_url, _html: ThreadsPost(url=parsed_url, text="正文")):
+            self.assertEqual(_try_requests(url).text, "正文")
+        self.assertEqual(get.call_count, 5)
+        self.assertEqual(max(calls.values()), 2)
+
+    def test_single_candidate_transient_failure_can_retry_and_succeed(self):
+        url = "https://www.threads.com/@demo/post/abc"
+        get = Mock(side_effect=[
+            SimpleNamespace(status_code=503, url=url, text=""),
+            SimpleNamespace(status_code=403, url=url, text=""),
+            SimpleNamespace(status_code=403, url=url, text=""),
+            SimpleNamespace(status_code=200, url=url, text="<html>post</html>"),
+        ])
+        with patch.dict("sys.modules", {"requests": SimpleNamespace(get=get)}), patch(
+            "discord_bot.features.social_preview.threads_fetch.build_candidate_urls", return_value=[url]
+        ), patch("discord_bot.features.social_preview.threads_fetch.time.sleep"), patch(
+            "discord_bot.features.social_preview.threads_fetch._parse_html", return_value=ThreadsPost(url=url, text="正文")
+        ):
+            post = _try_requests(url)
+        self.assertEqual(post.text, "正文")
+        self.assertEqual(get.call_count, 4)
+
     def test_resolve_threads_share_url_returns_canonical_post_url(self):
         share_url = "https://www.threads.com/share/BATCH_yt4N"
         canonical_url = (
