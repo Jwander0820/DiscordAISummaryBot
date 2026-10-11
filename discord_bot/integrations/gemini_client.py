@@ -22,14 +22,14 @@ GEMINI_TIMEOUT_MESSAGE = "SERN 的回應超時了，請稍後再試一次。"
 GEMINI_ERROR_MESSAGE = "SERN 暫時無法連上 AI 服務，請稍後再試一次。"
 
 SUMMARY_MODEL_NAMES = (
-    "gemini-3.5-flash",
-    "gemini-3-flash-preview",
+    "gemini-3.8-flash",
+    "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
 )
 ROLE_MODEL_NAMES = (
+    "gemini-3.5-flash-lite",
+    "gemini-3.8-flash",
     "gemini-3.1-flash-lite",
-    "gemini-3.5-flash",
-    "gemini-3-flash-preview",
 )
 
 

@@ -65,22 +65,22 @@ class GeminiClientTests(unittest.IsolatedAsyncioTestCase):
             module = importlib.import_module("discord_bot.integrations.gemini_client")
 
         self.assertEqual(FakeClient.instances[0].api_key, "test-key")
-        self.assertEqual(module.gemini_model.model_name, "gemini-3.5-flash")
+        self.assertEqual(module.gemini_model.model_name, "gemini-3.8-flash")
         self.assertEqual(
             module.gemini_model.model_names,
             (
-                "gemini-3.5-flash",
-                "gemini-3-flash-preview",
+                "gemini-3.8-flash",
+                "gemini-3.5-flash-lite",
                 "gemini-3.1-flash-lite",
             ),
         )
-        self.assertEqual(module.role_model.model_name, "gemini-3.1-flash-lite")
+        self.assertEqual(module.role_model.model_name, "gemini-3.5-flash-lite")
         self.assertEqual(
             module.role_model.model_names,
             (
+                "gemini-3.5-flash-lite",
+                "gemini-3.8-flash",
                 "gemini-3.1-flash-lite",
-                "gemini-3.5-flash",
-                "gemini-3-flash-preview",
             ),
         )
 
@@ -98,7 +98,7 @@ class GeminiClientTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.text, "ok")
         call_kwargs = FakeClient.instances[0].aio.models.generate_content.await_args.kwargs
-        self.assertEqual(call_kwargs["model"], "gemini-3.5-flash")
+        self.assertEqual(call_kwargs["model"], "gemini-3.8-flash")
         self.assertIn("System:\nsystem prompt", call_kwargs["contents"])
         self.assertIn("User:\nuser prompt", call_kwargs["contents"])
         self.assertEqual(call_kwargs["config"].kwargs, {"temperature": 0.7})
@@ -119,7 +119,7 @@ class GeminiClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.text, "fallback ok")
         self.assertEqual(
             [call.kwargs["model"] for call in fake_generate.await_args_list],
-            ["gemini-3.5-flash", "gemini-3-flash-preview"],
+            ["gemini-3.8-flash", "gemini-3.5-flash-lite"],
         )
 
     async def test_adapter_raises_after_all_busy_models_fail(self):
