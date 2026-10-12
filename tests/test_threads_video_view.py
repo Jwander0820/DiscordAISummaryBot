@@ -191,7 +191,7 @@ class SocialPreviewViewTests(unittest.IsolatedAsyncioTestCase):
     @patch("discord_bot.features.social_preview.sender.send_preview_as_author", new_callable=AsyncMock)
     @patch.object(preview_module, "_download_bytes", new_callable=AsyncMock)
     @patch.object(preview_module.asyncio, "to_thread")
-    async def test_linked_instagram_images_reach_first_image_v2_upload(self, fetch, download, send, cleanup):
+    async def test_linked_instagram_images_reach_ordered_v2_gallery(self, fetch, download, send, cleanup):
         from tests.test_threads_linked_images import FIXTURE, IMAGES, URL
         from discord_bot.features.social_preview.threads_fetch import _parse_html
 
@@ -200,14 +200,13 @@ class SocialPreviewViewTests(unittest.IsolatedAsyncioTestCase):
         send.return_value = types.SimpleNamespace(id=123)
         source = make_source(f"評論 ||{URL}||")
         self.assertTrue(await preview_module.handle_threads_in_message(source))
-        download.assert_awaited_once()
-        self.assertEqual(download.await_args.args[1], IMAGES[0])
+        self.assertEqual([call.args[1] for call in download.await_args_list], IMAGES)
         send.assert_awaited_once()
         view = send.await_args.kwargs["view"]
         files = send.await_args.kwargs["files"]
-        self.assertEqual(len(files), 1)
-        self.assertTrue(files[0].spoiler)
-        self.assertEqual([item.media.url for item in media_items(view)], [f"attachment://{files[0].filename}"])
+        self.assertEqual(len(files), 2)
+        self.assertTrue(all(file.spoiler for file in files))
+        self.assertEqual([item.media.url for item in media_items(view)], [f"attachment://{file.filename}" for file in files])
         headers = [item.content for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay)]
         self.assertTrue(any("[Threads @demo_user](<" in text for text in headers))
         self.assertEqual(view.children[0].content, "評論")
@@ -217,9 +216,8 @@ class SocialPreviewViewTests(unittest.IsolatedAsyncioTestCase):
     @patch("discord_bot.features.social_preview.sender.send_preview_as_author", new_callable=AsyncMock)
     @patch.object(preview_module, "_download_bytes", new_callable=AsyncMock)
     @patch.object(preview_module.asyncio, "to_thread")
-    async def test_handler_uses_only_first_video_and_cleans_source_after_all_pages(self, fetch, download, send, cleanup):
+    async def test_handler_preserves_videos_and_cleans_source_after_all_pages(self, fetch, download, send, cleanup):
         fetch.return_value = ThreadsPost(url=POST_URL, text="正" * 4096, author_username="demo", media=[
-            ThreadsMedia("image", "https://scontent.cdninstagram.com/poster.jpg"),
             ThreadsMedia("video", VIDEO_URL), ThreadsMedia("video", "https://scontent.cdninstagram.com/second.mp4"),
         ])
         sent = []
@@ -237,7 +235,8 @@ class SocialPreviewViewTests(unittest.IsolatedAsyncioTestCase):
         download.assert_not_awaited()
         views = [call.kwargs["view"] for call in send.await_args_list]
         self.assertGreater(len(views), 1)
-        self.assertEqual([item.media.url for view in views for item in media_items(view)], [VIDEO_URL])
+        self.assertEqual([item.media.url for view in views for item in media_items(view)],
+                         [VIDEO_URL, "https://scontent.cdninstagram.com/second.mp4"])
         for view in views:
             self.assertEqual(view.related_message_ids, [item.id for item in sent if item.id != view.message.id])
         cleanup.assert_awaited_once_with(source, platform="Threads", url=POST_URL)

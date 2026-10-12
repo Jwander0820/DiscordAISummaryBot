@@ -110,6 +110,7 @@ class ThreadsVideoFetchTests(unittest.TestCase):
         ):
             result = tf.fetch_threads_post(POST_URL)
         self.assertEqual([m.url for m in result.media if m.type == "video"], [FIRST_VIDEO])
+        self.assertEqual([m.type for m in result.media], ["video"])
         self.assertEqual(result.text, "影片貼文\n第二行")
         self.assertEqual(result.url, POST_URL)
         get.assert_called_once()
@@ -125,6 +126,30 @@ class ThreadsVideoFetchTests(unittest.TestCase):
         with patch.object(tf, "_try_requests", return_value=post), patch.dict("sys.modules", {"requests": SimpleNamespace(get=get)}):
             self.assertIs(tf.fetch_threads_post(POST_URL), post)
         get.assert_not_called()
+
+    def test_complete_image_carousel_does_not_replace_order_with_embed_video(self):
+        post = tf.ThreadsPost(url=POST_URL, text="正文", media=[tf.ThreadsMedia("image", "https://scontent.cdninstagram.com/photo.jpg")],
+                              debug={"media_source": "structured_json"})
+        with patch.object(tf, "_try_requests", return_value=post), patch.object(tf, "_try_embed_fill") as embed:
+            self.assertIs(tf.fetch_threads_post(POST_URL), post)
+        embed.assert_not_called()
+
+    def test_og_video_fallback_drops_cover_image(self):
+        body = f'<meta property="og:image" content="https://scontent.cdninstagram.com/cover.jpg"><meta property="og:video" content="{FIRST_VIDEO}">'
+        post = tf._parse_html(POST_URL, body)
+        self.assertEqual([(m.type, m.url) for m in post.media], [("video", FIRST_VIDEO)])
+
+    def test_dom_mixed_order_keeps_one_rendition_per_video(self):
+        image1, image2 = "https://scontent.cdninstagram.com/one.jpg", "https://scontent.cdninstagram.com/two.jpg"
+        media = (f'<img src="{image1}"><video><source src="{FIRST_VIDEO}">'
+                 '<source src="https://scontent.cdninstagram.com/alternate.mp4"></video>'
+                 f'<img src="{image2}">')
+        wrappers = [f'<a href="{POST_URL}/media">{media}</a>',
+                    f'<div class="Embed"><div class="LinkContainer"><a href="{POST_URL}"></a></div><div class="SoloMediaContainer">{media}</div></div>']
+        for wrapper in wrappers:
+            with self.subTest(wrapper=wrapper):
+                post = tf._parse_html(POST_URL, wrapper)
+                self.assertEqual([(m.type, m.url) for m in post.media], [("image", image1), ("video", FIRST_VIDEO), ("image", image2)])
 
     def test_embed_fallback_failure_or_wrong_post_preserves_original(self):
         for status, page in ((302, EMBED_HTML), (403, EMBED_HTML), (200, EMBED_HTML.replace("Video001", "Other001"))):

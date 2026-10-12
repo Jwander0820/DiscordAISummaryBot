@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import re
 import asyncio
-import io
 import logging
 import os
 from dataclasses import dataclass
@@ -29,13 +28,13 @@ import aiohttp
 import discord
 
 # 你已有的抓取器
-from .threads_fetch import fetch_threads_post, first_direct_video
+from .threads_fetch import fetch_threads_post
 from .download import (
     MAX_IMAGE_DOWNLOAD_BYTES,
     download_bytes_limited,
-    is_trusted_media_url,
 )
-from .sender import cleanup_source_message, send_preview_group
+from .sender import cleanup_source_message, log_preview_link, send_preview_group
+from .media_gallery import prepare_gallery
 from .text import extract_message_commentary
 
 
@@ -74,7 +73,7 @@ class PreviewResult:
     """
     建立 V2 所需的預覽資料。
     :param embed: 沿用的內部文字資料容器，不直接傳送 Embed
-    :param files: discord.File 附件清單（通常包含下載後的首圖）
+    :param files: discord.File 附件清單（最多四張圖片）
     :param extra_text: 額外要貼在訊息裡的文字（例如影片連結）
     """
     embed: discord.Embed
@@ -82,6 +81,8 @@ class PreviewResult:
     extra_text: Optional[str] = None
     video_url: Optional[str] = None
     inline_video_url: Optional[str] = None
+    image_urls: Optional[List[str]] = None
+    media_urls: Optional[List[str]] = None
 
 
 # --- URL 擷取 ---
@@ -168,7 +169,7 @@ async def build_threads_preview(
     """
     取得單一 Threads URL 的文字資料、圖片附件與影片直連。
     :param url: Threads 貼文 URL
-    :param reupload_image: 是否下載首圖後以上傳附件（建議 True，避免簽名網址失效）
+    :param reupload_image: 是否將前四個媒體中的圖片下載後上傳附件
     :return: PreviewResult
     """
     # fetch_threads_post() 仍是同步 parser，這裡轉到 thread 避免卡住 bot event loop。
@@ -196,7 +197,7 @@ async def build_threads_preview(
 
     # Embed 僅作為內部資料容器；Discord 訊息由共用 V2 view 組裝。
     title = f"Threads @{post.author_username or ''}".strip() or "Threads 貼文"
-    description = post.text or "(無文字內容)"
+    description = post.text or ""
     embed = discord.Embed(title=title, description=description, url=post.url)
 
     # 作者顯示
@@ -206,43 +207,21 @@ async def build_threads_preview(
         author_display = f"@{post.author_username}" if post.author_username else "Threads"
     embed.set_author(name=author_display)
 
-    # Only the first video is presented. Do not download its poster as an image.
-    video = first_direct_video(post.media or [])
-    primary_video_url = video.url if video else None
-
-    # --- 圖片處理 ---
-    image_urls = [
-        media.url
-        for media in (post.media or [])
-        if media.type == "image" and is_trusted_media_url(media.url)
-    ]
-    files: List[discord.File] = []
-
-    if image_urls and not primary_video_url:
-        first_img = image_urls[0]
-        if reupload_image:
-            # 下載後上傳，避免 instagram CDN 簽名參數過期
-            async with aiohttp.ClientSession() as sess:
-                data = await _download_bytes(sess, first_img)
-            if data:
-                fname = "threads_image.jpg"  # 以實際 content-type 命名更好，可在 _download_bytes 補判斷
-                file = discord.File(io.BytesIO(data), filename=fname, spoiler=spoiler)
-                files.append(file)
-                # 注意：spoiler=True 時 discord 可能改寫成 SPOILER_ 前綴，需用 file.filename
-                embed.set_image(url=f"attachment://{file.filename}")
-            else:
-                logger.info("Threads image omitted after safe download rejected it")
-        else:
-            if not spoiler:
-                embed.set_image(url=first_img)
+    async with aiohttp.ClientSession() as session:
+        gallery = await prepare_gallery(session, post.media or [], downloader=_download_bytes,
+                                        prefix="threads_image", spoiler=spoiler, reupload_images=reupload_image)
+    if gallery.files:
+        embed.set_image(url=f"attachment://{gallery.files[0].filename}")
 
     # V2 references the URL as media, so the message-content limit does not apply.
-    inline_video_url = primary_video_url if not spoiler else None
+    inline_video_url = gallery.video_url if not spoiler else None
     return PreviewResult(
         embed=embed,
-        files=files,
-        video_url=primary_video_url,
+        files=gallery.files,
+        video_url=gallery.video_url,
         inline_video_url=inline_video_url,
+        image_urls=gallery.image_urls,
+        media_urls=gallery.media_urls,
     )
 
 
@@ -261,8 +240,9 @@ async def _send_threads_preview(
         commentary=commentary,
         spoiler=spoiler,
         timeout=DELETE_VIEW_TIMEOUT,
-        image_urls=[image_url] if image_url and not preview.files else [],
+        image_urls=preview.image_urls or ([image_url] if image_url and not preview.files else []),
         files=preview.files,
+        media_urls=preview.media_urls,
     )
     await send_preview_group(message, views)
 
@@ -290,7 +270,7 @@ async def handle_threads_in_message(message: discord.Message) -> bool:
     # 限制一次只處理第一個（多個可自行迴圈）
     url = urls[0]
     try:
-        logger.info(f"{message.author.nick or message.author.global_name} 在 {message.channel.name} 貼了url {url}")
+        log_preview_link(message, platform="Threads", url=url)
         use_spoiler = _is_threads_url_spoilered(message.content or "", url)
         user_commentary = _extract_threads_commentary(message.content or "", url)
 
@@ -301,6 +281,6 @@ async def handle_threads_in_message(message: discord.Message) -> bool:
         await cleanup_source_message(message, platform="Threads", url=url)
         return True
     except Exception as e:
-        logger.error(e, exc_info=True)
+        logger.error("Threads 預覽失敗: %s", e, exc_info=True)
         await message.reply("Threads 預覽失敗，請稍後再試或直接開啟原連結。", mention_author=False)
         return False

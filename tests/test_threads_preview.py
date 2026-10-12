@@ -90,15 +90,15 @@ class ThreadsPreviewTests(unittest.IsolatedAsyncioTestCase):
 
     @patch("discord_bot.features.social_preview.threads_preview._download_bytes", new_callable=AsyncMock)
     @patch("discord_bot.features.social_preview.threads_preview.asyncio.to_thread")
-    async def test_video_post_uses_only_first_video_without_downloading_poster_or_video(self, fetch, download):
+    async def test_video_post_keeps_multiple_videos_without_downloading_them(self, fetch, download):
         first = "https://scontent.cdninstagram.com/first.mp4?oh=signed&oe=expiry"
         fetch.return_value = ThreadsPost(url="https://www.threads.com/@demo/post/Video001", media=[
-            ThreadsMedia("image", "https://scontent.cdninstagram.com/poster.jpg"),
             ThreadsMedia("video", first),
             ThreadsMedia("video", "https://scontent.cdninstagram.com/second.mp4"),
         ])
         preview = await build_threads_preview(fetch.return_value.url)
         self.assertEqual(preview.inline_video_url, first)
+        self.assertEqual(preview.media_urls, [first, "https://scontent.cdninstagram.com/second.mp4"])
         self.assertIsNone(preview.extra_text)
         self.assertEqual(preview.files, [])
         image = getattr(preview.embed, "image", None)

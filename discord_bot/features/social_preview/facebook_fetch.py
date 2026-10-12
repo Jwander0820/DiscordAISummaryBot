@@ -27,6 +27,12 @@ CONTEXT_CHILDREN = ("creation_story", "story", "comet_sections", "content", "con
 
 
 @dataclass
+class FacebookMedia:
+    type: str
+    url: str
+
+
+@dataclass
 class FacebookPostData:
     url: str
     title: str = ""
@@ -36,10 +42,21 @@ class FacebookPostData:
     public: bool = False
     reason: str = "target_not_found"
     debug: dict = field(default_factory=dict)
+    media: list[FacebookMedia] = field(default_factory=list)
+    status: int = 200
+
+    @property
+    def ordered_media(self) -> list[FacebookMedia]:
+        if self.media:
+            return self.media
+        # OG has no mixed-carousel order. A video page's image is a cover.
+        videos = [url for raw in self.video_urls if (url := direct_facebook_mp4(raw))]
+        return ([FacebookMedia("video", videos[0])] if videos else
+                [FacebookMedia("image", url) for url in self.image_urls])
 
     @property
     def has_content(self) -> bool:
-        return bool(self.description or self.image_urls or self.video_urls)
+        return bool(self.description or self.image_urls or self.video_urls or self.media)
 
 
 def canonical_facebook_url(raw: Any) -> str | None:
@@ -202,6 +219,14 @@ def _read_bound_post(url: str, node: dict, kind: str, target: str, require_publi
     remaining = MAX_FACEBOOK_PARSE_NODES
     allow_post_video = not any(_unsupported_video(context) for context in contexts)
 
+    recognized_media = 0
+
+    def append(kind, url):
+        nonlocal recognized_media
+        recognized_media += 1
+        if len(result.media) < 4 and not any(item.url == url for item in result.media):
+            result.media.append(FacebookMedia(kind, url))
+
     def media(node, depth=0, allow_video=allow_post_video):
         nonlocal remaining
         if not isinstance(node, (dict, list)) or depth > 30 or remaining <= 0 or id(node) in seen_nodes:
@@ -215,6 +240,14 @@ def _read_bound_post(url: str, node: dict, kind: str, target: str, require_publi
         if _public_state(node) is False:
             return
         allow_video = allow_video and not _unsupported_video(node)
+        before = recognized_media
+        # A parent attachment often duplicates its first photo as a cover.
+        # The explicit subattachment list defines the actual carousel order.
+        for key in ("all_subattachments", "subattachments"):
+            if isinstance(node.get(key), (dict, list)):
+                media(node[key], depth + 1, allow_video)
+                if recognized_media > before:
+                    return
         is_video = any(key in node for key in ("videoDeliveryLegacyFields", "videoDeliveryResponseFragment",
                        "browser_native_hd_url", "browser_native_sd_url", "playable_url", "playable_url_quality_hd"))
         if is_video and allow_video:
@@ -222,21 +255,24 @@ def _read_bound_post(url: str, node: dict, kind: str, target: str, require_publi
             if kind == "video" and video_id is not None and str(video_id) != target:
                 return
             video = _video_from_node(node)
-            if video and not result.video_urls:
-                result.video_urls.append(video)
-        for key in ("image", "photo_image", "full_image", "best_effort_image", "thumbnailImage"):
-            image = node.get(key)
-            image_url = image.get("uri") or image.get("url") if isinstance(image, dict) else None
-            if isinstance(image_url, str) and is_trusted_media_url(image_url) and image_url not in result.image_urls:
-                result.image_urls.append(image_url)
-        thumbnail = node.get("preferred_thumbnail")
-        if isinstance(thumbnail, dict):
-            media(thumbnail, depth + 1, allow_video)
-        # Only explicit attachment edges inherit the target post's ownership.
-        # Recommended posts, comments, actors, attached_story and quotes are absent.
+            if video:
+                append("video", video)
+                return
+        # A wrapper's nested video wins over its preferred_thumbnail.
         for key, child in node.items():
             if key in MEDIA_CHILDREN:
                 media(child, depth + 1, allow_video)
+        if recognized_media > before:
+            return
+        for key in ("image", "photo_image", "full_image", "best_effort_image", "thumbnailImage"):
+            image = node.get(key)
+            image_url = image.get("uri") or image.get("url") if isinstance(image, dict) else None
+            if isinstance(image_url, str) and is_trusted_media_url(image_url):
+                append("image", image_url)
+                return
+        thumbnail = node.get("preferred_thumbnail")
+        if isinstance(thumbnail, dict):
+            media(thumbnail, depth + 1, allow_video)
 
     for context in contexts:
         if not result.title:
@@ -252,7 +288,8 @@ def _read_bound_post(url: str, node: dict, kind: str, target: str, require_publi
                     result.description = html.unescape(value).strip()
                     break
         media(context)
-    result.image_urls = result.image_urls[:4]
+    result.image_urls = [item.url for item in result.media if item.type == "image"]
+    result.video_urls = [item.url for item in result.media if item.type == "video"]
     result.reason = "target_found" if result.has_content else "target_has_no_content"
     return result
 
@@ -321,13 +358,13 @@ def extract_facebook_post(body: str, page_url: str, *, require_public: bool = Fa
                     result.title = result.title or candidate.title
                     result.description = result.description or candidate.description
                     result.public = result.public or candidate.public
-                    for image in candidate.image_urls:
-                        if image not in result.image_urls and len(result.image_urls) < 4:
-                            result.image_urls.append(image)
-                    result.video_urls = result.video_urls or candidate.video_urls
+                    # Prefer the fuller ordered attachment list over a cover-only
+                    # Relay fragment; never concatenate fragments into a fake order.
+                    if (len(candidate.media), bool(candidate.video_urls)) > (len(result.media), bool(result.video_urls)):
+                        result.media = candidate.media
+                        result.image_urls = candidate.image_urls
+                        result.video_urls = candidate.video_urls
                     result.reason = "target_found"
-                    if result.video_urls:
-                        return result
                 elif not result.has_content and candidate.reason in {"not_public", "public_unverified", "target_has_no_content"}:
                     result.reason = candidate.reason
         except (ValueError, TypeError, RecursionError):

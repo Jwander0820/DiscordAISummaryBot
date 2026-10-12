@@ -309,7 +309,7 @@ class ThreadsCookieTests(unittest.TestCase):
         self.session.get.return_value = response(page(data, "application/ld+json"))
         post = self.fetch()
         self.assertEqual(post.text, "JSON-LD 正文")
-        self.assertEqual([m.url for m in post.media], [IMAGE, VIDEO])
+        self.assertEqual([m.url for m in post.media], [VIDEO])  # Unordered JSON-LD image is the video cover.
 
     def test_unsafe_media_and_avatars_are_rejected(self):
         for media in ({"video_url": "http://127.0.0.1/private.mp4"},

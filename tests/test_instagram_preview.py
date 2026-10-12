@@ -1,238 +1,221 @@
-import importlib.util
-import io
-import sys
+import json
 import types
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from tests.support import install_discord_stub
+from tests.support import isolated_discord_suite
 
-if importlib.util.find_spec("aiohttp") is None:
-    aiohttp_stub = types.ModuleType("aiohttp")
-
-    class ClientSession:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-    aiohttp_stub.ClientSession = ClientSession
-    sys.modules["aiohttp"] = aiohttp_stub
-
-install_discord_stub()
+load_tests = isolated_discord_suite(__name__)
 
 import discord
-
 from discord_bot.features.social_preview.instagram_fetch import InstagramMedia, InstagramPost
-from discord_bot.features.social_preview.instagram_preview import (
-    DeleteInstagramPreviewView,
-    InstagramPreview,
-    build_instagram_preview,
-    extract_instagram_urls,
-    handle_instagram_in_message,
-)
+from discord_bot.features.social_preview import instagram_preview as preview
+
+URL = "https://www.instagram.com/p/ABC123"
+IMAGES = [f"https://scontent.cdninstagram.com/photo-{n}.jpg" for n in range(7)]
+
+
+def source(content):
+    return types.SimpleNamespace(author=types.SimpleNamespace(bot=False, nick="demo", global_name="demo"),
+                                 channel=types.SimpleNamespace(name="general"), content=content, reply=AsyncMock())
+
+
+def gallery(view):
+    return [media for item in view.walk_children() if isinstance(item, discord.ui.MediaGallery) for media in item.items]
 
 
 class InstagramPreviewTests(unittest.IsolatedAsyncioTestCase):
-    def test_extract_instagram_urls_sanitizes_tracking_and_dedupes(self):
-        content = (
-            "look https://instagram.com/p/ABC123/?igsh=demo#frag "
-            "again https://www.instagram.com/p/ABC123/"
-        )
+    def test_url_extraction_sanitizes_and_deduplicates(self):
+        self.assertEqual(preview.extract_instagram_urls(URL + "/?mdxt=tracking#fragment " + URL), [URL])
+        self.assertEqual(preview.extract_instagram_urls("https://instagr.am/reels/ABC123/"), ["https://www.instagram.com/reels/ABC123"])
+        self.assertEqual(preview.extract_instagram_urls("https://www.instagram.com/stories/demo/123 https://www.instagram.com/demo"), [])
 
-        self.assertEqual(extract_instagram_urls(content), ["https://www.instagram.com/p/ABC123"])
+    @patch.object(preview, "cleanup_source_message", new_callable=AsyncMock)
+    @patch("discord_bot.features.social_preview.sender.send_preview_as_author", new_callable=AsyncMock)
+    @patch.object(preview, "_download_bytes", new_callable=AsyncMock)
+    @patch.object(preview.asyncio, "to_thread")
+    async def test_images_use_v2_first_four_order_commentary_and_native_spoiler(self, fetch, download, send, cleanup):
+        for count in (1, 2, 4, 7):
+            for spoiler in (False, True):
+                with self.subTest(count=count, spoiler=spoiler):
+                    download.reset_mock()
+                    send.reset_mock()
+                    cleanup.reset_mock()
+                    fetch.return_value = InstagramPost(url=URL, shortcode="ABC123", author_username="demo_user", text="原文",
+                                                       media=[InstagramMedia("image", u) for u in IMAGES[:count]])
+                    download.return_value = b"synthetic image"
+                    send.return_value = types.SimpleNamespace(id=123)
+                    message = source("我的留言 " + (f"||{URL}/?mdxt=track||" if spoiler else URL))
+                    self.assertTrue(await preview.handle_instagram_in_message(message))
+                    kwargs = send.await_args.kwargs
+                    self.assertEqual(set(kwargs), {"view", "files"})
+                    view = kwargs["view"]
+                    self.assertIsInstance(view, discord.ui.LayoutView)
+                    self.assertEqual([call.args[1] for call in download.await_args_list], IMAGES[:min(count, 4)])
+                    self.assertEqual([m.media.url for m in gallery(view)], [f"attachment://{f.filename}" for f in kwargs["files"]])
+                    self.assertEqual(len(kwargs["files"]), min(count, 4))
+                    self.assertTrue(all(f.spoiler == spoiler for f in kwargs["files"]))
+                    self.assertTrue(all(m.spoiler == spoiler for m in gallery(view)))
+                    self.assertEqual(next(c for c in view.children if isinstance(c, discord.ui.Container)).spoiler, spoiler)
+                    self.assertEqual(view.children[0].content, "我的留言")
+                    buttons = [x for x in view.walk_children() if isinstance(x, discord.ui.Button)]
+                    self.assertEqual([x.url for x in buttons], [None, URL])
+                    self.assertEqual(str(buttons[0].emoji), "🗑️")
+                    cleanup.assert_awaited_once_with(message, platform="Instagram", url=URL)
 
-    def test_extract_instagram_urls_accepts_reels_path(self):
-        self.assertEqual(
-            extract_instagram_urls("https://www.instagram.com/reels/ABC123/"),
-            ["https://www.instagram.com/reels/ABC123"],
-        )
+    @patch.object(preview, "_download_bytes", new_callable=AsyncMock)
+    @patch.object(preview.asyncio, "to_thread")
+    async def test_failed_images_are_skipped_without_fetching_a_fifth(self, fetch, download):
+        fetch.return_value = InstagramPost(url=URL, shortcode="ABC123", media=[InstagramMedia("image", u) for u in IMAGES])
+        download.side_effect = [None, b"second", None, b"fourth"]
+        result = await preview.build_instagram_preview(URL)
+        self.assertEqual([c.args[1] for c in download.await_args_list], IMAGES[:4])
+        self.assertEqual([f.filename for f in result.files], ["instagram_image_2.jpg", "instagram_image_4.jpg"])
+        for file in result.files:
+            file.close()
 
-    def test_extract_instagram_urls_ignores_stories_and_profiles(self):
-        content = (
-            "https://www.instagram.com/stories/demo/123 "
-            "https://www.instagram.com/demo/"
-        )
+    @patch.object(preview, "cleanup_source_message", new_callable=AsyncMock)
+    @patch("discord_bot.features.social_preview.sender.send_preview_as_author", new_callable=AsyncMock)
+    @patch.object(preview, "_download_bytes", new_callable=AsyncMock)
+    @patch.object(preview.asyncio, "to_thread")
+    async def test_videos_use_ordered_mp4s_without_reupload(self, fetch, download, send, cleanup):
+        video = "https://scontent.cdninstagram.com/first.mp4?signature=" + "a" * 900
+        fetch.return_value = InstagramPost(url=URL, shortcode="ABC123", text="reel", media=[
+            InstagramMedia("video", video),
+            InstagramMedia("video", "https://scontent.cdninstagram.com/second.mp4")])
+        send.return_value = types.SimpleNamespace(id=123)
+        self.assertTrue(await preview.handle_instagram_in_message(source(f"||{URL}||")))
+        self.assertEqual(set(send.await_args.kwargs), {"view"})
+        self.assertEqual([m.media.url for m in gallery(send.await_args.kwargs["view"])],
+                         [video, "https://scontent.cdninstagram.com/second.mp4"])
+        download.assert_not_awaited()
 
-        self.assertEqual(extract_instagram_urls(content), [])
-
-    def test_delete_view_uses_threads_style_labels(self):
-        view = DeleteInstagramPreviewView(
-            original_url="https://www.instagram.com/reel/ABC123",
-            video_url="https://cdn.example.com/video.mp4",
-        )
-
-        labels = [getattr(item, "label", None) for item in view.children]
-        self.assertIn("原連結", labels)
-        self.assertIn("影片直連", labels)
-
-    @patch("discord_bot.features.social_preview.instagram_preview._download_bytes", new_callable=AsyncMock)
-    @patch("discord_bot.features.social_preview.instagram_preview.asyncio.to_thread")
-    async def test_build_instagram_preview_reuploads_first_image(self, mock_to_thread, mock_download_bytes):
-        mock_to_thread.return_value = InstagramPost(
-            url="https://www.instagram.com/p/ABC123",
-            shortcode="ABC123",
-            author_username="demo",
-            text="caption",
-            media=[InstagramMedia("image", "https://scontent.cdninstagram.com/post.jpg")],
-        )
-        mock_download_bytes.return_value = b"image-bytes"
-
-        preview = await build_instagram_preview("https://www.instagram.com/p/ABC123/")
-
-        self.assertEqual(preview.embed.title, "Instagram @demo")
-        self.assertEqual(preview.embed.description, "caption")
-        self.assertEqual(preview.files[0].filename, "instagram_image.jpg")
-        image = preview.embed.image
-        image_url = getattr(image, "url", None) if not isinstance(image, dict) else image["url"]
-        self.assertEqual(image_url, "attachment://instagram_image.jpg")
-
-    @patch("discord_bot.features.social_preview.instagram_preview.asyncio.to_thread")
-    async def test_build_instagram_preview_rejects_generic_empty_metadata(self, mock_to_thread):
-        mock_to_thread.return_value = InstagramPost(
-            url="https://www.instagram.com/p/ABC123",
-            shortcode="ABC123",
-        )
-
-        with self.assertRaises(RuntimeError):
-            await build_instagram_preview("https://www.instagram.com/p/ABC123/")
-
-    @patch("discord_bot.features.social_preview.instagram_preview.asyncio.to_thread")
-    async def test_build_instagram_preview_uses_native_embed_without_media(self, mock_to_thread):
-        mock_to_thread.return_value = InstagramPost(
-            url="https://www.instagram.com/reel/ABC123",
-            shortcode="ABC123",
-            preview_level="native_embed",
-            native_embed_url="https://www.kkinstagram.com/reels/ABC123/",
-        )
-
-        preview = await build_instagram_preview("https://www.instagram.com/reel/ABC123/")
-
-        self.assertIsNone(preview.embed)
-        self.assertEqual(preview.native_embed_url, "https://www.kkinstagram.com/reels/ABC123/")
-
-    @patch("discord_bot.features.social_preview.instagram_preview._download_bytes", new_callable=AsyncMock)
-    @patch("discord_bot.features.social_preview.instagram_preview.asyncio.to_thread")
-    async def test_build_instagram_preview_labels_media_fallback(self, mock_to_thread, mock_download_bytes):
-        mock_to_thread.return_value = InstagramPost(
-            url="https://www.instagram.com/reel/ABC123",
-            shortcode="ABC123",
-            kind="reel",
-            preview_level="media_fallback",
-            native_embed_url="https://www.kkinstagram.com/reels/ABC123/",
-            media=[InstagramMedia("image", "https://www.instagram.com/reel/ABC123/media/?size=l")],
-        )
-        mock_download_bytes.return_value = b"image-bytes"
-
-        preview = await build_instagram_preview("https://www.instagram.com/reel/ABC123/")
-
-        self.assertIsNone(preview.embed)
-        self.assertEqual(preview.native_embed_url, "https://www.kkinstagram.com/reels/ABC123/")
-        self.assertEqual(preview.files, [])
-
-    @patch("discord_bot.features.social_preview.instagram_preview._download_bytes", new_callable=AsyncMock)
-    @patch("discord_bot.features.social_preview.instagram_preview.asyncio.to_thread")
-    async def test_build_instagram_preview_tries_next_image_candidate(self, mock_to_thread, mock_download_bytes):
-        mock_to_thread.return_value = InstagramPost(
-            url="https://www.instagram.com/reel/ABC123",
-            shortcode="ABC123",
-            media=[
-                InstagramMedia("image", "https://www.instagram.com/reel/ABC123/media/?size=l"),
-                InstagramMedia("image", "https://www.instagram.com/p/ABC123/media/?size=l"),
-            ],
-        )
-        mock_download_bytes.side_effect = [None, b"image-bytes"]
-
-        preview = await build_instagram_preview("https://www.instagram.com/reel/ABC123/")
-
-        self.assertEqual(mock_download_bytes.await_count, 2)
-        self.assertEqual(preview.files[0].filename, "instagram_image.jpg")
-
-    @patch("discord_bot.features.social_preview.instagram_preview.cleanup_source_message", new_callable=AsyncMock)
-    @patch("discord_bot.features.social_preview.instagram_preview.send_preview_as_author", new_callable=AsyncMock)
-    @patch("discord_bot.features.social_preview.instagram_preview.build_instagram_preview", new_callable=AsyncMock)
-    async def test_handle_instagram_in_message_keeps_user_commentary(
-        self,
-        mock_build_preview,
-        mock_send_preview_as_author,
-        mock_cleanup_source_message,
-    ):
-        url = "https://www.instagram.com/p/ABC123"
-        mock_build_preview.return_value = InstagramPreview(
-            embed=discord.Embed(title="Instagram @demo"),
-            files=[],
-        )
-        mock_send_preview_as_author.return_value = types.SimpleNamespace(id=123)
-        message = types.SimpleNamespace(
-            author=types.SimpleNamespace(bot=False, nick="demo", global_name="demo"),
-            channel=types.SimpleNamespace(name="general"),
-            content=f"nice post {url} thanks",
-        )
-
-        handled = await handle_instagram_in_message(message)
-
-        self.assertTrue(handled)
-        self.assertEqual(mock_send_preview_as_author.await_args.kwargs["content"], "nice post thanks")
-        mock_cleanup_source_message.assert_awaited_once_with(message, platform="Instagram", url=url)
-
-    @patch("discord_bot.features.social_preview.instagram_preview.cleanup_source_message", new_callable=AsyncMock)
-    @patch("discord_bot.features.social_preview.instagram_preview.send_preview_as_author", new_callable=AsyncMock)
-    @patch("discord_bot.features.social_preview.instagram_preview.build_instagram_preview", new_callable=AsyncMock)
-    async def test_handle_instagram_in_message_sends_native_proxy_embed_url(
-        self,
-        mock_build_preview,
-        mock_send_preview_as_author,
-        mock_cleanup_source_message,
-    ):
+    @patch.object(preview, "cleanup_source_message", new_callable=AsyncMock)
+    @patch("discord_bot.features.social_preview.sender.send_preview_as_author", new_callable=AsyncMock)
+    @patch.object(preview, "_download_bytes", new_callable=AsyncMock)
+    @patch.object(preview.asyncio, "to_thread")
+    async def test_fallback_video_retains_spoiler_and_original_instagram_link(self, fetch, download, send, cleanup):
         url = "https://www.instagram.com/reel/ABC123"
-        proxy_url = "https://www.kkinstagram.com/reels/ABC123/"
-        mock_build_preview.return_value = InstagramPreview(
-            embed=None,
-            files=[],
-            native_embed_url=proxy_url,
-        )
-        mock_send_preview_as_author.return_value = types.SimpleNamespace(id=123)
-        message = types.SimpleNamespace(
-            author=types.SimpleNamespace(bot=False, nick="demo", global_name="demo"),
-            channel=types.SimpleNamespace(name="general"),
-            content=url,
-        )
+        video = "https://scontent.cdninstagram.com/fallback.mp4?sig=synthetic"
+        fetch.return_value = InstagramPost(url=url, shortcode="ABC123", kind="reel", text="原文",
+                                           preview_level="video_fallback", media=[InstagramMedia("video", video)],
+                                           trace_id="synthetictrace", fetch_source="kkinstagram")
+        send.return_value = types.SimpleNamespace(id=123)
+        with self.assertLogs(preview.logger, level="DEBUG") as logs:
+            self.assertTrue(await preview.handle_instagram_in_message(source(f"留言 ||{url}||")))
+        events = [json.loads(r.getMessage().split(" ", 1)[1]) for r in logs.records if r.getMessage().startswith("instagram_diagnostic ")]
+        self.assertEqual([e["event"] for e in events], ["preview_prepared", "preview_delivery"])
+        self.assertEqual({e["trace_id"] for e in events}, {"synthetictrace"})
+        self.assertEqual({e["source"] for e in events}, {"kkinstagram"})
+        self.assertEqual(events[0]["video_count"], 1)
+        self.assertTrue(events[0]["spoiler"])
+        self.assertEqual(events[1]["result"], "sent")
+        self.assertEqual(events[1]["outcome"], "content")
+        self.assertNotIn(video, " ".join(logs.output))
+        self.assertNotIn("原文", " ".join(logs.output))
+        view = send.await_args.kwargs["view"]
+        self.assertEqual([m.media.url for m in gallery(view)], [video])
+        self.assertTrue(all(m.spoiler for m in gallery(view)))
+        self.assertTrue(next(x for x in view.children if isinstance(x, discord.ui.Container)).spoiler)
+        buttons = [x.url for x in view.walk_children() if isinstance(x, discord.ui.Button)]
+        self.assertIn(url, buttons)
+        self.assertNotIn("kkinstagram", str(view.to_components()))
+        download.assert_not_awaited()
 
-        handled = await handle_instagram_in_message(message)
+    @patch.object(preview, "cleanup_source_message", new_callable=AsyncMock)
+    @patch("discord_bot.features.social_preview.sender.send_preview_as_author", new_callable=AsyncMock)
+    @patch.object(preview.asyncio, "to_thread")
+    async def test_errors_are_v2_with_original_link_and_no_third_party(self, fetch, send, cleanup):
+        for error in preview.ERROR_MESSAGES:
+            with self.subTest(error=error):
+                fetch.return_value = InstagramPost(url=URL, shortcode="ABC123", preview_error=error)
+                send.return_value = types.SimpleNamespace(id=123)
+                self.assertTrue(await preview.handle_instagram_in_message(source(f"說明 ||{URL}||")))
+                view = send.await_args.kwargs["view"]
+                texts = " ".join(x.content for x in view.walk_children() if isinstance(x, discord.ui.TextDisplay))
+                self.assertIn(preview.ERROR_MESSAGES[error], texts)
+                self.assertIn("說明", texts)
+                self.assertNotIn("kkinstagram", str(view.to_components()))
+                self.assertEqual(gallery(view), [])
 
-        self.assertTrue(handled)
-        self.assertEqual(mock_send_preview_as_author.await_args.kwargs["content"], f"[.]({proxy_url})")
-        self.assertIsNone(mock_send_preview_as_author.await_args.kwargs["embed"])
-        mock_cleanup_source_message.assert_awaited_once_with(message, platform="Instagram", url=url)
+    @patch.object(preview, "_download_bytes", new_callable=AsyncMock)
+    @patch.object(preview.asyncio, "to_thread")
+    async def test_filtered_empty_media_has_explicit_failure(self, fetch, download):
+        fetch.return_value = InstagramPost(url=URL, shortcode="ABC123", author_username="demo",
+                                           media=[InstagramMedia("image", "https://evil.example/image.jpg")])
+        result = await preview.build_instagram_preview(URL)
+        self.assertEqual(result.embed.description, preview.ERROR_MESSAGES["no_content"])
+        download.assert_not_awaited()
 
-    @patch("discord_bot.features.social_preview.instagram_preview.cleanup_source_message", new_callable=AsyncMock)
-    @patch("discord_bot.features.social_preview.instagram_preview.send_preview_as_author", new_callable=AsyncMock)
-    @patch("discord_bot.features.social_preview.instagram_preview.build_instagram_preview", new_callable=AsyncMock)
-    async def test_spoilered_instagram_url_disables_native_embed(
-        self,
-        mock_build_preview,
-        mock_send_preview_as_author,
-        mock_cleanup_source_message,
-    ):
-        raw_url = "https://www.instagram.com/reel/ABC123/?igsh=tracking"
-        clean_url = "https://www.instagram.com/reel/ABC123"
-        mock_send_preview_as_author.return_value = types.SimpleNamespace(id=123)
-        message = types.SimpleNamespace(
-            author=types.SimpleNamespace(bot=False, nick="demo", global_name="demo"),
-            channel=types.SimpleNamespace(name="general"),
-            content=f"spoiler ||{raw_url}||",
-        )
+    @patch.object(preview, "_download_bytes", new_callable=AsyncMock)
+    @patch.object(preview.asyncio, "to_thread")
+    async def test_failed_image_downloads_log_error_card_and_dropped_count(self, fetch, download):
+        fetch.return_value = InstagramPost(url=URL, shortcode="ABC123", trace_id="synthetictrace", fetch_source="cookie",
+                                           media=[InstagramMedia("image", u) for u in IMAGES[:2]])
+        download.return_value = None
+        with self.assertLogs(preview.logger, level="INFO") as logs:
+            result = await preview.build_instagram_preview(URL)
+        event = json.loads(logs.records[-1].getMessage().split(" ", 1)[1])
+        self.assertEqual((event["selected_count"], event["rendered_count"], event["dropped_count"]), (2, 0, 2))
+        self.assertEqual(event["outcome"], "error_card")
+        self.assertEqual(event["result"], "fetch_failed")
+        self.assertEqual(result.outcome, "error_card")
 
-        handled = await handle_instagram_in_message(message)
+    @patch.object(preview, "_download_bytes", new_callable=AsyncMock)
+    @patch.object(preview.asyncio, "to_thread")
+    async def test_no_download_mode_preserves_four_signed_urls(self, fetch, download):
+        fetch.return_value = InstagramPost(url=URL, shortcode="ABC123", media=[InstagramMedia("image", u) for u in IMAGES])
+        result = await preview.build_instagram_preview(URL, reupload_image=False, spoiler=True)
+        self.assertEqual(result.image_urls, IMAGES[:4])
+        self.assertEqual(result.files, [])
+        download.assert_not_awaited()
 
-        self.assertTrue(handled)
-        mock_build_preview.assert_not_awaited()
-        content = mock_send_preview_as_author.await_args.kwargs["content"]
-        self.assertIn(f"||{clean_url}||", content)
-        self.assertNotIn("igsh", content)
-        self.assertNotIn("kkinstagram", content)
-        mock_cleanup_source_message.assert_awaited_once_with(message, platform="Instagram", url=clean_url)
+    @patch.object(preview, "cleanup_source_message", new_callable=AsyncMock)
+    @patch("discord_bot.features.social_preview.sender.send_preview_as_author", new_callable=AsyncMock)
+    @patch.object(preview.asyncio, "to_thread")
+    async def test_long_caption_pages_share_delete_group(self, fetch, send, cleanup):
+        fetch.return_value = InstagramPost(url=URL, shortcode="ABC123", text="長文" * 5000)
+        send.side_effect = [types.SimpleNamespace(id=n) for n in range(1, 11)]
+        self.assertTrue(await preview.handle_instagram_in_message(source(URL)))
+        views = [c.kwargs["view"] for c in send.await_args_list]
+        self.assertGreater(len(views), 1)
+        all_ids = set(range(1, len(views) + 1))
+        self.assertTrue(all(set(v.related_message_ids) == all_ids - {v.message.id} for v in views))
+
+    @patch.object(preview, "cleanup_source_message", new_callable=AsyncMock)
+    @patch("discord_bot.features.social_preview.sender.send_preview_as_author", new_callable=AsyncMock)
+    @patch.object(preview.asyncio, "to_thread")
+    async def test_delivery_failure_keeps_source_and_rolls_back_partial_group(self, fetch, send, cleanup):
+        fetch.return_value = InstagramPost(url=URL, shortcode="ABC123", text="長文" * 5000)
+        first = types.SimpleNamespace(id=1, delete=AsyncMock())
+        failure = discord.HTTPException(types.SimpleNamespace(status=400, reason="Bad Request"),
+                                        {"code": 50035, "message": "https://scontent.cdninstagram.com/private.mp4?sig=synthetic-secret"})
+        send.side_effect = [first, failure]
+        message = source(URL)
+        with self.assertLogs(preview.logger, level="INFO") as logs:
+            self.assertFalse(await preview.handle_instagram_in_message(message))
+        event = json.loads(logs.records[-1].getMessage().split(" ", 1)[1])
+        self.assertEqual((event["event"], event["phase"], event["result"], event["error_type"]),
+                         ("preview_delivery", "send", "failed", "HTTPException"))
+        self.assertEqual((event["http_status"], event["error_code"]), (400, 50035))
+        self.assertNotIn("synthetic-secret", " ".join(logs.output))
+        cleanup.assert_not_awaited()
+        first.delete.assert_awaited_once()
+        message.reply.assert_awaited_once()
+
+    @patch.object(preview, "cleanup_source_message", new_callable=AsyncMock)
+    @patch.object(preview.asyncio, "to_thread")
+    async def test_prepare_exception_keeps_trace_id_without_logging_response_details(self, fetch, cleanup):
+        fetch.side_effect = RuntimeError("sessionid=synthetic-secret")
+        message = source(URL)
+        with self.assertLogs(preview.logger, level="INFO") as logs:
+            self.assertFalse(await preview.handle_instagram_in_message(message))
+        event = json.loads(logs.records[-1].getMessage().split(" ", 1)[1])
+        self.assertEqual(event["phase"], "prepare")
+        self.assertEqual(event["trace_id"], fetch.call_args.kwargs["trace_id"])
+        self.assertTrue(event["trace_id"])
+        self.assertNotIn("synthetic-secret", " ".join(logs.output))
+        cleanup.assert_not_awaited()
 
 
 if __name__ == "__main__":

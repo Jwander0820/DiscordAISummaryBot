@@ -59,6 +59,11 @@ class SocialCookieStoreTests(unittest.TestCase):
     def test_platforms_are_isolated_and_foreign_domains_are_ignored(self):
         facebook = self.prepare()
         threads = self.prepare("sessionid=threads-only", "https://www.threads.com/@demo/post/abc", "threads")
+        instagram = self.prepare("sessionid=ig-only", "https://www.instagram.com/p/ABC123", "instagram")
+        self.assertEqual(len({facebook.path, threads.path, instagram.path}), 3)
+        self.assertEqual(store.save_response_cookies(instagram, ["sessionid=wrong; Domain=.threads.com; Path=/"]), "unchanged")
+        self.assertEqual(store.save_response_cookies(instagram, ["sessionid=ig-new; Domain=.instagram.com; Path=/"]), "saved")
+        self.assertEqual(self.prepare("sessionid=ig-only", "https://www.instagram.com/p/ABC123", "instagram").header, "sessionid=ig-new")
         self.assertNotEqual(facebook.path, threads.path)
         values = ["xs=wrong; Domain=.threads.com; Path=/", "xs=wrong; Domain=.com; Path=/", "xs=wrong; Domain=evil.facebook.com; Path=/"]
         self.assertEqual(store.save_response_cookies(facebook, values), "unchanged")

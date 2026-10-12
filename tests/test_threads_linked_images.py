@@ -25,6 +25,21 @@ def post_with_linked(linked, **extra):
 
 
 class ThreadsLinkedImagesTests(unittest.TestCase):
+    def test_mixed_native_and_linked_carousels_keep_order_without_og_posters(self):
+        video = "https://scontent.cdninstagram.com/third.mp4?signature=synthetic"
+        images = [f"https://scontent.cdninstagram.com/photo-{n}.jpg" for n in range(4)]
+        children = [image_node(images[0]), image_node(images[1]),
+                    {**image_node(), "video_versions": [{"url": video, "width": 1080, "height": 1920}]},
+                    image_node(images[2]), image_node(images[3])]
+        expected = [("image", images[0]), ("image", images[1]), ("video", video),
+                    ("image", images[2]), ("image", images[3])]
+        for node in (post_with_linked({"carousel_media": children}), post_with_linked(None, carousel_media=children)):
+            body = payload_html(node) + '<meta property="og:image" content="https://scontent.cdninstagram.com/cover.jpg">'
+            for parser in (tf._parse_html, _parse_cookie_html):
+                with self.subTest(parser=parser.__name__, linked=bool(node["text_post_app_info"]["linked_inline_media"])):
+                    post = parser(URL, body)
+                    self.assertEqual([(m.type, m.url) for m in post.media], expected)
+
     def test_anonymous_linked_instagram_carousel_keeps_images_in_post_order(self):
         post = tf._parse_html(URL, FIXTURE)
         self.assertEqual(post.text, "Threads 轉發圖片的正文")

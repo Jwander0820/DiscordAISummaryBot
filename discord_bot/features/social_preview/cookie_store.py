@@ -22,7 +22,7 @@ from urllib.parse import urlparse
 import uuid
 
 logger = logging.getLogger("discord_digest_bot")
-HOSTS = {"threads": "www.threads.com", "facebook": "www.facebook.com"}
+HOSTS = {"threads": "www.threads.com", "facebook": "www.facebook.com", "instagram": "www.instagram.com"}
 LOCKS = {platform: threading.RLock() for platform in HOSTS}
 MAX_HEADER = 16 * 1024
 MAX_FILE = 128 * 1024
@@ -269,7 +269,7 @@ def save_response_cookies(snapshot: CookieSnapshot, headers: list[str]) -> str:
                 return "unchanged"
             updated["revision"] = uuid.uuid4().hex
             _write(snapshot.path, updated)
-        logger.info("%s cookie updates saved", snapshot.platform)
+        logger.debug("%s cookie updates saved", snapshot.platform)
         return "saved"
     except Exception:
         logger.warning("%s cookie updates could not be saved", snapshot.platform)

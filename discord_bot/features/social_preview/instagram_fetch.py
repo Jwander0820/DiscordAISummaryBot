@@ -16,7 +16,7 @@ except ImportError:  # pragma: no cover - exercised when optional dependency is 
 
 logger = logging.getLogger("discord_digest_bot")
 
-REQUEST_TIMEOUT = 20
+REQUEST_TIMEOUT = 30
 IG_APP_ID = "936619743392459"
 SHORTCODE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 
@@ -57,6 +57,9 @@ class InstagramPost:
     preview_level: str = "metadata"
     native_embed_url: Optional[str] = None
     media: list[InstagramMedia] = field(default_factory=list)
+    preview_error: Optional[str] = None
+    trace_id: Optional[str] = None
+    fetch_source: str = "unknown"
 
 
 def normalize_instagram_url(url: str) -> str:
@@ -65,14 +68,12 @@ def normalize_instagram_url(url: str) -> str:
     if not parsed.scheme:
         parsed = parsed._replace(scheme="https")
 
-    host = parsed.netloc.lower()
-    if host == "instagram.com":
-        host = "www.instagram.com"
-
+    if parsed.netloc.lower() not in {"instagram.com", "www.instagram.com", "instagr.am", "www.instagr.am"}:
+        raise ValueError("Unsupported Instagram host")
     path = parsed.path.rstrip("/")
-    normalized = urlunparse((parsed.scheme or "https", host, path, "", "", ""))
-    if not INSTAGRAM_POST_RE.match(normalized):
-        raise ValueError(f"Unsupported Instagram URL: {url}")
+    normalized = urlunparse(("https", "www.instagram.com", path, "", "", ""))
+    if not re.fullmatch(r"/(?:p|reels?|tv)/[A-Za-z0-9_-]+", path, re.IGNORECASE):
+        raise ValueError("Unsupported Instagram post path")
     return normalized
 
 
@@ -100,9 +101,10 @@ def instagram_media_id_from_shortcode(shortcode: str) -> str:
     return str(media_id)
 
 
-def fetch_instagram_post(url: str) -> InstagramPost:
-    normalized_url = normalize_instagram_url(url)
-    return _native_embed_post(normalized_url)
+def fetch_instagram_post(url: str, *, trace_id: Optional[str] = None) -> InstagramPost:
+    from .instagram_direct import fetch_instagram_direct
+
+    return fetch_instagram_direct(normalize_instagram_url(url), trace_id=trace_id)
 
 
 def _fetch_instagram_post_with_metadata(url: str) -> InstagramPost:
@@ -642,15 +644,14 @@ def _fill_from_embedded_media_node(post: InstagramPost, item: dict[str, Any]) ->
 
 
 def _caption_from_embedded_node(item: dict[str, Any]) -> Optional[str]:
-    for key in ("caption", "caption_text", "accessibility_caption", "title", "text"):
-        value = item.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-
+    # A real caption may be nested while accessibility_caption is a string.
+    # Image alt text is not the author's post body, even when no caption exists.
     for path in (
-        ("edge_media_to_caption", "edges", 0, "node", "text"),
         ("caption", "text"),
-        ("accessibility_caption",),
+        ("caption",),
+        ("edge_media_to_caption", "edges", 0, "node", "text"),
+        ("caption_text",),
+        ("text",),
         ("title",),
     ):
         value = _get_path(item, path)

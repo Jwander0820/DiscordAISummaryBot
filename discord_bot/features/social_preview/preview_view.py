@@ -1,4 +1,4 @@
-"""Shared Components V2 cards for Threads and Facebook previews."""
+"""Shared Components V2 cards for Threads, Facebook and Instagram previews."""
 from __future__ import annotations
 
 from typing import Optional, Sequence
@@ -111,6 +111,7 @@ def build_social_preview_views(
     video_url: Optional[str] = None,
     image_urls: Sequence[str] = (),
     files: Sequence[discord.File] = (),
+    media_urls: Optional[Sequence[str]] = None,
 ) -> list[SocialPreviewView]:
     """Split text without truncation and attach media to the main card only."""
     header = "\n".join(
@@ -123,9 +124,12 @@ def build_social_preview_views(
     if body_budget < 2:
         raise ValueError("Preview author and title exceed the component text budget")
 
-    media_urls = list(image_urls) + [f"attachment://{file.filename}" for file in files]
-    if video_url:
-        media_urls.append(video_url)
+    if media_urls is None:
+        media_urls = list(image_urls) + [f"attachment://{file.filename}" for file in files]
+        if video_url:
+            media_urls.append(video_url)
+    else:
+        media_urls = list(media_urls)
     if len(media_urls) > 10:
         raise ValueError("A preview gallery can contain at most 10 media items")
 

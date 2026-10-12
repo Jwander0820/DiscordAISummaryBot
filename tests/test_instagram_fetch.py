@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from discord_bot.features.social_preview.instagram_fetch import (
     InstagramPost,
@@ -29,12 +30,13 @@ class InstagramFetchTests(unittest.TestCase):
             "https://www.kkinstagram.com/reels/ABC123/",
         )
 
-    def test_fetch_instagram_post_defaults_to_native_embed_without_network(self):
-        post = fetch_instagram_post("https://www.instagram.com/reel/ABC123/")
-
-        self.assertEqual(post.preview_level, "native_embed")
-        self.assertEqual(post.native_embed_url, "https://www.kkinstagram.com/reels/ABC123/")
-        self.assertEqual(post.media, [])
+    @patch("discord_bot.features.social_preview.instagram_direct.fetch_instagram_direct")
+    def test_fetch_instagram_post_uses_first_party_fetcher(self, fetch):
+        self.assertIs(fetch_instagram_post("https://www.instagram.com/reel/ABC123/?mdxt=tracking"), fetch.return_value)
+        fetch.assert_called_once_with("https://www.instagram.com/reel/ABC123", trace_id=None)
+        fetch.reset_mock()
+        fetch_instagram_post("https://www.instagram.com/reel/ABC123/?mdxt=tracking", trace_id="synthetictrace")
+        fetch.assert_called_once_with("https://www.instagram.com/reel/ABC123", trace_id="synthetictrace")
 
     def test_shortcode_can_be_converted_to_media_id(self):
         self.assertEqual(instagram_media_id_from_shortcode("ABC"), "66")

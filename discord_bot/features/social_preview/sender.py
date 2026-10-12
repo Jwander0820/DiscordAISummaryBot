@@ -11,6 +11,15 @@ logger = logging.getLogger("discord_digest_bot")
 PREVIEW_WEBHOOK_NAME = "digest-preview-relay"
 
 
+def log_preview_link(message, *, platform: str, url: str) -> None:
+    """One consistent activity line for every supported social preview."""
+    author = getattr(message.author, "nick", None) or _author_display_name(message.author)
+    channel = getattr(message.channel, "name", None) or "私人訊息"
+    # Display names are user-controlled; keep the activity record on one line.
+    author, channel = (str(value).replace("\r", " ").replace("\n", " ") for value in (author, channel))
+    logger.info("%s 在 %s 貼了 %s url %s", author, channel, platform, url)
+
+
 def _author_display_name(author: discord.abc.User) -> str:
     """Pick the most user-friendly display name available for webhook relays."""
     return (

@@ -49,12 +49,42 @@ class FacebookFetchTests(unittest.TestCase):
         }}}
         self.assertEqual(extract_facebook_post(page(node), URL).video_urls, [MP4])
 
-    def test_only_first_attached_video_is_selected_in_post_order(self):
+    def test_attached_videos_are_selected_in_post_order(self):
         url = "https://www.facebook.com/demo/posts/pfbidTEST"
         node = {"url": url, "attachments": [{"styles": {"attachment": {"media": {
             "__typename": "Video", "id": str(index), "browser_native_hd_url": MP4.replace("native", str(index))
         }}}} for index in (2, 1)]}
-        self.assertEqual(extract_facebook_post(page(node), url).video_urls, [MP4.replace("native", "2")])
+        self.assertEqual(extract_facebook_post(page(node), url).video_urls, [MP4.replace("native", str(i)) for i in (2, 1)])
+
+    def test_mixed_subattachments_keep_first_four_without_parent_or_video_covers(self):
+        url = "https://www.facebook.com/demo/posts/pfbidTEST"
+        images = [IMAGE.replace("photo", str(i)) for i in range(4)]
+        children = [{"media": {"image": {"uri": image}}} for image in images]
+        children.insert(2, {"media": {"browser_native_hd_url": MP4, "image": {"uri": IMAGE}}})
+        for key, collection in (("all_subattachments", {"nodes": children}),
+                                ("subattachments", {"edges": [{"node": item} for item in children]})):
+            node = {"url": url, "is_public": True, "attachments": [{"styles": {"attachment": {
+                "media": {"image": {"uri": IMAGE}}, key: collection,
+            }}}]}
+            for require_public in (False, True):
+                with self.subTest(key=key, require_public=require_public):
+                    result = extract_facebook_post(page(node), url, require_public=require_public)
+                    self.assertEqual([(m.type, m.url) for m in result.media],
+                                     [("image", images[0]), ("image", images[1]), ("video", MP4), ("image", images[2])])
+
+    def test_duplicate_nested_video_does_not_add_wrapper_thumbnail(self):
+        url = "https://www.facebook.com/demo/posts/pfbidTEST"
+        attachment = {"preferred_thumbnail": {"image": {"uri": IMAGE}},
+                      "media": {"browser_native_hd_url": MP4}}
+        node = {"url": url, "attachments": [attachment, attachment]}
+        post = extract_facebook_post(page(node), url)
+        self.assertEqual([(m.type, m.url) for m in post.media], [("video", MP4)])
+
+    def test_later_video_fragment_replaces_one_cover_fragment(self):
+        body = page({"id": "1602403008023321", "image": {"uri": IMAGE}}) + page({
+            "id": "1602403008023321", "browser_native_hd_url": MP4})
+        post = extract_facebook_post(body, URL)
+        self.assertEqual([(m.type, m.url) for m in post.media], [("video", MP4)])
 
     def test_unbound_recommendations_and_quoted_videos_are_excluded(self):
         for node in (

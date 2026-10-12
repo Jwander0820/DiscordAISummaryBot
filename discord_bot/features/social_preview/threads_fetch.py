@@ -534,52 +534,50 @@ def _save_debug_html(name: str, text: str):
 
 # =============== 解析 ===============
 def _extract_dom_media(post: ThreadsPost, soup: Any) -> bool:
-    """從已渲染 DOM 找圖片/影片，補足 JSON-LD 缺漏。"""
+    """Read post-bound DOM in order; a video's sources are alternate renditions."""
     media_link_re = re.compile(r"/@[^/]+/post/[^/]+/media(?:[/?#]|$)")
+    target = _post_code(post.url)
+    scopes = [link for link in soup.find_all("a", href=True)
+              if media_link_re.search(link.get("href") or "")
+              and _post_code(urljoin(post.url, link.get("href")).split("/media", 1)[0]) == target]
+    # Official embed markup places the permalink outside its media container.
+    for root in soup.select(".Embed"):
+        if any(_post_code(link.get("href")) == target for link in root.select(".LinkContainer a[href]")):
+            scopes.extend(root.select(".SoloMediaContainer"))
     found = False
+    seen_videos = set()
 
-    for link in soup.find_all("a", href=True):
-        href = link.get("href") or ""
-        if not media_link_re.search(href):
-            continue
-
-        for img in link.find_all("img"):
-            media_url = _best_image_url_from_tag(img)
-            if not media_url:
-                continue
-
-            item = ThreadsMedia(
-                "image",
-                media_url,
-                _safe_int(img.get("width")),
-                _safe_int(img.get("height")),
-                img.get("alt"),
-            )
-            if _append_media_unique(post.media, item):
-                found = True
-
-        for video in link.find_all("video"):
-            video_url = video.get("src")
-            if isinstance(video_url, str) and video_url.strip():
-                mime = _video_mime_from_url(video_url.strip())
-                if _append_media_unique(post.media, ThreadsMedia("video", video_url.strip(), mime=mime)):
-                    found = True
-            for source in video.find_all("source"):
-                video_url = source.get("src")
-                if isinstance(video_url, str) and video_url.strip():
-                    mime = source.get("type") or _video_mime_from_url(video_url.strip())
-                    if _append_media_unique(post.media, ThreadsMedia("video", video_url.strip(), mime=mime)):
-                        found = True
-
-    # Threads/Instagram 的影片有時不會出現在 <video> 標籤，而是藏在下載按鈕的 src。
-    for node in soup.find_all(src=True):
-        media_url = (node.get("src") or "").strip()
-        mime = _video_mime_from_url(media_url)
-        if not mime:
-            continue
-        if _append_media_unique(post.media, ThreadsMedia("video", media_url, mime=mime)):
+    def append_video(tag):
+        nonlocal found
+        if id(tag) in seen_videos:
+            return
+        seen_videos.add(id(tag))
+        candidates = [tag.get("src")] + [source.get("src") for source in tag.find_all("source")]
+        video = next((item for raw in candidates if (item := _direct_video(raw))), None)
+        if video and _append_media_unique(post.media, video):
             found = True
 
+    for scope in scopes:
+        for node in scope.find_all(["img", "video"]):
+            if node.name == "video":
+                append_video(node)
+            elif node.find_parent("video") is None:
+                media_url = _best_image_url_from_tag(node)
+                if media_url and _append_media_unique(post.media, ThreadsMedia(
+                    "image", media_url, _safe_int(node.get("width")), _safe_int(node.get("height")), node.get("alt")
+                )):
+                    found = True
+
+    # Keep the existing src-based fallback for official download controls.
+    for node in soup.find_all(src=True):
+        video_tag = node if node.name == "video" else node.find_parent("video")
+        if video_tag is not None:
+            append_video(video_tag)
+            continue
+        media_url = (node.get("src") or "").strip()
+        video = _direct_video(media_url)
+        if video and _append_media_unique(post.media, video):
+            found = True
     return found
 
 
@@ -901,7 +899,9 @@ def _parse_html(url: str, html_text: str) -> ThreadsPost:
                             if _append_media_unique(post.media, ThreadsMedia("video", u, v.get("width"), v.get("height"))):
                                 explicit_media_found = True
 
-    if _extract_dom_media(post, soup):
+    dom_post = ThreadsPost(url=url)
+    if _extract_dom_media(dom_post, soup):
+        post.media.extend(dom_post.media)
         explicit_media_found = True
 
     if not post.text:
@@ -965,6 +965,16 @@ def _parse_html(url: str, html_text: str) -> ThreadsPost:
     if post.text:
         post.text = html.unescape(post.text).strip()
 
+    if structured_media:
+        # Post-bound carousel order is authoritative. Page-wide DOM/OG may
+        # repeat its first image or contain a video's poster and renditions.
+        post.media = structured_media
+        post.debug["media_source"] = "structured_json"
+    elif dom_post.media:
+        post.media = dom_post.media
+    elif video := first_direct_video(post.media):
+        # Unordered OG/JSON-LD images beside a video are normally cover art.
+        post.media = [video]
     return post
 
 
@@ -1083,7 +1093,7 @@ def _try_embed_fill(post: ThreadsPost):
         embedded = _parse_html(post.url, str(root))
         video = first_direct_video(embedded.media)
         if video:
-            post.media.insert(0, video)
+            post.media = embedded.media
             post.debug["video_source"] = "official_embed"
         if not post.text:
             caption = root.select_one(".BodyTextContainer")
@@ -1133,7 +1143,8 @@ def fetch_threads_post(url: str) -> ThreadsPost:
     # 1) requests（多 UA、多網域變體）
     post = _try_requests(clean_url)
 
-    if not post.preview_error and not first_direct_video(post.media):
+    if (not post.preview_error and post.debug.get("media_source") != "structured_json"
+            and not first_direct_video(post.media)):
         _try_embed_fill(post)
 
     # 2) 不足 → oEmbed 補資料（作者名、縮圖、嵌入 HTML）
