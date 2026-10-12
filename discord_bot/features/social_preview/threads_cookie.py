@@ -7,6 +7,7 @@ import logging
 import re
 from urllib.parse import urlparse
 
+from .cookie_store import prepare_cookie, response_cookies, save_response_cookies
 from .download import is_trusted_media_url
 from .threads_fetch import (
     DEFAULT_ACCEPT, DEFAULT_LANG, MAX_EMBED_HTML_BYTES, REQUEST_TIMEOUT,
@@ -180,7 +181,7 @@ def _parse_cookie_html(url: str, body: str) -> ThreadsPost:
     return failed
 
 
-def try_cookie_fallback(url: str, cookie: str) -> ThreadsPost:
+def try_cookie_fallback(url: str, cookie: str, *, persist_cookies: bool = True) -> ThreadsPost:
     """Never propagate credential-bearing request exceptions, bodies or redirects."""
     import requests
 
@@ -196,6 +197,10 @@ def try_cookie_fallback(url: str, cookie: str) -> ThreadsPost:
         if not _valid_cookie(cookie):
             result.preview_error = "cookie_config_invalid"
             return result
+        snapshot = prepare_cookie("threads", target_url, cookie, persist=persist_cookies)
+        if not snapshot.header:
+            result.preview_error = "cookie_login_required"
+            return result
         with requests.Session() as session:
             # Isolate this request from ambient .netrc credentials, proxies and
             # shared cookie jars; TLS verification remains enabled by default.
@@ -205,7 +210,7 @@ def try_cookie_fallback(url: str, cookie: str) -> ThreadsPost:
                 # The mobile hl=en variant supplies server-rendered post data;
                 # the desktop response can be only an empty JavaScript shell.
                 target_url + "?hl=en", headers={"User-Agent": UA_MOBILE, "Accept": DEFAULT_ACCEPT,
-                                     "Accept-Language": DEFAULT_LANG, "Cookie": cookie.strip()},
+                                     "Accept-Language": DEFAULT_LANG, "Cookie": snapshot.header},
                 timeout=REQUEST_TIMEOUT, allow_redirects=False, stream=True,
             )
             status = response.status_code
@@ -232,6 +237,9 @@ def try_cookie_fallback(url: str, cookie: str) -> ThreadsPost:
             parsed.debug["cookie_attempts"] = 1
             parsed.debug["cookie_response_bytes"] = len(data)
             result = parsed
+            if not result.preview_error and (result.text or result.media):
+                raw_headers = getattr(getattr(response, "raw", None), "headers", None)
+                save_response_cookies(snapshot, response_cookies(raw_headers if raw_headers is not None else response.headers))
             return result
     except Exception:
         # Even a timeout/parse exception may embed request headers or login HTML.

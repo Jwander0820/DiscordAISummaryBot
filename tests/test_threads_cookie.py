@@ -1,5 +1,6 @@
 import json
 import os
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -34,7 +35,7 @@ def target(**kwargs):
 class ThreadsCookieTests(unittest.TestCase):
     def setUp(self):
         # Never consume a developer's real environment cookie during tests.
-        self.env = patch.dict(os.environ, {"THREADS_COOKIE": COOKIE})
+        self.env = patch.dict(os.environ, {"THREADS_COOKIE": COOKIE, "SOCIAL_PREVIEW_COOKIE_AUTO_SAVE": "0"})
         self.env.start()
         self.addCleanup(self.env.stop)
         self.session = Mock()
@@ -53,6 +54,37 @@ class ThreadsCookieTests(unittest.TestCase):
     def fetch(self, anonymous=None, url=URL):
         with patch.object(tf, "_try_requests", return_value=anonymous or tf.ThreadsPost(url=url)):
             return tf.fetch_threads_post(url)
+
+    def test_successful_response_updates_next_cookie_request_only(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
+            "SOCIAL_PREVIEW_COOKIE_AUTO_SAVE": "1", "SOCIAL_PREVIEW_COOKIE_STORE_DIR": directory
+        }):
+            self.session.get.return_value = response(page({"data": target()}), **{"Set-Cookie": "sessionid=rotated-test; Path=/; Secure"})
+            self.fetch()
+            self.session.get.return_value = response(page({"data": target()}))
+            self.fetch()
+            headers = self.session.get.call_args.kwargs["headers"]
+            self.assertIn("sessionid=rotated-test", headers["Cookie"])
+            self.assertNotIn("synthetic-test-only", headers["Cookie"])
+            self.assertEqual(self.session.get.call_count, 2)
+
+    def test_failed_cookie_response_never_saves_server_updates(self):
+        with patch("discord_bot.features.social_preview.threads_cookie.save_response_cookies") as save:
+            for body, status in (("login", 403), (page({"data": {"code": "Other"}}), 200)):
+                self.session.get.return_value = response(body, status, **{"Set-Cookie": "sessionid=bad; Path=/"})
+                self.fetch()
+            save.assert_not_called()
+
+    def test_deleted_cached_cookie_does_not_send_original_seed_again(self):
+        from discord_bot.features.social_preview.cookie_store import prepare_cookie, save_response_cookies
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
+            "SOCIAL_PREVIEW_COOKIE_AUTO_SAVE": "1", "SOCIAL_PREVIEW_COOKIE_STORE_DIR": directory
+        }):
+            snapshot = prepare_cookie("threads", URL, COOKIE)
+            save_response_cookies(snapshot, ["sessionid=; Path=/; Max-Age=0", "csrftoken=; Path=/; Max-Age=0"])
+            post = self.fetch()
+            self.assertEqual(post.preview_error, "cookie_login_required")
+            self.session.get.assert_not_called()
 
     def test_empty_anonymous_result_uses_cookie_once_and_recovers_target(self):
         post = self.fetch(tf.ThreadsPost(url=URL, preview_error="invalid_post"))

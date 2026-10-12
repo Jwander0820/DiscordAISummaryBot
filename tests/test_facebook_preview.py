@@ -1,5 +1,6 @@
 import unittest
 import types
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import discord
@@ -11,6 +12,9 @@ from discord_bot.features.social_preview.facebook_preview import (
     _build_candidate_urls,
     _extract_og_data,
     _fetch_html_with_aiohttp,
+    _fetch_og_data,
+    build_facebook_preview,
+    FacebookPreviewUnavailable,
     extract_facebook_urls,
     handle_facebook_in_message,
 )
@@ -22,6 +26,12 @@ class FakeResponse:
         self._html = html
         self.status = status
         self.headers = headers or {}
+        self.content = types.SimpleNamespace(iter_chunked=self._chunks)
+
+    async def _chunks(self, size):
+        body = self._html.encode("utf-8")
+        for start in range(0, len(body), size):
+            yield body[start:start + size]
 
     async def text(self, *, errors):
         return self._html
@@ -86,6 +96,137 @@ class FacebookPreviewTests(unittest.TestCase):
 
 
 class FacebookPreviewAsyncTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        cookie_env = patch.dict("os.environ", {"FACEBOOK_COOKIE": ""})
+        cookie_env.start()
+        self.addCleanup(cookie_env.stop)
+
+    async def test_cookie_adds_public_image_after_anonymous_failure(self):
+        from discord_bot.features.social_preview.facebook_fetch import FacebookPostData
+        url = "https://www.facebook.com/demo/posts/pfbidTEST"
+        authenticated = FacebookPostData(url=url, description="public body", image_urls=["https://scontent.xx.fbcdn.net/image.jpg"], public=True)
+        with patch.dict("os.environ", {"FACEBOOK_COOKIE": "xs=synthetic-test"}), patch(
+            "discord_bot.features.social_preview.facebook_preview._fetch_html_with_aiohttp", new=AsyncMock(side_effect=RuntimeError("age wall"))
+        ), patch("discord_bot.features.social_preview.facebook_cookie.try_facebook_cookie", new=AsyncMock(return_value=authenticated)) as cookie:
+            result = await _fetch_og_data(url)
+        self.assertEqual(result[1], "public body")
+        self.assertEqual(result[2], authenticated.image_urls)
+        cookie.assert_awaited_once_with(url, "xs=synthetic-test")
+
+    async def test_title_only_anonymous_page_still_attempts_cookie_for_image_post(self):
+        from discord_bot.features.social_preview.facebook_fetch import FacebookPostData
+        url = "https://www.facebook.com/demo/posts/pfbidTEST"
+        image = "https://scontent.xx.fbcdn.net/image.jpg"
+        with patch.dict("os.environ", {"FACEBOOK_COOKIE": "xs=synthetic-test"}), patch(
+            "discord_bot.features.social_preview.facebook_preview._fetch_html_with_aiohttp",
+            new=AsyncMock(return_value=("Facebook", "", [], [], url, 200))
+        ), patch("discord_bot.features.social_preview.facebook_cookie.try_facebook_cookie",
+                 new=AsyncMock(return_value=FacebookPostData(url=url, image_urls=[image], public=True))) as cookie:
+            result = await _fetch_og_data(url)
+        self.assertEqual(result[2], [image])
+        cookie.assert_awaited_once()
+
+    async def test_resolved_share_target_is_kept_for_cookie_when_anonymous_has_no_metadata(self):
+        from discord_bot.features.social_preview.facebook_fetch import FacebookPostData
+        share = "https://www.facebook.com/share/p/test/"
+        target = "https://www.facebook.com/demo/posts/pfbidTEST"
+        session = FakeSession([FakeResponse(share, "", status=302, headers={"Location": target}),
+                               FakeResponse(target, "<html>no metadata</html>")])
+        with patch("discord_bot.features.social_preview.facebook_preview._build_candidate_urls", side_effect=lambda u: [u]), patch(
+            "discord_bot.features.social_preview.facebook_preview.aiohttp.ClientSession", return_value=session
+        ):
+            with self.assertRaises(FacebookPreviewUnavailable) as error:
+                await _fetch_html_with_aiohttp(share)
+        self.assertEqual(error.exception.target_url, target)
+        with patch.dict("os.environ", {"FACEBOOK_COOKIE": "xs=synthetic-test"}), patch(
+            "discord_bot.features.social_preview.facebook_preview._fetch_html_with_aiohttp", new=AsyncMock(side_effect=error.exception)
+        ), patch("discord_bot.features.social_preview.facebook_cookie.try_facebook_cookie", new=AsyncMock(return_value=FacebookPostData(url=target, description="public", public=True))) as cookie:
+            await _fetch_og_data(share)
+        cookie.assert_awaited_once_with(target, "xs=synthetic-test")
+
+    async def test_successful_anonymous_video_or_image_uses_no_cookie(self):
+        cases = (("https://www.facebook.com/reel/123/", ["https://video.xx.fbcdn.net/video.mp4"]),
+                 ("https://www.facebook.com/demo/posts/pfbidTEST", []))
+        for url, videos in cases:
+            with self.subTest(url=url), patch.dict("os.environ", {"FACEBOOK_COOKIE": "xs=synthetic-test"}), patch(
+                "discord_bot.features.social_preview.facebook_preview._fetch_html_with_aiohttp",
+                new=AsyncMock(return_value=("title", "body", ["https://scontent.xx.fbcdn.net/cover.jpg"], videos, url, 200))
+            ), patch("discord_bot.features.social_preview.facebook_cookie.try_facebook_cookie", new=AsyncMock()) as cookie:
+                await _fetch_og_data(url)
+            cookie.assert_not_awaited()
+
+    async def test_cookie_failure_preserves_anonymous_video_cover_and_original_text(self):
+        from discord_bot.features.social_preview.facebook_fetch import FacebookPostData
+        url = "https://www.facebook.com/reel/123/"
+        original = ("original title", "original body", ["https://scontent.xx.fbcdn.net/cover.jpg"], [], url)
+        for reason in ("cookie_login_required", "not_public", "public_unverified", "cookie_rate_limited"):
+            with self.subTest(reason=reason), patch.dict("os.environ", {"FACEBOOK_COOKIE": "xs=synthetic-test"}), patch(
+                "discord_bot.features.social_preview.facebook_preview._fetch_html_with_aiohttp", new=AsyncMock(return_value=(*original, 200))
+            ), patch("discord_bot.features.social_preview.facebook_cookie.try_facebook_cookie", new=AsyncMock(return_value=FacebookPostData(url=url, reason=reason))) as cookie:
+                self.assertEqual(await _fetch_og_data(url), original)
+            cookie.assert_awaited_once()
+
+    async def test_final_failure_reports_cookie_status_instead_of_old_anonymous_error(self):
+        from discord_bot.features.social_preview.facebook_fetch import FacebookPostData
+        url = "https://www.facebook.com/demo/posts/pfbidTEST"
+        failed = FacebookPostData(url=url, reason="cookie_request_rejected", debug={"cookie_status": 400})
+        with patch.dict("os.environ", {"FACEBOOK_COOKIE": "xs=synthetic-test"}), patch(
+            "discord_bot.features.social_preview.facebook_preview._fetch_html_with_aiohttp",
+            new=AsyncMock(side_effect=FacebookPreviewUnavailable("anonymous login wall"))
+        ), patch("discord_bot.features.social_preview.facebook_cookie.try_facebook_cookie",
+                 new=AsyncMock(return_value=failed)):
+            with self.assertRaises(FacebookPreviewUnavailable) as error:
+                await _fetch_og_data(url)
+        self.assertIn("cookie_request_rejected", str(error.exception))
+        self.assertIn("400", str(error.exception))
+        self.assertNotIn("xs=synthetic-test", str(error.exception))
+        self.assertEqual(error.exception.target_url, url)
+
+    async def test_cookie_can_add_mp4_to_anonymous_cover_without_replacing_body(self):
+        from discord_bot.features.social_preview.facebook_fetch import FacebookPostData
+        url = "https://www.facebook.com/reel/123/"
+        mp4 = "https://video.xx.fbcdn.net/video.mp4"
+        with patch.dict("os.environ", {"FACEBOOK_COOKIE": "xs=synthetic-test"}), patch(
+            "discord_bot.features.social_preview.facebook_preview._fetch_html_with_aiohttp",
+            new=AsyncMock(return_value=("title", "body", ["https://scontent.xx.fbcdn.net/cover.jpg"], [], url, 200))
+        ), patch("discord_bot.features.social_preview.facebook_cookie.try_facebook_cookie", new=AsyncMock(return_value=FacebookPostData(url=url, video_urls=[mp4], public=True))):
+            result = await _fetch_og_data(url)
+        self.assertEqual(result[1], "body")
+        self.assertEqual(result[3], [mp4])
+
+    async def test_invalid_video_sources_keep_cover_without_downloading_video(self):
+        url = "https://www.facebook.com/reel/123/"
+        cover = "https://scontent.xx.fbcdn.net/cover.jpg"
+        for video in ("https://video.xx.fbcdn.net/video.mpd", "https://video.xx.fbcdn.net/video.m3u8", "blob:local-video"):
+            with self.subTest(video=video), patch(
+                "discord_bot.features.social_preview.facebook_preview._fetch_og_data", new=AsyncMock(return_value=("title", "body", [cover], [video], url))
+            ), patch("discord_bot.features.social_preview.facebook_preview._download_bytes", new=AsyncMock(return_value=b"image")) as download:
+                post = await build_facebook_preview(url)
+            self.assertIsNone(post.video_url)
+            self.assertEqual(len(post.files), 1)
+            download.assert_awaited_once()
+            self.assertEqual(download.await_args.args[1], cover)
+
+    async def test_anonymous_html_size_limit_stops_fetch(self):
+        url = "https://www.facebook.com/reel/123/"
+        session = FakeSession([FakeResponse(url, "x" * 21)])
+        with patch("discord_bot.features.social_preview.facebook_preview.aiohttp.ClientSession", return_value=session), patch(
+            "discord_bot.features.social_preview.facebook_preview.MAX_FACEBOOK_HTML_BYTES", 20
+        ):
+            with self.assertRaisesRegex(FacebookPreviewUnavailable, "大小上限"):
+                await _fetch_html_with_aiohttp(url)
+
+    async def test_target_reel_json_supplies_mp4_when_open_graph_only_has_cover(self):
+        url = "https://www.facebook.com/reel/1602403008023321/"
+        body = (Path(__file__).parent / "fixtures" / "facebook_reel_video.html").read_text(encoding="utf-8")
+        session = FakeSession([FakeResponse(url, body)])
+        with patch("discord_bot.features.social_preview.facebook_preview.aiohttp.ClientSession", return_value=session):
+            title, description, images, videos, final_url, status = await _fetch_html_with_aiohttp(url)
+        self.assertEqual(videos, ["https://video.xx.fbcdn.net/target-hd.mp4?oh=fake-signature&oe=fake-expiry"])
+        self.assertEqual(images, ["https://scontent.xx.fbcdn.net/cover.jpg"])
+        self.assertEqual(description, "公開影片正文")
+        self.assertEqual(session.requested_urls, [url])
+
     @patch("discord_bot.features.social_preview.facebook_preview.cleanup_source_message", new_callable=AsyncMock)
     @patch("discord_bot.features.social_preview.sender.send_preview_as_author", new_callable=AsyncMock)
     @patch("discord_bot.features.social_preview.facebook_preview._download_bytes", new_callable=AsyncMock)
@@ -125,7 +266,7 @@ class FacebookPreviewAsyncTests(unittest.IsolatedAsyncioTestCase):
                         expected.append(video)
                     self.assertEqual([item.media.url for item in media], expected)
                     self.assertTrue(all(item.spoiler == spoiler for item in media))
-                    self.assertEqual([call.args[1] for call in download.await_args_list], images[:4] if has_images else [])
+                    self.assertEqual([call.args[1] for call in download.await_args_list], images[:4] if has_images and not has_video else [])
                     buttons = [item for item in view.walk_children() if isinstance(item, discord.ui.Button)]
                     self.assertIsNone(buttons[0].url)
                     self.assertEqual(buttons[1].url, url)

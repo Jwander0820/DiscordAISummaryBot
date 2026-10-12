@@ -38,7 +38,7 @@ def main() -> int:
     if not cookie.strip():
         print(json.dumps({"result": "cookie_not_configured"}))
         return 2
-    post = try_cookie_fallback(url, cookie)
+    post = try_cookie_fallback(url, cookie, persist_cookies=False)
     allowed = ("cookie_attempts", "cookie_status", "cookie_reason", "cookie_response_bytes",
                "cookie_json_count", "cookie_parsed_json", "cookie_matched_nodes", "cookie_viewer_hint")
     print(json.dumps({"result": post.preview_error or "success", "has_text": bool(post.text),

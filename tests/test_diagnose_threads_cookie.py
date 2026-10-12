@@ -18,7 +18,7 @@ class DiagnoseThreadsCookieTests(unittest.TestCase):
             "sys.argv", ["diagnose_threads_cookie.py", post.url]
         ), patch("discord_bot.features.social_preview.threads_cookie.try_cookie_fallback", return_value=post) as fetch, contextlib.redirect_stdout(output):
             self.assertEqual(diagnostic.main(), 0)
-        fetch.assert_called_once_with(post.url, cookie)
+        fetch.assert_called_once_with(post.url, cookie, persist_cookies=False)
         result = json.loads(output.getvalue())
         self.assertEqual(result["result"], "success")
         self.assertTrue(result["has_text"])

@@ -18,6 +18,10 @@ from .download import (
 )
 from .sender import cleanup_source_message, send_preview_group
 from .text import extract_message_commentary
+from .facebook_fetch import (
+    MAX_FACEBOOK_HTML_BYTES, direct_facebook_mp4, extract_facebook_post,
+    facebook_post_identity, is_facebook_video_page,
+)
 
 logger = logging.getLogger("discord_digest_bot")
 
@@ -74,7 +78,11 @@ class FacebookPreview:
 
 
 class FacebookPreviewUnavailable(RuntimeError):
-    """Facebook 頁面無法在不登入、不繞過限制的前提下建立預覽。"""
+    """Facebook 未提供可用的公開貼文資料。"""
+
+    def __init__(self, message: str, *, target_url: str | None = None):
+        super().__init__(message)
+        self.target_url = target_url
 
 
 def extract_facebook_urls(content: str) -> List[str]:
@@ -192,7 +200,12 @@ async def _fetch_candidate_following_redirects(
             status = resp.status
             response_url = str(resp.url)
             if status not in FACEBOOK_REDIRECT_STATUSES:
-                return response_url, status, await resp.text(errors="ignore")
+                body = bytearray()
+                async for chunk in resp.content.iter_chunked(64 * 1024):
+                    if len(body) + len(chunk) > MAX_FACEBOOK_HTML_BYTES:
+                        raise FacebookPreviewUnavailable("Facebook 頁面超過解析大小上限")
+                    body.extend(chunk)
+                return response_url, status, body.decode("utf-8", errors="replace")
 
             location = resp.headers.get("Location")
             if not location:
@@ -245,7 +258,7 @@ def _meta_contents(soup: BeautifulSoup, key: str) -> List[str]:
     return unique_values
 
 
-def _extract_og_data(html: str) -> Tuple[str, str, List[str], List[str]]:
+def _extract_og_data(html: str, page_url: str = "") -> Tuple[str, str, List[str], List[str]]:
     """從 HTML 抽出 Facebook Open Graph 標題、描述、圖片與影片網址。"""
     soup = BeautifulSoup(html, "html.parser")
     title = (_meta_contents(soup, "og:title") or [""])[0]
@@ -260,7 +273,11 @@ def _extract_og_data(html: str) -> Tuple[str, str, List[str], List[str]]:
 
     seen_video = set()
     unique_video_urls = []
-    for url in video_urls:
+    structured = extract_facebook_post(html, page_url)
+    for raw_url in structured.video_urls + video_urls:
+        url = direct_facebook_mp4(raw_url)
+        if not url:
+            continue
         if url not in seen_video:
             seen_video.add(url)
             unique_video_urls.append(url)
@@ -272,6 +289,7 @@ async def _fetch_html_with_aiohttp(url: str) -> Tuple[str, str, List[str], List[
     """展開受限 redirect 後抓 OG 資料，登入牆與外部目的地直接失敗。"""
     last_error = "Facebook 頁面讀取失敗"
     last_status = 0
+    cookie_target = None
 
     async with aiohttp.ClientSession(headers=DEFAULT_HEADERS) as session:
         candidates = _build_candidate_urls(url)
@@ -286,13 +304,15 @@ async def _fetch_html_with_aiohttp(url: str) -> Tuple[str, str, List[str], List[
 
             try:
                 final_url, status, html = await _fetch_candidate_following_redirects(session, candidate)
+                if facebook_post_identity(final_url):
+                    cookie_target = final_url
                 attempted.add(final_url)
                 last_status = status
                 if _is_facebook_access_wall(final_url, html):
                     last_error = "Facebook 頁面要求登入或存取限制"
                     continue
 
-                title, description, image_urls, video_urls = _extract_og_data(html)
+                title, description, image_urls, video_urls = _extract_og_data(html, final_url)
                 has_metadata = bool(title or description or image_urls or video_urls)
                 if status < 400 and has_metadata:
                     return title, description, image_urls, video_urls, final_url, status
@@ -314,19 +334,49 @@ async def _fetch_html_with_aiohttp(url: str) -> Tuple[str, str, List[str], List[
             except Exception as exc:
                 last_error = f"Facebook 頁面讀取失敗（{exc}）"
 
-    raise RuntimeError(last_error if last_status else "Facebook 頁面讀取失敗（無有效回應）")
+    raise FacebookPreviewUnavailable(last_error if last_status else "Facebook 頁面讀取失敗（無有效回應）",
+                                     target_url=cookie_target)
 
 
 async def _fetch_og_data(url: str) -> Tuple[str, str, List[str], List[str], str]:
-    """使用 aiohttp 擷取 Facebook Open Graph；不可公開讀取時明確失敗。"""
+    """匿名優先，必要時單次 Cookie 備援；只接受公開的目標內容。"""
+    anonymous = None
+    last_error = None
+    cookie_target = url
     try:
         title, description, image_urls, video_urls, final_url, status = await _fetch_html_with_aiohttp(url)
         if status >= 400 and not (title or description or image_urls or video_urls):
             raise FacebookPreviewUnavailable(f"HTTP {status} 且無可用 Open Graph")
-        return title, description, image_urls, video_urls, final_url or url
+        anonymous = (title, description, image_urls, video_urls, final_url or url)
     except Exception as http_error:
         logger.warning("aiohttp 擷取 Facebook Open Graph 失敗: %s", http_error)
-        raise
+        last_error = http_error
+        cookie_target = getattr(http_error, "target_url", None) or url
+
+    needs_video = is_facebook_video_page(url) or bool(anonymous and is_facebook_video_page(anonymous[4]))
+    needs_cookie = (anonymous is None or not any(anonymous[1:4])
+                    or (needs_video and not anonymous[3]))
+    cookie = os.environ.get("FACEBOOK_COOKIE", "")
+    if needs_cookie and cookie.strip():
+        from .facebook_cookie import try_facebook_cookie
+        authenticated = await try_facebook_cookie(anonymous[4] if anonymous else cookie_target, cookie)
+        if authenticated.has_content:
+            if anonymous:
+                # A failed/missing video never discards the original cover/text.
+                return (anonymous[0] or authenticated.title, anonymous[1] or authenticated.description,
+                        anonymous[2] or authenticated.image_urls, authenticated.video_urls or anonymous[3], anonymous[4])
+            return (authenticated.title or "Facebook 貼文", authenticated.description,
+                    authenticated.image_urls, authenticated.video_urls, authenticated.url)
+        if anonymous is None:
+            status = authenticated.debug.get("cookie_status")
+            status_text = f"HTTP {status}" if isinstance(status, int) else "無 HTTP 回應"
+            last_error = FacebookPreviewUnavailable(
+                f"Facebook Cookie 備援失敗（{authenticated.reason}; {status_text}）",
+                target_url=authenticated.url,
+            )
+    if anonymous:
+        return anonymous
+    raise last_error or FacebookPreviewUnavailable("Facebook 頁面未提供可用的公開內容")
 
 
 async def build_facebook_preview(
@@ -349,7 +399,8 @@ async def build_facebook_preview(
     files: List[discord.File] = []
     external_images: List[str] = []
 
-    selected_image_urls = [url for url in image_urls if is_trusted_media_url(url)][:max(1, min(max_images, 4))]
+    video_urls = [video for url in video_urls if (video := direct_facebook_mp4(url))]
+    selected_image_urls = [] if video_urls else [url for url in image_urls if is_trusted_media_url(url)][:max(1, min(max_images, 4))]
     if selected_image_urls:
         if reupload_image:
             async with aiohttp.ClientSession(headers=DEFAULT_HEADERS) as session:
@@ -367,7 +418,6 @@ async def build_facebook_preview(
         else:
             external_images = selected_image_urls
 
-    video_urls = [url for url in video_urls if is_trusted_media_url(url)]
     return FacebookPreview(
         embed=embed, files=files, image_urls=external_images,
         video_url=video_urls[0] if video_urls else None,
