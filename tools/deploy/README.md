@@ -1,13 +1,15 @@
 # GitHub main 自動部署
 
-此設定對應 Jwander0820/DiscordAISummaryBot 的既有 VPS Docker Compose。Portainer 僅查看容器，不接管 Stack。首次安裝、GitHub Secrets、GHCR 登入完成後，使用者推送 main 才觸發部署。
+> 文件不記錄個人帳號或主機位址；`<owner>` 為占位符。實際映像來源由 `.github/workflows/deploy.yml` 與部署腳本的固定設定決定，執行前須核對，修改文件範例不會變更部署來源。
+
+此設定對應本專案的既有 VPS Docker Compose。Portainer 僅查看容器，不接管 Stack。首次安裝、GitHub Secrets、GHCR 登入完成後，使用者推送 main 才觸發部署。
 
 ## 1. 從 Windows 上傳部署工具
 
 在 Windows PowerShell 的專案根目錄執行，輸入既有 SSH 位址及 Port：
 
 ```powershell
-Set-Location D:\SideProject\DiscordAISummaryBot
+Set-Location (Read-Host '本機專案根目錄')
 $VpsHost = Read-Host 'VPS IP 或 SSH 主機名稱'
 $VpsPort = [int](Read-Host 'SSH Port，例如 22')
 ssh -p $VpsPort "ubuntu@$VpsHost" 'mkdir -p ~/github-bot-deploy'
@@ -57,12 +59,13 @@ ssh -p 22 -i ~/.ssh/github_discord_deploy \
 
 GitHub 帳號 Settings → Developer settings → Personal access tokens → Tokens (classic)，建立有 read:packages 的 token，期限依需求設定。Token 的帳號必須可讀取此 Package。不要把 token 放進 repo 或對話。
 
-在 Linux VPS 互動輸入，輸入不回顯：
+在 Linux VPS 互動輸入，token 輸入不回顯：
 
 ```bash
 read -rsp 'GHCR read:packages token: ' GHCR_READ_TOKEN
 printf '\n'
-printf '%s' "$GHCR_READ_TOKEN" | sudo docker login ghcr.io -u Jwander0820 --password-stdin
+read -rp '可讀取此 Package 的 GitHub 帳號: ' ghcr_user
+printf '%s' "$GHCR_READ_TOKEN" | sudo docker login ghcr.io -u "$ghcr_user" --password-stdin
 unset GHCR_READ_TOKEN
 ```
 
@@ -113,7 +116,7 @@ VPS_HOST 目前支援 IPv4 或 DNS 名稱。如果防火牆只放行你的 Windo
 
 1. 建置 linux/amd64 image。
 2. 使用此 image 的依賴執行完整 unittest，掛載測試與 tools，禁用測試容器網路；沒有正式憑證。
-3. 成功才推送 ghcr.io/jwander0820/discordaisummarybot:sha-<commit SHA>。
+3. 成功才推送 ghcr.io/<owner>/discordaisummarybot:sha-<commit SHA>。
 4. 執行受限 SSH 命令 deploy <commit SHA>。
 
 確認 GitHub Repository 的組織政策允許 Actions 發布 Package。第一次 image 若已由其他流程建立而權限不同，需要在 Package Settings → Manage Actions access 授權此 repo。
@@ -147,6 +150,54 @@ sudo docker compose --project-name discord-summary-bot --profile bot \
 ```
 
 第一次成功部署前覆寫檔可能還不存在，此時使用原本的 Compose。
+
+## 修改環境設定
+
+以下適用於已完成 GitHub 自動部署的 VPS。在同一個 Bash session 定義共用命令，固定使用目前的 image 覆寫；覆寫檔不存在時先確認部署階段，不要直接省略它重建既有服務。
+
+```bash
+bot_compose() {
+  sudo docker compose --project-name discord-summary-bot --profile bot \
+    -f /opt/discord-summary-bot/compose.yaml \
+    -f /var/lib/discord-bot-deploy/compose.image.yaml "$@"
+}
+```
+
+先確認主機 Compose 的 `env_file` 使用 `/opt/discord-summary-bot/secrets/bot.env`，再備份、編輯並驗證設定。不要把新的 `.env.example` 整份覆蓋到既有正式設定。
+
+```bash
+env_backup="/opt/discord-summary-bot/secrets/bot.env.before-edit-$(date +%Y%m%d-%H%M%S)"
+sudo cp --preserve=mode,ownership /opt/discord-summary-bot/secrets/bot.env "$env_backup"
+sudo chmod 0600 "$env_backup"
+sudo nano /opt/discord-summary-bot/secrets/bot.env
+bot_compose config --quiet
+```
+
+只有驗證成功後才執行下列命令；這一步會讓 Bot 短暫離線。`config --quiet` 不會驗證 API key、Cookie 或應用程式欄位值是否有效。
+
+```bash
+bot_compose up -d --no-deps --no-build --pull never --force-recreate --wait --wait-timeout 120 bot
+bot_compose ps
+curl --fail --max-time 10 http://127.0.0.1:8080/health
+```
+
+這會沿用目前 image 重建 Bot、不更新 DB。Docker 的 Restart 不會重新注入修改後的 `env_file`；本機直接執行 Python 則重啟程序即可。完成後另在 Discord 驗證修改涉及的功能。手動重建沒有部署腳本的自動回退；若失敗，先保留錯誤資訊，再於同一 session 還原剛才備份的 env：
+
+```bash
+sudo cp --preserve=mode,ownership "$env_backup" /opt/discord-summary-bot/secrets/bot.env
+bot_compose config --quiet
+```
+
+還原驗證成功後，再執行上方相同的重建與健康檢查命令。備份含憑證，留在受限目錄；不要提交 Git。這個流程只處理 Bot 設定，不用來輪替 PostgreSQL 角色密碼。
+
+### Cookie 持久保存
+
+啟用三平台 Cookie 時，可設定 `SOCIAL_PREVIEW_COOKIE_STORE_DIR` 指向容器內的持久目錄。只有設定路徑不會建立 volume；主機 Compose 必須有對應掛載。image 使用 UID/GID `10001:10001`，掛載目錄須允許該身分寫入。
+
+- Cookie 保存檔包含登入憑證，與 `bot.env` 一樣需要限制存取。
+- 未掛載持久儲存時，容器重建會失去更新後的 Cookie，改以環境初始值重新建立。
+- 修改掛載需編輯主機 Compose，再沿用上述驗證、重建流程；日常 GitHub image 部署不會替你修改 Compose 或 env。
+- Bot 設定見[環境變數指南](../../docs/configuration.md)，Cookie 行為見[社群預覽指南](../../docs/social-preview.md)。
 
 ## 官方參考
 

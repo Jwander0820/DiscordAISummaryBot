@@ -80,7 +80,11 @@ render.yaml
 _threads_debug/
 test_code.py
 data/
-docs/
+docs/*
+!docs/README.md
+!docs/configuration.md
+!docs/social-preview.md
+!docs/development.md
 AGENTS.md
 
 # Local-only Discord bot guild manager
