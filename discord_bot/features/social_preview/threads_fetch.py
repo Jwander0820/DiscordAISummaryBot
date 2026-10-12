@@ -9,12 +9,13 @@ import time
 import html
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
-from urllib.parse import parse_qs, urljoin, urlparse, urlunparse, urlencode
+from urllib.parse import parse_qs, unquote, urljoin, urlparse, urlunparse, urlencode
 
 # =============== 配置 ===============
 REQUEST_TIMEOUT = 15
 RETRY = 2
 MAX_PAGE_ATTEMPTS = 6
+MAX_EMBED_HTML_BYTES = 2 * 1024 * 1024
 RETRY_BACKOFF = 1.8
 
 UA_DESKTOP = (
@@ -30,6 +31,7 @@ UA_INSTAGRAM = (
     # 常見的 IG/Threads App UA 片段（用來繞過某些變體）
     "Instagram 305.0.0.34.110 Android (31/12; 420dpi; 1080x2138; Xiaomi; M2102K1G; star; qcom; en_US)"
 )
+UA_DISCORD = "Mozilla/5.0 (compatible; Discordbot/2.0; +https://discordapp.com)"
 
 DEFAULT_ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
 DEFAULT_LANG = "en-US,en;q=0.9,zh-TW;q=0.8,zh;q=0.7"
@@ -246,7 +248,7 @@ def _safe_int(value: Any) -> Optional[int]:
         if value is None or value == "":
             return None
         return int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
@@ -295,16 +297,114 @@ def _best_image_url_from_tag(tag: Any) -> Optional[str]:
 
 def _video_mime_from_url(url: str) -> Optional[str]:
     """用副檔名粗略推斷影片 MIME type。"""
-    path = urlparse(url or "").path.lower()
+    path = unquote(urlparse(url or "").path).lower()
     if path.endswith(".m3u8"):
         return "application/vnd.apple.mpegurl"
-    if path.endswith(".mp4"):
+    if path.endswith((".mp4", ".m4v")):
         return "video/mp4"
     if path.endswith(".webm"):
         return "video/webm"
     if path.endswith(".mov"):
         return "video/quicktime"
     return None
+
+
+def _direct_video(raw_url: Any, width=None, height=None) -> Optional[ThreadsMedia]:
+    """Accept a complete, trusted media URL; preserve its signed query verbatim."""
+    from .download import is_trusted_media_url
+
+    if not isinstance(raw_url, str) or len(raw_url) > 8192:
+        return None
+    url = html.unescape(re.sub(r"\\u0026", "&", raw_url.strip(), flags=re.IGNORECASE).replace(r"\/", "/"))
+    if not is_trusted_media_url(url):
+        return None
+    mime = _video_mime_from_url(url)
+    if mime not in {"video/mp4", "video/webm", "video/quicktime"}:
+        return None
+    return ThreadsMedia("video", url, _safe_int(width), _safe_int(height), mime=mime)
+
+
+def first_direct_video(media: List[ThreadsMedia]) -> Optional[ThreadsMedia]:
+    """Keep post order; HLS manifests and local blob URLs are not inline videos."""
+    for item in media:
+        if item.type == "video":
+            video = _direct_video(item.url, item.width, item.height)
+            if video:
+                return video
+    return None
+
+
+def _post_code(url: Any) -> Optional[str]:
+    if not isinstance(url, str):
+        return None
+    try:
+        clean = _strip_tracking_query(url)
+    except ValueError:
+        return None
+    return urlparse(clean).path.rsplit("/", 1)[-1] if THREADS_RE.fullmatch(clean) else None
+
+
+def _extract_structured_videos(post: ThreadsPost, soup: Any) -> List[ThreadsMedia]:
+    """Adapt Threads Plugin's post-bound video_versions/carousel selection."""
+    target = _post_code(post.url)
+    videos: List[ThreadsMedia] = []
+    if not target:
+        return videos
+    remaining_nodes = 20000
+    media_keys = {"video_versions", "playable_url", "video_url", "carousel_media", "image_versions2", "image_versions"}
+
+    def visit(node, owner=None, depth=0, carousel=False):
+        nonlocal remaining_nodes
+        if remaining_nodes <= 0 or depth > 40:
+            return
+        remaining_nodes -= 1
+        if isinstance(node, list):
+            for child in node:
+                visit(child, owner, depth + 1, carousel)
+            return
+        if not isinstance(node, dict):
+            return
+        identity = next((_post_code(node.get(key)) for key in ("permalink", "url", "share_url", "post_url")
+                         if _post_code(node.get(key))), None)
+        if not identity and (media_keys.intersection(node) or re.search("post|thread|media", str(node.get("__typename", "")), re.I)):
+            identity = next((node[key] for key in ("code", "shortcode", "media_code", "post_code", "thread_code", "permalink_code")
+                             if isinstance(node.get(key), str) and re.fullmatch(r"[A-Za-z0-9_-]+", node[key])), None)
+        owner = owner if carousel and owner else identity or owner
+        children = node.get("carousel_media")
+        has_carousel = isinstance(children, list) and bool(children)
+        if owner == target and not has_carousel:
+            candidates = []
+            versions = node.get("video_versions")
+            for rendition in versions if isinstance(versions, list) else []:
+                if isinstance(rendition, str):
+                    rendition = {"url": rendition}
+                if not isinstance(rendition, dict):
+                    continue
+                video = _direct_video(rendition.get("url") or rendition.get("src") or rendition.get("playable_url"),
+                                      rendition.get("width"), rendition.get("height"))
+                if video:
+                    candidates.append(((video.mime == "video/mp4", (video.width or 0) * (video.height or 0),
+                                        _safe_int(rendition.get("bandwidth") or rendition.get("bitrate")) or 0), video))
+            video = max(candidates, key=lambda item: item[0])[1] if candidates else next(
+                (v for key in ("playable_url", "video_url") if (v := _direct_video(node.get(key)))), None
+            )
+            if video:
+                _append_media_unique(videos, video)
+        for key, child in node.items():
+            if key in {"video_versions", "playable_url", "video_url", "image_versions", "image_versions2", "author", "owner", "profile", "user"}:
+                continue
+            boundary = bool(re.search(r"parent_post|quoted|reply_to|repost", key, re.I))
+            visit(child, None if boundary else owner, depth + 1, not boundary and (carousel or key == "carousel_media"))
+
+    for script in soup.find_all("script", attrs={"type": "application/json"}):
+        raw = script.string or ""
+        if len(raw) > MAX_EMBED_HTML_BYTES or not any(key in raw for key in ("video_versions", "playable_url", "video_url")):
+            continue
+        try:
+            visit(json.loads(raw))
+        except (ValueError, RecursionError):
+            continue
+    return videos
 
 
 def _is_probable_fallback_avatar(item: ThreadsMedia) -> bool:
@@ -648,6 +748,13 @@ def _parse_html(url: str, html_text: str) -> ThreadsPost:
     post = ThreadsPost(url=url)
     explicit_media_found = False
 
+    # Post-bound structured data precedes page-wide DOM/meta fallbacks.
+    structured_videos = _extract_structured_videos(post, soup)
+    post.media.extend(structured_videos)
+    explicit_media_found = bool(structured_videos)
+    if structured_videos:
+        post.debug["video_source"] = "structured_json"
+
     # 作者 @ 從 URL 推回
     try:
         segs = urlparse(url).path.strip("/").split("/")
@@ -862,6 +969,59 @@ def _try_requests(url: str) -> ThreadsPost:
     return p
 
 
+def _try_embed_fill(post: ThreadsPost):
+    """One anonymous request to the official embed page; never fetch video bytes."""
+    import requests
+    from bs4 import BeautifulSoup
+
+    code = _post_code(post.url)
+    if not code:
+        return
+    embed_url = "https://www.threads.com" + urlparse(_strip_tracking_query(post.url)).path + "/embed"
+    response = None
+    post.debug["embed_attempts"] = 1
+    try:
+        response = requests.get(embed_url, headers={"User-Agent": UA_DISCORD, "Accept": DEFAULT_ACCEPT},
+                                timeout=REQUEST_TIMEOUT, allow_redirects=False, stream=True)
+        post.debug["embed_status"] = response.status_code
+        if response.status_code != 200:
+            return
+        data = bytearray()
+        for chunk in response.iter_content(64 * 1024):
+            data.extend(chunk)
+            if len(data) > MAX_EMBED_HTML_BYTES:
+                post.debug["embed_error"] = "html_too_large"
+                return
+        soup = BeautifulSoup(data.decode("utf-8", errors="replace"), "html.parser")
+        # Official embed DOM provides a post permalink outside the media itself.
+        root = next((container for container in soup.select(".Embed")
+                     if any(_post_code(a.get("href")) == code for a in container.select(".LinkContainer a[href]"))), None)
+        if root is None:
+            post.debug["embed_error"] = "post_not_found"
+            return
+        embedded = _parse_html(post.url, str(root))
+        video = first_direct_video(embedded.media)
+        if video:
+            post.media.insert(0, video)
+            post.debug["video_source"] = "official_embed"
+        if not post.text:
+            caption = root.select_one(".BodyTextContainer")
+            if caption:
+                post.text = _render_text_subtree(caption).strip() or None
+        if not post.author_username:
+            post.author_username = embedded.author_username
+        if not post.author_name:
+            author = root.select_one(".AuthorIdentity .HeaderLink")
+            if author:
+                post.author_name = author.get_text(strip=True) or None
+    except Exception as exc:
+        # Only diagnostic categories; never log signed CDN URLs or page contents.
+        post.debug["embed_error"] = type(exc).__name__
+    finally:
+        if response is not None:
+            response.close()
+
+
 # =============== oEmbed 後援（輕量） ===============
 def _try_oembed_fill(post: ThreadsPost, *, allow_thumbnail: bool = True):
     """當正文或媒體不足時，用 oEmbed 補作者名稱與縮圖。"""
@@ -891,6 +1051,9 @@ def fetch_threads_post(url: str) -> ThreadsPost:
 
     # 1) requests（多 UA、多網域變體）
     post = _try_requests(clean_url)
+
+    if not post.preview_error and not first_direct_video(post.media):
+        _try_embed_fill(post)
 
     # 2) 不足 → oEmbed 補資料（作者名、縮圖、嵌入 HTML）
     if not post.preview_error and (not post.text or not post.media):

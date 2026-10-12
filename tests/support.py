@@ -43,12 +43,17 @@ def install_discord_stub():
             self.title = kwargs.get("title")
             self.description = kwargs.get("description")
             self.url = kwargs.get("url")
+            self.fields = []
 
         def set_author(self, **kwargs):
             self.author = kwargs
 
         def set_image(self, **kwargs):
             self.image = kwargs
+
+        def add_field(self, *, name, value, inline=True):
+            self.fields.append(types.SimpleNamespace(name=name, value=value, inline=inline))
+            return self
 
     class File:
         def __init__(self, fp=None, filename=None, spoiler=False, description=None):
@@ -93,6 +98,9 @@ def install_discord_stub():
 
         def add_item(self, item):
             self.children.append(item)
+
+        def has_components_v2(self):
+            return False
 
     class Button:
         def __init__(self, *args, **kwargs):
@@ -195,3 +203,30 @@ def install_discord_stub():
 def reload_module(module_name: str):
     sys.modules.pop(module_name, None)
     return importlib.import_module(module_name)
+
+
+def isolated_discord_suite(module_name):
+    """Run SDK-dependent tests in a child process when legacy tests installed a stub."""
+    def load_tests(loader, suite, pattern):
+        if getattr(sys.modules.get("discord"), "__version__", None):
+            return suite
+
+        import os
+        from pathlib import Path
+        import subprocess
+        import unittest
+
+        class RealDiscordTests(unittest.TestCase):
+            def runTest(self):
+                target = "tests." + module_name.rsplit(".", 1)[-1]
+                result = subprocess.run(
+                    [sys.executable, "-m", "unittest", target],
+                    cwd=Path(__file__).resolve().parent.parent,
+                    env={**os.environ, "PYTHONUTF8": "1"},
+                    capture_output=True, text=True, encoding="utf-8", timeout=60,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                print(f"\n{target} (real discord.py):\n{result.stderr.strip()}")
+
+        return unittest.TestSuite([RealDiscordTests()])
+    return load_tests

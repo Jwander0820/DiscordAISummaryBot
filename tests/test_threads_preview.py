@@ -3,6 +3,7 @@ import sys
 import types
 import importlib.util
 from unittest.mock import AsyncMock, patch
+from tests.support import isolated_discord_suite
 
 from discord_bot.features.social_preview.threads_fetch import ThreadsMedia, ThreadsPost
 
@@ -16,7 +17,6 @@ if importlib.util.find_spec("aiohttp") is None or importlib.util.find_spec("disc
 
 from discord_bot.features.social_preview.threads_preview import (
     THREADS_INVALID_POST_MESSAGE,
-    DeletePreviewView,
     PreviewResult,
     build_threads_preview,
     extract_threads_urls,
@@ -25,7 +25,99 @@ from discord_bot.features.social_preview.threads_preview import (
 import discord
 
 
+load_tests = isolated_discord_suite(__name__)
+
+
+def make_view(**kwargs):
+    from discord_bot.features.social_preview.preview_view import build_social_preview_views
+    views = build_social_preview_views(title="Threads", author="demo", text="", commentary="", spoiler=False, timeout=None, **kwargs)
+    return views[0]
+
+
+def gallery_items(view):
+    return [media for item in view.walk_children() if isinstance(item, discord.ui.MediaGallery) for media in item.items]
+
+
 class ThreadsPreviewTests(unittest.IsolatedAsyncioTestCase):
+    @patch("discord_bot.features.social_preview.threads_preview._download_bytes", new_callable=AsyncMock)
+    @patch("discord_bot.features.social_preview.threads_preview.asyncio.to_thread")
+    async def test_video_post_uses_only_first_video_without_downloading_poster_or_video(self, fetch, download):
+        first = "https://scontent.cdninstagram.com/first.mp4?oh=signed&oe=expiry"
+        fetch.return_value = ThreadsPost(url="https://www.threads.com/@demo/post/Video001", media=[
+            ThreadsMedia("image", "https://scontent.cdninstagram.com/poster.jpg"),
+            ThreadsMedia("video", first),
+            ThreadsMedia("video", "https://scontent.cdninstagram.com/second.mp4"),
+        ])
+        preview = await build_threads_preview(fetch.return_value.url)
+        self.assertEqual(preview.inline_video_url, first)
+        self.assertIsNone(preview.extra_text)
+        self.assertEqual(preview.files, [])
+        image = getattr(preview.embed, "image", None)
+        self.assertFalse(image.get("url") if isinstance(image, dict) else getattr(image, "url", None))
+        download.assert_not_awaited()
+
+    def test_long_signed_video_url_is_not_put_in_a_512_character_button(self):
+        video = "https://scontent.cdninstagram.com/first.mp4?signature=" + "a" * 900
+        view = make_view(original_url="https://www.threads.com/@demo/post/Video001", video_url=video)
+        self.assertFalse(any(getattr(item, "label", None) == "影片直連" for item in view.children))
+
+    @patch("discord_bot.features.social_preview.threads_preview.cleanup_source_message", new_callable=AsyncMock)
+    @patch("discord_bot.features.social_preview.sender.send_preview_as_author", new_callable=AsyncMock)
+    @patch("discord_bot.features.social_preview.threads_preview._download_bytes", new_callable=AsyncMock)
+    @patch("discord_bot.features.social_preview.threads_preview.asyncio.to_thread")
+    async def test_spoiler_video_uses_native_mask_without_downloads_or_naked_links(self, fetch, download, send, cleanup):
+        url = "https://www.threads.com/@demo/post/Video001"
+        video = "https://scontent.cdninstagram.com/first.mp4?signature=" + "a" * 900
+        fetch.return_value = ThreadsPost(url=url, text="劇透文字", media=[ThreadsMedia("video", video)])
+        send.return_value = types.SimpleNamespace(id=123)
+        message = types.SimpleNamespace(author=types.SimpleNamespace(bot=False, nick="demo", global_name="demo"),
+                                        channel=types.SimpleNamespace(name="general"), content=f"||{url}||")
+        self.assertTrue(await handle_threads_in_message(message))
+        download.assert_not_awaited()
+        send.assert_awaited_once()
+        self.assertEqual(set(send.await_args.kwargs), {"view"})
+        view = send.await_args.kwargs["view"]
+        self.assertIsInstance(view, discord.ui.LayoutView)
+        media = gallery_items(view)
+        self.assertEqual(len(media), 1)
+        self.assertEqual(media[0].media.url, video)
+        self.assertTrue(media[0].spoiler)
+        card = next(item for item in view.children if isinstance(item, discord.ui.Container))
+        self.assertTrue(card.spoiler)
+        self.assertTrue(any(isinstance(item, discord.ui.ActionRow) for item in view.children))
+        self.assertIn("劇透文字", [item.content for item in card.children if isinstance(item, discord.ui.TextDisplay)])
+
+    @patch("discord_bot.features.social_preview.threads_preview.cleanup_source_message", new_callable=AsyncMock)
+    @patch("discord_bot.features.social_preview.sender.send_preview_as_author", new_callable=AsyncMock)
+    @patch("discord_bot.features.social_preview.threads_preview.asyncio.to_thread")
+    async def test_commentary_and_signed_video_fit_same_v2_message(self, fetch, send, cleanup):
+        url = "https://www.threads.com/@demo/post/Video001"
+        video = "https://scontent.cdninstagram.com/first.mp4?signature=" + "a" * 900
+        fetch.return_value = ThreadsPost(url=url, text="貼文", media=[ThreadsMedia("video", video)])
+        for spoiler in (False, True):
+            with self.subTest(spoiler=spoiler):
+                send.reset_mock()
+                send.return_value = types.SimpleNamespace(id=123)
+                original = f"||{url}||" if spoiler else url
+                message = types.SimpleNamespace(author=types.SimpleNamespace(bot=False, nick="demo", global_name="demo"),
+                                                channel=types.SimpleNamespace(name="general"), content="評" * 1700 + " " + original)
+                self.assertTrue(await handle_threads_in_message(message))
+                self.assertEqual(send.await_count, 1)
+                self.assertEqual(set(send.await_args.kwargs), {"view"})
+                view = send.await_args.kwargs["view"]
+                self.assertEqual(view.children[0].content, "評" * 1700)
+                self.assertEqual(gallery_items(view)[0].media.url, video)
+
+    @patch("discord_bot.features.social_preview.threads_preview._download_bytes", new_callable=AsyncMock)
+    @patch("discord_bot.features.social_preview.threads_preview.asyncio.to_thread")
+    async def test_oversized_signed_url_is_not_truncated_or_uploaded(self, fetch, download):
+        video = "https://scontent.cdninstagram.com/first.mp4?signature=" + "a" * 2100
+        fetch.return_value = ThreadsPost(url="https://www.threads.com/@demo/post/Video001", media=[ThreadsMedia("video", video)])
+        preview = await build_threads_preview(fetch.return_value.url)
+        self.assertEqual(preview.video_url, video)
+        self.assertEqual(preview.inline_video_url, video)
+        download.assert_not_awaited()
+
     def test_extract_threads_urls_accepts_share_link(self):
         url = "https://www.threads.com/share/BATCH_yt4N/"
 
@@ -50,7 +142,7 @@ class ThreadsPreviewTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(preview.inline_video_url)
 
     @patch("discord_bot.features.social_preview.threads_preview.cleanup_source_message", new_callable=AsyncMock)
-    @patch("discord_bot.features.social_preview.threads_preview.send_preview_as_author", new_callable=AsyncMock)
+    @patch("discord_bot.features.social_preview.sender.send_preview_as_author", new_callable=AsyncMock)
     @patch("discord_bot.features.social_preview.threads_preview.asyncio.to_thread")
     async def test_handle_invalid_post_sends_fixed_failure_preview_with_original_link(
         self,
@@ -74,13 +166,16 @@ class ThreadsPreviewTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         sent_kwargs = mock_send_preview_as_author.await_args.kwargs
-        self.assertEqual(sent_kwargs["embed"].description, THREADS_INVALID_POST_MESSAGE)
-        original_link = next(item for item in sent_kwargs["view"].children if getattr(item, "label", None) == "原連結")
+        view = sent_kwargs["view"]
+        self.assertTrue(view.has_components_v2())
+        self.assertFalse(set(sent_kwargs) & {"embed", "content"})
+        self.assertIn(THREADS_INVALID_POST_MESSAGE, [item.content for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay)])
+        original_link = next(item for item in view.walk_children() if getattr(item, "label", None) == "原連結")
         self.assertEqual(original_link.url, url)
         mock_cleanup_source_message.assert_awaited_once()
 
     @patch("discord_bot.features.social_preview.threads_preview.cleanup_source_message", new_callable=AsyncMock)
-    @patch("discord_bot.features.social_preview.threads_preview.send_preview_as_author", new_callable=AsyncMock)
+    @patch("discord_bot.features.social_preview.sender.send_preview_as_author", new_callable=AsyncMock)
     @patch("discord_bot.features.social_preview.threads_preview.build_threads_preview", new_callable=AsyncMock)
     async def test_share_link_button_uses_clean_canonical_post_url(
         self,
@@ -106,13 +201,13 @@ class ThreadsPreviewTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handled)
         view = mock_send_preview_as_author.await_args.kwargs["view"]
         original_link = next(
-            item for item in view.children if getattr(item, "label", None) == "原連結"
+            item for item in view.walk_children() if getattr(item, "label", None) == "原連結"
         )
         self.assertEqual(original_link.url, canonical_url)
         mock_cleanup_source_message.assert_awaited_once()
 
     @patch("discord_bot.features.social_preview.threads_preview.cleanup_source_message", new_callable=AsyncMock)
-    @patch("discord_bot.features.social_preview.threads_preview.send_preview_as_author", new_callable=AsyncMock)
+    @patch("discord_bot.features.social_preview.sender.send_preview_as_author", new_callable=AsyncMock)
     @patch("discord_bot.features.social_preview.threads_preview.build_threads_preview", new_callable=AsyncMock)
     async def test_spoiler_share_link_button_uses_clean_canonical_post_url(
         self,
@@ -138,7 +233,7 @@ class ThreadsPreviewTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handled)
         view = mock_send_preview_as_author.await_args.kwargs["view"]
         original_link = next(
-            item for item in view.children if getattr(item, "label", None) == "原連結"
+            item for item in view.walk_children() if getattr(item, "label", None) == "原連結"
         )
         self.assertEqual(original_link.url, canonical_url)
         mock_cleanup_source_message.assert_awaited_once()
@@ -161,21 +256,21 @@ class ThreadsPreviewTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(preview.files, [])
 
     def test_delete_preview_view_adds_video_link_button(self):
-        view = DeletePreviewView(
+        view = make_view(
             original_url="https://www.threads.com/@demo/post/abc",
             video_url="https://video.xx.fbcdn.net/media/video.mp4?token=abc",
         )
 
-        labels = [getattr(item, "label", None) for item in view.children]
+        labels = [getattr(item, "label", None) for item in view.walk_children()]
         self.assertIn("原連結", labels)
         self.assertIn("影片直連", labels)
-        original_link = next(item for item in view.children if getattr(item, "label", None) == "原連結")
+        original_link = next(item for item in view.walk_children() if getattr(item, "label", None) == "原連結")
         self.assertEqual(original_link.url, "https://www.threads.com/@demo/post/abc")
 
     @patch("discord_bot.features.social_preview.threads_preview.cleanup_source_message", new_callable=AsyncMock)
-    @patch("discord_bot.features.social_preview.threads_preview.send_preview_as_author", new_callable=AsyncMock)
+    @patch("discord_bot.features.social_preview.sender.send_preview_as_author", new_callable=AsyncMock)
     @patch("discord_bot.features.social_preview.threads_preview.build_threads_preview", new_callable=AsyncMock)
-    async def test_handle_threads_in_message_sends_inline_video_url_in_content(
+    async def test_handle_threads_in_message_sends_video_in_v2_only(
         self,
         mock_build_threads_preview,
         mock_send_preview_as_author,
@@ -201,11 +296,13 @@ class ThreadsPreviewTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         mock_send_preview_as_author.assert_awaited_once()
-        self.assertEqual(mock_send_preview_as_author.await_args.kwargs["content"], video_url)
+        self.assertEqual(set(mock_send_preview_as_author.await_args.kwargs), {"view"})
+        view = mock_send_preview_as_author.await_args.kwargs["view"]
+        self.assertEqual(gallery_items(view)[0].media.url, video_url)
         mock_cleanup_source_message.assert_awaited_once()
 
     @patch("discord_bot.features.social_preview.threads_preview.cleanup_source_message", new_callable=AsyncMock)
-    @patch("discord_bot.features.social_preview.threads_preview.send_preview_as_author", new_callable=AsyncMock)
+    @patch("discord_bot.features.social_preview.sender.send_preview_as_author", new_callable=AsyncMock)
     @patch("discord_bot.features.social_preview.threads_preview.build_threads_preview", new_callable=AsyncMock)
     async def test_handle_threads_in_message_keeps_user_commentary_around_url(
         self,
@@ -230,7 +327,7 @@ class ThreadsPreviewTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         self.assertEqual(
-            mock_send_preview_as_author.await_args.kwargs["content"],
+            mock_send_preview_as_author.await_args.kwargs["view"].children[0].content,
             "一起來看 超好笑",
         )
         mock_cleanup_source_message.assert_awaited_once()

@@ -11,14 +11,12 @@ from urllib.parse import urljoin, urlparse, urlunparse
 import aiohttp
 import discord
 from bs4 import BeautifulSoup
-from discord.errors import HTTPException, InteractionResponded, NotFound
 from .download import (
     MAX_IMAGE_DOWNLOAD_BYTES,
-    MAX_VIDEO_DOWNLOAD_BYTES,
     download_bytes_limited,
     is_trusted_media_url,
 )
-from .sender import cleanup_source_message, send_preview_as_author
+from .sender import cleanup_source_message, send_preview_group
 from .text import extract_message_commentary
 
 logger = logging.getLogger("discord_digest_bot")
@@ -71,51 +69,12 @@ DEFAULT_HEADERS = {
 class FacebookPreview:
     embed: discord.Embed
     files: List[discord.File]
-    extra_text: Optional[str] = None
+    video_url: Optional[str] = None
+    image_urls: Optional[List[str]] = None
 
 
 class FacebookPreviewUnavailable(RuntimeError):
     """Facebook 頁面無法在不登入、不繞過限制的前提下建立預覽。"""
-
-
-class DeleteFacebookPreviewView(discord.ui.View):
-    """Facebook 預覽卡片的刪除控制元件。"""
-
-    def __init__(self, *, original_url: str, timeout: Optional[float] = DELETE_VIEW_TIMEOUT) -> None:
-        super().__init__(timeout=timeout)
-        self.message: Optional[discord.Message] = None
-        self.related_message_ids: List[int] = []
-        self.add_item(discord.ui.Button(label="原連結", style=discord.ButtonStyle.link, url=original_url))
-
-    @discord.ui.button(label="", style=discord.ButtonStyle.gray, emoji="🗑️")
-    async def delete_button(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:  # pragma: no cover
-        """刪除主預覽訊息與相關附件訊息。"""
-        try:
-            await interaction.response.send_message("預覽已刪除。", ephemeral=True)
-        except InteractionResponded:
-            pass
-
-        try:
-            await interaction.message.delete()
-        except (NotFound, HTTPException):
-            return
-
-        channel = getattr(interaction.message, "channel", None)
-        if channel and self.related_message_ids:
-            for message_id in list(self.related_message_ids):
-                try:
-                    related = await channel.fetch_message(message_id)
-                    await related.delete()
-                except (NotFound, HTTPException, AttributeError):
-                    continue
-
-    async def on_timeout(self) -> None:  # pragma: no cover
-        """逾時後移除操作按鈕，避免使用者誤觸失效控制項。"""
-        if self.message:
-            try:
-                await self.message.edit(view=None)
-            except (NotFound, HTTPException):
-                pass
 
 
 def extract_facebook_urls(content: str) -> List[str]:
@@ -146,37 +105,6 @@ def _is_facebook_url_spoilered(content: str, url: str) -> bool:
         if url in extract_facebook_urls(block):
             return True
     return False
-
-
-def _spoiler_wrap(text: str) -> str:
-    """用 Discord spoiler 標記包住文字。"""
-    if not text:
-        return text
-    return f"||{text}||"
-
-
-def _clone_files_as_spoiler(files: List[discord.File]) -> List[discord.File]:
-    """複製附件並強制設為 spoiler，避免重用原檔案指標出錯。"""
-    cloned: List[discord.File] = []
-    for file in files:
-        try:
-            file.fp.seek(0)
-            data = file.fp.read()
-            file.fp.seek(0)
-            filename = file.filename
-            if filename.startswith("SPOILER_"):
-                filename = filename[len("SPOILER_"):]
-            cloned.append(
-                discord.File(
-                    io.BytesIO(data),
-                    filename=filename,
-                    spoiler=True,
-                    description=file.description,
-                )
-            )
-        except Exception:
-            cloned.append(file)
-    return cloned
 
 
 def _extract_facebook_commentary(content: str, url: str) -> str:
@@ -406,25 +334,22 @@ async def build_facebook_preview(
     *,
     reupload_image: bool = True,
     max_images: int = 4,
-    allow_video_upload: bool = True,
     spoiler: bool = False,
 ) -> FacebookPreview:
-    """把 Facebook 網址轉成 Discord embed、附件與補充文字。"""
+    """取得 V2 所需文字、圖片附件與官方影片直連。"""
     title, description, image_urls, video_urls, final_url = await _fetch_og_data(url)
 
     embed = discord.Embed(
         title=(title or "Facebook 貼文")[:256],
-        description=description[:4096],
+        description=description,
         url=final_url,
     )
     embed.set_author(name="Facebook")
-    if spoiler and embed.description:
-        embed.description = _spoiler_wrap(embed.description)
 
     files: List[discord.File] = []
-    extra_lines: List[str] = []
+    external_images: List[str] = []
 
-    selected_image_urls = [url for url in image_urls if is_trusted_media_url(url)][:max(1, max_images)]
+    selected_image_urls = [url for url in image_urls if is_trusted_media_url(url)][:max(1, min(max_images, 4))]
     if selected_image_urls:
         if reupload_image:
             async with aiohttp.ClientSession(headers=DEFAULT_HEADERS) as session:
@@ -440,32 +365,33 @@ async def build_facebook_preview(
             else:
                 logger.info("Facebook images omitted after safe downloads rejected all candidates")
         else:
-            if not spoiler:
-                embed.set_image(url=selected_image_urls[0])
+            external_images = selected_image_urls
 
     video_urls = [url for url in video_urls if is_trusted_media_url(url)]
-    if video_urls:
-        mp4_urls = [u for u in video_urls if u.lower().endswith(".mp4")]
-        if allow_video_upload and mp4_urls:
-            async with aiohttp.ClientSession(headers=DEFAULT_HEADERS) as session:
-                video_data = await _download_bytes(
-                    session,
-                    mp4_urls[0],
-                    timeout_sec=40,
-                    max_bytes=MAX_VIDEO_DOWNLOAD_BYTES,
-                    media_type="video",
-                )
-            if video_data:
-                files.append(discord.File(io.BytesIO(video_data), filename="facebook_preview_video.mp4", spoiler=spoiler))
-            else:
-                extra_lines.append(f"影片連結：{mp4_urls[0]}")
-        else:
-            extra_lines.append(f"影片連結：{video_urls[0]}")
+    return FacebookPreview(
+        embed=embed, files=files, image_urls=external_images,
+        video_url=video_urls[0] if video_urls else None,
+    )
 
-    extra_text = "\n".join(extra_lines) if extra_lines else None
-    if spoiler and extra_text:
-        extra_text = _spoiler_wrap(extra_text)
-    return FacebookPreview(embed=embed, files=files, extra_text=extra_text)
+
+async def _send_facebook_preview(
+    message: discord.Message, preview: FacebookPreview, *, original_url: str, commentary: str, spoiler: bool
+) -> None:
+    from .preview_view import build_social_preview_views
+
+    views = build_social_preview_views(
+        original_url=original_url,
+        title=preview.embed.title or "Facebook",
+        author=preview.embed.author.name or "Facebook",
+        text=preview.embed.description or "",
+        commentary=commentary,
+        spoiler=spoiler,
+        timeout=DELETE_VIEW_TIMEOUT,
+        video_url=preview.video_url,
+        image_urls=preview.image_urls or [],
+        files=preview.files,
+    )
+    await send_preview_group(message, views)
 
 
 async def handle_facebook_in_message(message: discord.Message) -> bool:
@@ -488,95 +414,19 @@ async def handle_facebook_in_message(message: discord.Message) -> bool:
             url,
         )
 
-        if use_spoiler:
-            preview = await build_facebook_preview(
-                url,
-                reupload_image=True,
-                max_images=4,
-                allow_video_upload=True,
-                spoiler=False,
-            )
-
-            if preview.embed.description:
-                preview.embed.description = _spoiler_wrap(preview.embed.description)
-            else:
-                fallback_text = preview.embed.title or "Facebook 貼文"
-                preview.embed.description = _spoiler_wrap(fallback_text)
-            preview.embed.set_image(url=None)
-            content_lines = []
-            if user_commentary:
-                content_lines.append(user_commentary)
-            if preview.extra_text:
-                content_lines.append(_spoiler_wrap(preview.extra_text))
-            spoiler_content = "\n".join(content_lines) if content_lines else None
-
-            view = DeleteFacebookPreviewView(original_url=url)
-            sent = await send_preview_as_author(
-                message,
-                content=spoiler_content,
-                embed=preview.embed,
-                view=view,
-            )
-            view.message = sent
-
-            if preview.files:
-                spoiler_files = _clone_files_as_spoiler(preview.files)
-                attachment_message = await send_preview_as_author(message, files=spoiler_files)
-                view.related_message_ids.append(attachment_message.id)
-
-            await cleanup_source_message(message, platform="Facebook", url=url)
-            return True
-
         preview = await build_facebook_preview(
-            url,
-            reupload_image=True,
-            max_images=4,
-            allow_video_upload=True,
-            spoiler=False,
+            url, reupload_image=True, max_images=4, spoiler=use_spoiler,
         )
-        view = DeleteFacebookPreviewView(original_url=url)
-        reply_kwargs = {
-            "embed": preview.embed,
-            "mention_author": False,
-            "view": view,
-        }
-        content_lines = []
-        if user_commentary:
-            content_lines.append(user_commentary)
-        if preview.files:
-            reply_kwargs["files"] = preview.files
-        if preview.extra_text:
-            content_lines.append(preview.extra_text)
-        if content_lines:
-            reply_kwargs["content"] = "\n".join(content_lines)
-
-        sent = await send_preview_as_author(
-            message,
-            content=reply_kwargs.get("content"),
-            embed=reply_kwargs.get("embed"),
-            files=reply_kwargs.get("files"),
-            view=reply_kwargs.get("view"),
-        )
-        view.message = sent
-
-        await cleanup_source_message(message, platform="Facebook", url=url)
-
-        return True
     except Exception as exc:
         logger.error("Facebook 預覽失敗: %s", exc, exc_info=True)
-        description = FACEBOOK_INVALID_POST_MESSAGE
-        if use_spoiler:
-            description = _spoiler_wrap(description)
-
-        embed = discord.Embed(title="Facebook", description=description, url=url)
+        embed = discord.Embed(title="Facebook", description=FACEBOOK_INVALID_POST_MESSAGE, url=url)
         embed.set_author(name="Facebook")
-        view = DeleteFacebookPreviewView(original_url=url)
-        sent = await send_preview_as_author(
-            message,
-            content=user_commentary or None,
-            embed=embed,
-            view=view,
-        )
-        view.message = sent
-        await cleanup_source_message(message, platform="Facebook", url=url)
-        return True
+        preview = FacebookPreview(embed=embed, files=[])
+
+    # Sending errors leave the original message intact; do not replace a failed
+    # transmission with a misleading "Facebook unavailable" card.
+    await _send_facebook_preview(
+        message, preview, original_url=url, commentary=user_commentary, spoiler=use_spoiler,
+    )
+    await cleanup_source_message(message, platform="Facebook", url=url)
+    return True

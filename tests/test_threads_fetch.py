@@ -112,13 +112,14 @@ class ThreadsFetchTests(unittest.TestCase):
 
     def test_exhausted_page_budget_keeps_single_oembed_fallback(self):
         url = "https://www.threads.com/@demo/post/abc"
-        get = Mock(return_value=SimpleNamespace(status_code=503, url=url, text=""))
+        get = Mock(return_value=SimpleNamespace(status_code=503, url=url, text="", close=Mock()))
         with patch.dict("sys.modules", {"requests": SimpleNamespace(get=get)}), patch(
             "discord_bot.features.social_preview.threads_fetch.time.sleep"
         ):
             post = fetch_threads_post(url)
         self.assertEqual(post.debug["requests_attempts"], 6)
-        self.assertEqual(get.call_count, 7)
+        self.assertEqual(get.call_count, 8)  # Six page attempts + one embed + one oEmbed.
+        self.assertEqual(get.call_args_list[-2].args[0], url + "/embed")
         self.assertIn("/oembed?", get.call_args.args[0])
 
     def test_normal_variants_still_try_all_user_agents(self):
@@ -543,7 +544,8 @@ class ThreadsFetchTests(unittest.TestCase):
             ],
         )
 
-        post = fetch_threads_post(url)
+        with patch("discord_bot.features.social_preview.threads_fetch._try_embed_fill"):
+            post = fetch_threads_post(url)
 
         mock_try_oembed_fill.assert_not_called()
         self.assertEqual(post.media, [])
@@ -559,7 +561,8 @@ class ThreadsFetchTests(unittest.TestCase):
         url = "https://www.threads.com/@andy__meme/post/DWTm_hcFNwi"
         mock_try_requests.return_value = ThreadsPost(url=url, text="這篇只有文字")
 
-        post = fetch_threads_post(url)
+        with patch("discord_bot.features.social_preview.threads_fetch._try_embed_fill"):
+            post = fetch_threads_post(url)
 
         mock_try_oembed_fill.assert_called_once_with(mock_try_requests.return_value, allow_thumbnail=False)
         self.assertEqual(post.media, [])
@@ -588,7 +591,8 @@ class ThreadsFetchTests(unittest.TestCase):
 
         mock_try_oembed_fill.side_effect = fill_with_avatar
 
-        post = fetch_threads_post(url)
+        with patch("discord_bot.features.social_preview.threads_fetch._try_embed_fill"):
+            post = fetch_threads_post(url)
 
         mock_try_oembed_fill.assert_called_once()
         self.assertEqual(post.media, [])
