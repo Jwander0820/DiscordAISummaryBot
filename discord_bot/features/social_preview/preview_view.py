@@ -7,6 +7,7 @@ import discord
 from discord.errors import HTTPException, NotFound
 
 from .sender import delete_preview_messages
+from .text import TextSpan, coalesce_text_spans
 
 
 MAX_TEXT_UNITS = 4000
@@ -33,15 +34,41 @@ def _take_text(text: str, budget: int) -> tuple[str, str]:
     return text, ""
 
 
-def _take_body(text: str, budget: int, spoiler: bool) -> tuple[str, str]:
+def _take_escaped_text(text: str, budget: int) -> tuple[str, str]:
     """Split prepared text without breaking an escape before the closing mask."""
     part, rest = _take_text(text, budget)
-    if not spoiler or not part:
-        return part, rest
     trailing_slashes = len(part) - len(part.rstrip("\\"))
     if trailing_slashes % 2:
         part, rest = part[:-1], part[-1:] + rest
+    return part, rest
+
+
+def _take_body(text: str, budget: int, spoiler: bool) -> tuple[str, str]:
+    if not spoiler:
+        return _take_text(text, budget)
+    part, rest = _take_escaped_text(text, budget)
     return (f"||{part}||" if part else ""), rest
+
+
+def _span_body_pages(spans: Sequence[TextSpan], first_budget: int, page_budget: int) -> list[str]:
+    """Close native masks on every page, counting escapes and mask delimiters."""
+    pages, parts = [], []
+    remaining = first_budget
+    for span in coalesce_text_spans(spans):
+        text = discord.utils.escape_markdown(span.text, ignore_links=False)
+        while text:
+            capacity = remaining - (4 if span.spoiler else 0)
+            if capacity < 2:
+                pages.append("".join(parts))
+                parts, remaining = [], page_budget
+                continue
+            part, text = _take_escaped_text(text, capacity)
+            rendered = f"||{part}||" if span.spoiler else part
+            parts.append(rendered)
+            remaining -= _text_units(rendered)
+    if parts or not pages:
+        pages.append("".join(parts))
+    return pages
 
 
 class SocialPreviewView(discord.ui.LayoutView):
@@ -56,6 +83,7 @@ class SocialPreviewView(discord.ui.LayoutView):
         text: str = "",
         video_url: Optional[str] = None,
         media_urls: Sequence[str] = (),
+        media_spoilers: Optional[Sequence[bool]] = None,
         files: Sequence[discord.File] = (),
         spoiler: bool = False,
         timeout: Optional[float] = None,
@@ -64,6 +92,8 @@ class SocialPreviewView(discord.ui.LayoutView):
         self.files = list(files)
         self.message: Optional[discord.Message] = None
         self.related_message_ids: list[int] = []
+        if media_spoilers is not None and len(media_spoilers) != len(media_urls):
+            raise ValueError("Media spoiler flags must match the gallery items")
 
         if commentary:
             self.add_item(discord.ui.TextDisplay(commentary))
@@ -77,7 +107,8 @@ class SocialPreviewView(discord.ui.LayoutView):
                 card.add_item(discord.ui.TextDisplay(text))
             if media_urls:
                 card.add_item(discord.ui.MediaGallery(*(
-                    discord.MediaGalleryItem(media=url, spoiler=spoiler) for url in media_urls
+                    discord.MediaGalleryItem(media=url, spoiler=spoiler or bool(media_spoilers and media_spoilers[index]))
+                    for index, url in enumerate(media_urls)
                 )))
             self.add_item(card)
 
@@ -123,6 +154,8 @@ def build_social_preview_views(
     image_urls: Sequence[str] = (),
     files: Sequence[discord.File] = (),
     media_urls: Optional[Sequence[str]] = None,
+    media_spoilers: Optional[Sequence[bool]] = None,
+    text_spans: Optional[Sequence[TextSpan]] = None,
 ) -> list[SocialPreviewView]:
     """Split text without truncation and attach media to the main card only."""
     header = "\n".join(
@@ -133,10 +166,14 @@ def build_social_preview_views(
     )
     # Force one body mask, regardless of existing spoiler/code Markdown. Escape
     # before splitting so each page can independently close its spoiler safely.
+    if text_spans is not None:
+        text = "".join(span.text for span in text_spans)
     if spoiler:
         text = discord.utils.escape_markdown(text, ignore_links=False)
     body_budget = MAX_TEXT_UNITS - _text_units(header) - (4 if spoiler else 0)
-    if body_budget < 2:
+    native_spans = text_spans if text_spans is not None and not spoiler else None
+    minimum_body = 6 if native_spans is not None else 2
+    if body_budget < minimum_body:
         raise ValueError("Preview author and title exceed the component text budget")
 
     if media_urls is None:
@@ -150,17 +187,24 @@ def build_social_preview_views(
 
     views = []
     # Put overflowing commentary before the main card, preserving its order.
-    while _text_units(commentary) > body_budget - 2:
+    while _text_units(commentary) > body_budget - minimum_body:
         part, commentary = _take_text(commentary, MAX_TEXT_UNITS)
         views.append(SocialPreviewView(original_url=original_url, commentary=part, timeout=timeout))
 
-    part, rest = _take_body(text, body_budget - _text_units(commentary), spoiler)
+    first_budget = body_budget - _text_units(commentary)
+    if native_spans is not None:
+        bodies = _span_body_pages(native_spans, first_budget, body_budget)
+    else:
+        part, rest = _take_body(text, first_budget, spoiler)
+        bodies = [part]
+        while rest:
+            part, rest = _take_body(rest, body_budget, spoiler)
+            bodies.append(part)
     views.append(SocialPreviewView(
-        original_url=original_url, video_url=video_url, header=header, text=part,
-        commentary=commentary, spoiler=spoiler, timeout=timeout, media_urls=media_urls, files=files,
+        original_url=original_url, video_url=video_url, header=header, text=bodies[0],
+        commentary=commentary, spoiler=spoiler, timeout=timeout, media_urls=media_urls, files=files, media_spoilers=media_spoilers,
     ))
-    while rest:
-        part, rest = _take_body(rest, body_budget, spoiler)
+    for part in bodies[1:]:
         views.append(SocialPreviewView(
             original_url=original_url, header=header, text=part, spoiler=spoiler, timeout=timeout,
         ))

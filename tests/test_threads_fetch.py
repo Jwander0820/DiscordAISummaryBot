@@ -326,7 +326,8 @@ class ThreadsFetchTests(unittest.TestCase):
         found = _extract_dom_text(post, soup)
 
         self.assertTrue(found)
-        self.assertEqual(post.text, "前半段 ||雷文|| 後半段")
+        self.assertEqual(post.text, "前半段 雷文 後半段")
+        self.assertEqual([(s.text, s.spoiler) for s in post.text_spans], [("前半段 ", False), ("雷文", True), (" 後半段", False)])
 
     def test_extract_dom_text_skips_inline_translate_control(self):
         translate_button = FakeNode("span", {"role": "button"}, ["Translate"])

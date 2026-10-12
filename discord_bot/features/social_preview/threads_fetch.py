@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
 from urllib.parse import parse_qs, unquote, urljoin, urlparse, urlunparse, urlencode
 
+from .text import TextSpan, coalesce_text_spans, trim_text_spans
+
 # =============== 配置 ===============
 REQUEST_TIMEOUT = 15
 RETRY = 2
@@ -57,6 +59,7 @@ class ThreadsMedia:
     height: Optional[int] = None
     alt: Optional[str] = None
     mime: Optional[str] = None
+    spoiler: bool = False
 
 
 @dataclass
@@ -70,6 +73,7 @@ class ThreadsPost:
     oembed_html: Optional[str] = None
     preview_error: Optional[str] = None
     debug: Dict[str, Any] = field(default_factory=dict)
+    text_spans: Optional[List[TextSpan]] = None
 
 
 # =============== 小工具 ===============
@@ -236,8 +240,10 @@ def _append_media_unique(lst: List[ThreadsMedia], item: ThreadsMedia):
         return False
     if _is_probable_profile_image(item):
         return False
-    if any(m.url == item.url for m in lst):
-        return False
+    for existing in lst:
+        if existing.url == item.url:
+            existing.spoiler = existing.spoiler or item.spoiler
+            return False
     lst.append(item)
     return True
 
@@ -401,8 +407,35 @@ def _best_structured_image(node: dict) -> Optional[ThreadsMedia]:
     return max(images, key=lambda item: (item.width or 0) * (item.height or 0)) if images else None
 
 
+def _structured_media_spoiler(node: dict) -> bool:
+    info = node.get("text_post_app_info")
+    return (node.get("is_spoiler_media") is True or
+            isinstance(info, dict) and info.get("is_spoiler_media") is True)
+
+
+def _structured_spoiler_spans(node: dict) -> Optional[List[TextSpan]]:
+    info = node.get("text_post_app_info")
+    fragments = info.get("text_fragments") if isinstance(info, dict) else None
+    fragments = fragments.get("fragments") if isinstance(fragments, dict) else None
+    if not isinstance(fragments, list):
+        return None
+    def protected(fragment):
+        style = fragment.get("styling_info") if isinstance(fragment, dict) else None
+        return isinstance(style, dict) and style.get("is_spoiler") is True
+    if not any(protected(fragment) for fragment in fragments):
+        return None
+    caption = node.get("caption")
+    caption = caption.get("text") if isinstance(caption, dict) else caption
+    if all(isinstance(fragment, dict) and isinstance(fragment.get("plaintext"), str) for fragment in fragments):
+        spans = trim_text_spans([TextSpan(fragment["plaintext"], protected(fragment)) for fragment in fragments])
+        if not isinstance(caption, str) or "".join(span.text for span in spans) == caption.strip():
+            return spans
+    # An incomplete set of known spoiler fragments must not expose the caption.
+    return [TextSpan(caption.strip(), True)] if isinstance(caption, str) and caption.strip() else None
+
+
 def _extract_structured_media(post: ThreadsPost, soup: Any) -> List[ThreadsMedia]:
-    """Read renditions/carousels belonging to the target post and its linked IG media."""
+    """Read target-bound media and native text spoilers, including linked IG media."""
     target = _post_code(post.url)
     media: List[ThreadsMedia] = []
     if not target:
@@ -410,14 +443,14 @@ def _extract_structured_media(post: ThreadsPost, soup: Any) -> List[ThreadsMedia
     remaining_nodes = 20000
     media_keys = {"video_versions", "playable_url", "video_url", "carousel_media", "image_versions2", "image_versions", "text_post_app_info"}
 
-    def visit(node, owner=None, depth=0, attached_media=False, in_post_info=False, image_attachment=False):
+    def visit(node, owner=None, depth=0, attached_media=False, in_post_info=False, image_attachment=False, spoiler=False):
         nonlocal remaining_nodes
         if remaining_nodes <= 0 or depth > 40:
             return
         remaining_nodes -= 1
         if isinstance(node, list):
             for child in node:
-                visit(child, owner, depth + 1, attached_media, in_post_info, image_attachment)
+                visit(child, owner, depth + 1, attached_media, in_post_info, image_attachment, spoiler)
             return
         if not isinstance(node, dict):
             return
@@ -430,6 +463,12 @@ def _extract_structured_media(post: ThreadsPost, soup: Any) -> List[ThreadsMedia
         user = node.get("user") or {}
         if owner == target and isinstance(user, dict) and user.get("is_private") is True:
             return
+        if identity == target and post.text_spans is None:
+            spans = _structured_spoiler_spans(node)
+            if spans:
+                post.text_spans = spans
+                post.text = "".join(span.text for span in spans)
+        spoiler = owner == target and (spoiler or _structured_media_spoiler(node))
         children = node.get("carousel_media")
         has_carousel = isinstance(children, list) and bool(children)
         if owner == target and not has_carousel:
@@ -449,12 +488,14 @@ def _extract_structured_media(post: ThreadsPost, soup: Any) -> List[ThreadsMedia
                 (v for key in ("playable_url", "video_url") if (v := _direct_video(node.get(key)))), None
             )
             if video:
+                video.spoiler = spoiler
                 _append_media_unique(media, video)
             # Images must be on the post itself or an explicit carousel/linked
             # attachment node, not an arbitrary descendant that inherited owner.
             elif identity == target or image_attachment:
                 image = _best_structured_image(node)
                 if image:
+                    image.spoiler = spoiler
                     _append_media_unique(media, image)
         for key, child in node.items():
             if key in {"video_versions", "playable_url", "video_url", "image_versions", "image_versions2", "author", "owner", "profile", "user"}:
@@ -466,11 +507,11 @@ def _extract_structured_media(post: ThreadsPost, soup: Any) -> List[ThreadsMedia
             visit(child, None if boundary else owner, depth + 1,
                   not boundary and (attached_media or key == "carousel_media" or linked_inline),
                   key == "text_post_app_info" and owner == target and not boundary,
-                  not boundary and (key == "carousel_media" or linked_inline))
+                  not boundary and (key == "carousel_media" or linked_inline), spoiler if not boundary else False)
 
     for script in soup.find_all("script", attrs={"type": "application/json"}):
         raw = script.string or ""
-        if len(raw) > MAX_EMBED_HTML_BYTES or not any(key in raw for key in ("video_versions", "playable_url", "video_url", "image_versions")):
+        if len(raw) > MAX_EMBED_HTML_BYTES or not any(key in raw for key in ("video_versions", "playable_url", "video_url", "image_versions", "text_fragments")):
             continue
         try:
             visit(json.loads(raw))
@@ -547,29 +588,50 @@ def _extract_dom_media(post: ThreadsPost, soup: Any) -> bool:
     found = False
     seen_videos = set()
 
-    def append_video(tag):
+    def native_spoiler(tag, scope):
+        # The exact official wrapper/overlay pair applies only to this media.
+        current = tag
+        while current is not None:
+            if ("BlurredMediaContainer" in (current.get("class") or [])
+                    and current.select_one(".SpoilerOverlay") is not None):
+                return True
+            if current is scope:
+                break
+            current = current.parent
+        return False
+
+    def append_video(tag, scope=None):
         nonlocal found
         if id(tag) in seen_videos:
             return
         seen_videos.add(id(tag))
         candidates = [tag.get("src")] + [source.get("src") for source in tag.find_all("source")]
         video = next((item for raw in candidates if (item := _direct_video(raw))), None)
+        if video and scope is not None:
+            video.spoiler = native_spoiler(tag, scope)
         if video and _append_media_unique(post.media, video):
             found = True
 
     for scope in scopes:
         for node in scope.find_all(["img", "video"]):
             if node.name == "video":
-                append_video(node)
+                append_video(node, scope)
             elif node.find_parent("video") is None:
                 media_url = _best_image_url_from_tag(node)
                 if media_url and _append_media_unique(post.media, ThreadsMedia(
-                    "image", media_url, _safe_int(node.get("width")), _safe_int(node.get("height")), node.get("alt")
+                    "image", media_url, _safe_int(node.get("width")), _safe_int(node.get("height")), node.get("alt"),
+                    spoiler=native_spoiler(node, scope),
                 )):
                     found = True
 
     # Keep the existing src-based fallback for official download controls.
     for node in soup.find_all(src=True):
+        embed = node.find_parent(class_="Embed")
+        if embed is not None and not any(_post_code(link.get("href")) == target for link in embed.select(".LinkContainer a[href]")):
+            continue
+        owner_link = node.find_parent("a", href=media_link_re)
+        if owner_link is not None and _post_code(urljoin(post.url, owner_link.get("href")).split("/media", 1)[0]) != target:
+            continue
         video_tag = node if node.name == "video" else node.find_parent("video")
         if video_tag is not None:
             append_video(video_tag)
@@ -708,62 +770,54 @@ def _has_dir_auto_ancestor(node: Any) -> bool:
 
 
 def _is_probable_spoiler_node(node: Any) -> bool:
-    """用 aria/class/style 啟發式判斷節點是否帶 spoiler 效果。"""
+    """Read explicit spoiler markers, not ordinary clipping/visibility styles."""
+    if _attr_text(_node_get(node, "data-text-fragment")) == "spoiler":
+        return True
     spoiler_tokens = [
         "spoiler",
         "劇透",
         "防雷",
         "tap to reveal",
         "show spoiler",
-        "reveal",
     ]
-    style_tokens = ["blur", "mask", "filter", "hidden"]
 
     for attr in ("aria-label", "title", "data-testid", "data-visualcompletion", "class"):
         value = _attr_text(_node_get(node, attr))
         if value and any(token in value for token in spoiler_tokens):
             return True
 
-    style = _attr_text(_node_get(node, "style"))
-    if style and any(token in style for token in style_tokens):
-        return True
-
     return False
 
 
-def _render_text_subtree(node: Any, *, spoiler_active: bool = False) -> str:
-    """遞迴渲染正文子樹，保留換行並盡量維持 spoiler 區塊。"""
+def _render_text_spans(node: Any, *, spoiler_active: bool = False) -> List[TextSpan]:
+    """Keep native ranges as data; the Discord view owns Markdown escaping."""
     if isinstance(node, str):
-        return html.unescape(node)
+        text = re.sub(r"[ \t\r\f\v]+", " ", html.unescape(node).replace("\xa0", " "))
+        return [TextSpan(text, spoiler_active)]
 
     name = _node_name(node)
     if name == "br":
-        return "\n"
+        return [TextSpan("\n", spoiler_active)]
     if _is_interactive_node(node):
-        return ""
+        # A native spoiler's reveal button wraps the actual text fragment.
+        children = [child for child in _node_children(node)
+                    if _attr_text(_node_get(child, "data-text-fragment")) == "spoiler"]
+        if _attr_text(_node_get(node, "data-text-fragment")) != "spoiler":
+            return coalesce_text_spans([span for child in children for span in _render_text_spans(child)])
 
     node_is_spoiler = _is_probable_spoiler_node(node)
     next_spoiler_state = spoiler_active or node_is_spoiler
 
-    parts: List[str] = []
+    parts: List[TextSpan] = []
     for child in _node_children(node):
-        rendered = _render_text_subtree(child, spoiler_active=next_spoiler_state)
-        if rendered:
-            parts.append(rendered)
+        parts.extend(_render_text_spans(child, spoiler_active=next_spoiler_state))
+    return coalesce_text_spans(parts)
 
-    text = "".join(parts)
-    text = text.replace("\xa0", " ")
-    text = re.sub(r"[ \t\r\f\v]+", " ", text)
-    text = re.sub(r" *\n *", "\n", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
 
-    if node_is_spoiler and not spoiler_active:
-        stripped = text.strip()
-        if stripped:
-            return f"||{stripped}||"
-        return ""
-
-    return text
+def _render_text_subtree(node: Any, *, spoiler_active: bool = False) -> str:
+    """Compatibility renderer for callers needing Markdown rather than spans."""
+    return "".join(f"||{span.text}||" if span.spoiler else span.text
+                   for span in _render_text_spans(node, spoiler_active=spoiler_active))
 
 
 def _extract_dom_text(post: ThreadsPost, soup: Any) -> bool:
@@ -774,6 +828,7 @@ def _extract_dom_text(post: ThreadsPost, soup: Any) -> bool:
         if isinstance(token, str) and token.strip()
     }
     text_blocks: List[str] = []
+    text_spans: List[TextSpan] = []
     seen_plain_blocks = set()
 
     for node in soup.select("span[dir='auto']"):
@@ -789,9 +844,8 @@ def _extract_dom_text(post: ThreadsPost, soup: Any) -> bool:
         if plain_filter_text.lower().lstrip("@") in author_tokens:
             continue
 
-        rendered = _render_text_subtree(node).strip()
-        rendered = re.sub(r" *\n *", "\n", rendered)
-        rendered = re.sub(r"\n{3,}", "\n\n", rendered)
+        spans = trim_text_spans(_render_text_spans(node))
+        rendered = "".join(span.text for span in spans)
         plain_rendered = re.sub(r"\s+", " ", _strip_spoiler_markup(rendered)).strip()
         if not plain_rendered or _looks_like_ui_text(plain_rendered):
             continue
@@ -801,10 +855,15 @@ def _extract_dom_text(post: ThreadsPost, soup: Any) -> bool:
             continue
 
         seen_plain_blocks.add(plain_rendered)
+        if text_blocks:
+            text_spans.append(TextSpan("\n"))
+        text_spans.extend(spans)
         text_blocks.append(rendered)
 
     if text_blocks:
         post.text = "\n".join(text_blocks)
+        if any(span.spoiler for span in text_spans):
+            post.text_spans = coalesce_text_spans(text_spans)
         return True
 
     return False
@@ -901,11 +960,28 @@ def _parse_html(url: str, html_text: str) -> ThreadsPost:
 
     dom_post = ThreadsPost(url=url)
     if _extract_dom_media(dom_post, soup):
-        post.media.extend(dom_post.media)
+        for item in dom_post.media:
+            _append_media_unique(post.media, item)
         explicit_media_found = True
 
-    if not post.text:
-        _extract_dom_text(post, soup)
+    # An embed's permalink binds its caption; native ranges beat flat metadata.
+    for root in soup.select(".Embed"):
+        if not any(_post_code(link.get("href")) == _post_code(url) for link in root.select(".LinkContainer a[href]")):
+            continue
+        caption = root.select_one(".BodyTextContainer")
+        if caption is not None and post.text_spans is None:
+            spans = trim_text_spans(_render_text_spans(caption))
+            protected = any(span.spoiler for span in spans)
+            if spans and (protected or not post.text):
+                post.text = "".join(span.text for span in spans)
+                post.text_spans = spans if protected else None
+        break
+    if post.text_spans is None:
+        dom_text = ThreadsPost(url=url, author_username=post.author_username, author_name=post.author_name)
+        if _extract_dom_text(dom_text, soup):
+            same_text = " ".join((post.text or "").split()) == " ".join((dom_text.text or "").split())
+            if not post.text or (dom_text.text_spans and same_text):
+                post.text, post.text_spans = dom_text.text, dom_text.text_spans
 
     # __NEXT_DATA__ 或其他 script（某些版本會塞不同 id）
     next_node = soup.find("script", id="__NEXT_DATA__")
@@ -962,7 +1038,7 @@ def _parse_html(url: str, html_text: str) -> ThreadsPost:
             mime = _video_mime_from_url(u)
             _append_media_unique(post.media, ThreadsMedia("video", u, mime=mime))
 
-    if post.text:
+    if post.text and post.text_spans is None:
         post.text = html.unescape(post.text).strip()
 
     if structured_media:
@@ -1095,10 +1171,13 @@ def _try_embed_fill(post: ThreadsPost):
         if video:
             post.media = embedded.media
             post.debug["video_source"] = "official_embed"
-        if not post.text:
-            caption = root.select_one(".BodyTextContainer")
-            if caption:
-                post.text = _render_text_subtree(caption).strip() or None
+        else:
+            for item in post.media:
+                for candidate in embedded.media:
+                    if item.type == candidate.type and (item.url == candidate.url or len(post.media) == len(embedded.media) == 1):
+                        item.spoiler = item.spoiler or candidate.spoiler
+        if embedded.text_spans or not post.text:
+            post.text, post.text_spans = embedded.text, embedded.text_spans
         if not post.author_username:
             post.author_username = embedded.author_username
         if not post.author_name:

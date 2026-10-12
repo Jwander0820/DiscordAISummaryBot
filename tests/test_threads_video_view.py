@@ -17,6 +17,7 @@ if importlib.util.find_spec("discord") is None or importlib.util.find_spec("aioh
 import discord
 from discord_bot.features.social_preview import threads_preview as preview_module
 from discord_bot.features.social_preview.threads_fetch import ThreadsMedia, ThreadsPost
+from discord_bot.features.social_preview.text import TextSpan
 
 load_tests = isolated_discord_suite(__name__)
 
@@ -123,6 +124,83 @@ class SocialPreviewViewTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(card.spoiler)
         self.assertIn(body, [item.content for item in card.children if isinstance(item, discord.ui.TextDisplay)])
         self.assertTrue(all(not item.spoiler for item in media_items(view)))
+
+    def test_native_spans_and_individual_media_flags_serialize_with_manual_override(self):
+        spans = [TextSpan("公開 "), TextSpan("雷文 `code` ||字面符號||", True), TextSpan(" 尾段")]
+        urls = ["https://scontent.cdninstagram.com/public.jpg", VIDEO_URL]
+        for manual in (False, True):
+            with self.subTest(manual=manual):
+                view, = make_views(text_spans=spans, media_urls=urls, media_spoilers=[False, True], spoiler=manual)
+                with handle_message_parameters(view=view, allowed_mentions=discord.AllowedMentions.none()) as params:
+                    card = next(c for c in params.payload["components"] if c["type"] == 17)
+                    self.assertFalse(card["spoiler"])
+                    self.assertIn("Threads", card["components"][0]["content"])
+                    body = card["components"][1]["content"]
+                    self.assertEqual(body, r"||公開 雷文 \`code\` \|\|字面符號\|\| 尾段||" if manual else
+                                     r"公開 ||雷文 \`code\` \|\|字面符號\|\||| 尾段")
+                    gallery = next(c for c in card["components"] if c["type"] == 12)
+                    self.assertEqual([m["spoiler"] for m in gallery["items"]], [manual, True])
+
+    def test_native_mask_is_closed_on_each_page_and_public_text_stays_public(self):
+        spans = [TextSpan("公開😀" * 1400), TextSpan("隱藏\\`||😀\n" * 1600, True), TextSpan("公開結尾" * 1400)]
+        expected = [(char, span.spoiler) for span in spans for char in span.text]
+        views = make_views(text_spans=spans, commentary="評" * 3990, media_urls=[VIDEO_URL], media_spoilers=[True])
+        actual = []
+        for view in views:
+            texts = [item.content for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay)]
+            self.assertLessEqual(sum(len(t.encode("utf-16-le")) // 2 for t in texts), 4000)
+            for card in (item for item in view.children if isinstance(item, discord.ui.Container)):
+                for item in card.children[1:]:
+                    if not isinstance(item, discord.ui.TextDisplay):
+                        continue
+                    text, index, masked = item.content, 0, False
+                    while index < len(text):
+                        if text[index] == "\\":
+                            actual.append((text[index + 1], masked))
+                            index += 2
+                        elif text[index:index + 2] == "||":
+                            masked = not masked
+                            index += 2
+                        else:
+                            actual.append((text[index], masked))
+                            index += 1
+                    self.assertFalse(masked, "Each page must close its own native spoiler")
+        self.assertEqual(actual, expected)
+        self.assertEqual(sum(len(media_items(view)) for view in views), 1)
+
+    def test_native_media_flags_must_match_media_items(self):
+        with self.assertRaisesRegex(ValueError, "flags must match"):
+            make_views(media_spoilers=[])
+
+    @patch.object(preview_module, "cleanup_source_message", new_callable=AsyncMock)
+    @patch("discord_bot.features.social_preview.sender.send_preview_as_author", new_callable=AsyncMock)
+    @patch.object(preview_module, "_download_bytes", new_callable=AsyncMock)
+    @patch.object(preview_module.asyncio, "to_thread")
+    async def test_native_source_fixtures_reach_discord_with_correct_masks(self, fetch, download, send, cleanup):
+        from tests.test_threads_spoilers import VIDEO_HTML, TEXT_HTML, VIDEO_URL as post_video_url, TEXT_URL
+        from discord_bot.features.social_preview.threads_fetch import _parse_html
+        for url, fixture in ((post_video_url, VIDEO_HTML), (TEXT_URL, TEXT_HTML)):
+            for manual in (False, True):
+                with self.subTest(url=url, manual=manual):
+                    post = _parse_html(url, fixture)
+                    fetch.return_value = post
+                    download.return_value = b"synthetic image"
+                    send.return_value = types.SimpleNamespace(id=123)
+                    source = make_source("評論 " + (f"||{url}||" if manual else url))
+                    self.assertTrue(await preview_module.handle_threads_in_message(source))
+                    view = send.await_args.kwargs["view"]
+                    card = next(c for c in view.children if isinstance(c, discord.ui.Container))
+                    body = card.children[1].content
+                    self.assertFalse(card.spoiler)
+                    if url == post_video_url:
+                        self.assertEqual(body, "||公開影片說明||" if manual else "公開影片說明")
+                    else:
+                        self.assertEqual(body, "||公開第一行\n隱藏一\n公開第二行 😀\n隱藏二||" if manual else
+                                         "公開第一行\n||隱藏一||\n公開第二行 😀\n||隱藏二||")
+                        self.assertEqual(send.await_args.kwargs["files"][0].spoiler, manual)
+                    self.assertEqual([m.spoiler for m in media_items(view)], [manual or url == post_video_url])
+                    self.assertEqual(view.children[0].content, "評論")
+                    self.assertIn(url, [b.url for b in view.walk_children() if isinstance(b, discord.ui.Button)])
 
     def test_manual_spoiler_closes_safely_across_escape_and_emoji_page_boundaries(self):
         baseline, = make_views(text="", commentary="", spoiler=True)

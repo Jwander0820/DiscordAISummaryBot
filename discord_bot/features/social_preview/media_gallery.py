@@ -19,6 +19,7 @@ class PreparedGallery:
     files: list[discord.File] = field(default_factory=list)
     image_urls: list[str] = field(default_factory=list)
     video_url: str | None = None
+    media_spoilers: list[bool] = field(default_factory=list)
 
 
 def select_media(items, limit=MAX_PREVIEW_MEDIA):
@@ -51,12 +52,15 @@ async def prepare_gallery(session, items, *, downloader, prefix, spoiler=False, 
     remaining = MAX_GALLERY_BYTES
     try:
         for index, item in enumerate(select_media(items, limit), start=1):
+            item_spoiler = bool(spoiler or getattr(item, "spoiler", False))
             if item.type == "video":
                 result.media_urls.append(item.url)
+                result.media_spoilers.append(item_spoiler)
                 result.video_url = result.video_url or item.url
                 continue
             if not reupload_images:
                 result.media_urls.append(item.url)
+                result.media_spoilers.append(item_spoiler)
                 result.image_urls.append(item.url)
                 continue
             if remaining <= 0:
@@ -66,9 +70,10 @@ async def prepare_gallery(session, items, *, downloader, prefix, spoiler=False, 
             if not data or len(data) > budget:
                 continue
             remaining -= len(data)
-            file = discord.File(io.BytesIO(data), filename=f"{prefix}_{index}.jpg", spoiler=spoiler)
+            file = discord.File(io.BytesIO(data), filename=f"{prefix}_{index}.jpg", spoiler=item_spoiler)
             result.files.append(file)
             result.media_urls.append(f"attachment://{file.filename}")
+            result.media_spoilers.append(item_spoiler)
         return result
     except BaseException:
         for file in result.files:

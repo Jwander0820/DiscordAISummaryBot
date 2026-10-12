@@ -21,6 +21,22 @@ def media_items(view):
 
 
 class MediaGalleryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_native_spoiler_flags_stay_aligned_when_image_download_fails(self):
+        items = [ThreadsMedia("image", IMAGES[0], spoiler=True), ThreadsMedia("image", IMAGES[1]),
+                 ThreadsMedia("video", VIDEOS[0], spoiler=True), ThreadsMedia("image", IMAGES[2], spoiler=True)]
+        download = AsyncMock(side_effect=[None, b"public", b"protected"])
+        result = await gallery.prepare_gallery(None, items, downloader=download, prefix="native")
+        self.assertEqual(result.media_spoilers, [False, True, True])
+        self.assertEqual(result.media_urls, ["attachment://native_2.jpg", VIDEOS[0], "attachment://SPOILER_native_4.jpg"])
+        self.assertEqual([f.spoiler for f in result.files], [False, True])
+        self.assertEqual([c.args[1] for c in download.await_args_list], [IMAGES[0], IMAGES[1], IMAGES[2]])
+        for file in result.files:
+            file.close()
+        result = await gallery.prepare_gallery(None, items, downloader=AsyncMock(), prefix="native", reupload_images=False)
+        self.assertEqual(result.media_spoilers, [True, False, True, True])
+        result = await gallery.prepare_gallery(None, items, downloader=AsyncMock(), prefix="native", reupload_images=False, spoiler=True)
+        self.assertEqual(result.media_spoilers, [True] * 4)
+
     async def test_media_only_cards_skip_body_and_all_platforms_share_one_activity_log(self):
         for module, post_class, media_class, platform, url in [
             (threads_preview, ThreadsPost, ThreadsMedia, "threads", "https://www.threads.com/@asca_jp/post/DeZM55BjZt_"),

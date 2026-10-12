@@ -35,7 +35,7 @@ from .download import (
 )
 from .sender import cleanup_source_message, log_preview_link, send_preview_group
 from .media_gallery import prepare_gallery
-from .text import extract_message_commentary
+from .text import TextSpan, extract_message_commentary
 
 
 THREADS_URL_RE = re.compile(
@@ -83,6 +83,8 @@ class PreviewResult:
     inline_video_url: Optional[str] = None
     image_urls: Optional[List[str]] = None
     media_urls: Optional[List[str]] = None
+    media_spoilers: Optional[List[bool]] = None
+    text_spans: Optional[List[TextSpan]] = None
 
 
 # --- URL 擷取 ---
@@ -215,6 +217,8 @@ async def build_threads_preview(
 
     # V2 references the URL as media, so the message-content limit does not apply.
     inline_video_url = gallery.video_url if not spoiler else None
+    if inline_video_url and gallery.media_spoilers[gallery.media_urls.index(inline_video_url)]:
+        inline_video_url = None
     return PreviewResult(
         embed=embed,
         files=gallery.files,
@@ -222,6 +226,8 @@ async def build_threads_preview(
         inline_video_url=inline_video_url,
         image_urls=gallery.image_urls,
         media_urls=gallery.media_urls,
+        media_spoilers=gallery.media_spoilers,
+        text_spans=post.text_spans,
     )
 
 
@@ -243,6 +249,8 @@ async def _send_threads_preview(
         image_urls=preview.image_urls or ([image_url] if image_url and not preview.files else []),
         files=preview.files,
         media_urls=preview.media_urls,
+        media_spoilers=preview.media_spoilers,
+        text_spans=preview.text_spans,
     )
     await send_preview_group(message, views)
 

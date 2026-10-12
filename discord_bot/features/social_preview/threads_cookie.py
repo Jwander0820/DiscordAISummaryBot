@@ -14,6 +14,7 @@ from .threads_fetch import (
     THREADS_RE, THREADS_REDIRECT_STATUSES, UA_MOBILE, ThreadsPost,
     _append_media_unique, _best_structured_image, _direct_video, _has_only_fallback_media, _parse_html,
     _post_code, _strip_tracking_query, _structured_page_error,
+    _structured_media_spoiler, _structured_spoiler_spans,
 )
 
 logger = logging.getLogger("discord_digest_bot")
@@ -67,9 +68,12 @@ def _read_post_node(url: str, node: dict, *, json_ld: bool) -> ThreadsPost:
         caption = caption.get("text")
     if isinstance(caption, str):
         post.text = html.unescape(caption).strip() or None
+    post.text_spans = _structured_spoiler_spans(node)
+    if post.text_spans:
+        post.text = "".join(span.text for span in post.text_spans)
     media_nodes = []
 
-    def add_media(media, depth=0):
+    def add_media(media, depth=0, spoiler=False):
         # Only this explicit attachment edge is traversed. Quotes, replies and
         # recommendations inside a media object are not part of the carousel.
         if not isinstance(media, dict) or depth > 40 or len(media_nodes) >= 1000:
@@ -77,19 +81,20 @@ def _read_post_node(url: str, node: dict, *, json_ld: bool) -> ThreadsPost:
         owner = media.get("user") or {}
         if isinstance(owner, dict) and owner.get("is_private") is True:
             return
+        spoiler = spoiler or _structured_media_spoiler(media)
         children = media.get("carousel_media")
         if isinstance(children, list) and children:
             for child in children:
-                add_media(child, depth + 1)
+                add_media(child, depth + 1, spoiler)
         else:
-            media_nodes.append(media)
+            media_nodes.append((media, spoiler))
 
     add_media(node)
     info = node.get("text_post_app_info")
     linked = info.get("linked_inline_media") if isinstance(info, dict) else None
     if isinstance(linked, dict):
-        add_media(linked)
-    for media in media_nodes:
+        add_media(linked, spoiler=_structured_media_spoiler(node))
+    for media, spoiler in media_nodes:
         if not isinstance(media, dict):
             continue
         versions = media.get("video_versions")
@@ -98,6 +103,7 @@ def _read_post_node(url: str, node: dict, *, json_ld: bool) -> ThreadsPost:
             if isinstance(version, dict):
                 video = _direct_video(version.get("url"), version.get("width"), version.get("height"))
                 if video:
+                    video.spoiler = spoiler
                     videos.append(video)
         if videos:
             _append_media_unique(post.media, max(videos, key=lambda v: (
@@ -105,10 +111,12 @@ def _read_post_node(url: str, node: dict, *, json_ld: bool) -> ThreadsPost:
             continue
         video = _direct_video(media.get("playable_url") or media.get("video_url"))
         if video:
+            video.spoiler = spoiler
             _append_media_unique(post.media, video)
             continue
         image = _best_structured_image(media)
         if image:
+            image.spoiler = spoiler
             _append_media_unique(post.media, image)
     return post
 
