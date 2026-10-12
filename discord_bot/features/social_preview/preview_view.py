@@ -12,6 +12,13 @@ from .sender import delete_preview_messages
 MAX_TEXT_UNITS = 4000
 
 
+def _escape_link_label(text: str) -> str:
+    # Masked-link labels need their delimiters escaped. Applying the general
+    # Markdown escaper also inserts visible backslashes before username `_`.
+    return (text.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+            .replace("\r\n", " ").replace("\r", " ").replace("\n", " "))
+
+
 def _text_units(text: str) -> int:
     # Stay within Discord's limit even when the text contains astral emoji.
     return len(text.encode("utf-16-le")) // 2
@@ -109,7 +116,7 @@ def build_social_preview_views(
     header = "\n".join(
         part for part in (
             f"**{discord.utils.escape_markdown(author)}**" if author else "",
-            f"[{discord.utils.escape_markdown(title)}](<{original_url}>)" if title else "",
+            f"[{_escape_link_label(title)}](<{original_url}>)" if title else "",
         ) if part
     )
     body_budget = MAX_TEXT_UNITS - _text_units(header)

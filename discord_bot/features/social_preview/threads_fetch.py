@@ -379,23 +379,45 @@ def _structured_page_error(url: str, soup: Any) -> Optional[str]:
     return None
 
 
-def _extract_structured_videos(post: ThreadsPost, soup: Any) -> List[ThreadsMedia]:
-    """Adapt Threads Plugin's post-bound video_versions/carousel selection."""
-    target = _post_code(post.url)
-    videos: List[ThreadsMedia] = []
-    if not target:
-        return videos
-    remaining_nodes = 20000
-    media_keys = {"video_versions", "playable_url", "video_url", "carousel_media", "image_versions2", "image_versions"}
+def _best_structured_image(node: dict) -> Optional[ThreadsMedia]:
+    """Pick one rendition of an already post-bound image, never a profile image."""
+    from .download import is_trusted_media_url
 
-    def visit(node, owner=None, depth=0, attached_media=False, in_post_info=False):
+    versions = node.get("image_versions2") or node.get("image_versions") or {}
+    candidates = versions.get("candidates", []) if isinstance(versions, dict) else versions
+    images = []
+    for candidate in candidates if isinstance(candidates, list) else []:
+        if not isinstance(candidate, dict):
+            continue
+        raw_url = candidate.get("url")
+        if not isinstance(raw_url, str) or len(raw_url) > 8192:
+            continue
+        url = html.unescape(re.sub(r"\\u0026", "&", raw_url.strip(), flags=re.IGNORECASE).replace(r"\/", "/"))
+        if not is_trusted_media_url(url):
+            continue
+        image = ThreadsMedia("image", url, _safe_int(candidate.get("width")), _safe_int(candidate.get("height")))
+        if not _is_probable_fallback_avatar(image):
+            images.append(image)
+    return max(images, key=lambda item: (item.width or 0) * (item.height or 0)) if images else None
+
+
+def _extract_structured_media(post: ThreadsPost, soup: Any) -> List[ThreadsMedia]:
+    """Read renditions/carousels belonging to the target post and its linked IG media."""
+    target = _post_code(post.url)
+    media: List[ThreadsMedia] = []
+    if not target:
+        return media
+    remaining_nodes = 20000
+    media_keys = {"video_versions", "playable_url", "video_url", "carousel_media", "image_versions2", "image_versions", "text_post_app_info"}
+
+    def visit(node, owner=None, depth=0, attached_media=False, in_post_info=False, image_attachment=False):
         nonlocal remaining_nodes
         if remaining_nodes <= 0 or depth > 40:
             return
         remaining_nodes -= 1
         if isinstance(node, list):
             for child in node:
-                visit(child, owner, depth + 1, attached_media, in_post_info)
+                visit(child, owner, depth + 1, attached_media, in_post_info, image_attachment)
             return
         if not isinstance(node, dict):
             return
@@ -405,6 +427,9 @@ def _extract_structured_videos(post: ThreadsPost, soup: Any) -> List[ThreadsMedi
             identity = next((node[key] for key in ("code", "shortcode", "media_code", "post_code", "thread_code", "permalink_code")
                              if isinstance(node.get(key), str) and re.fullmatch(r"[A-Za-z0-9_-]+", node[key])), None)
         owner = owner if attached_media and owner else identity or owner
+        user = node.get("user") or {}
+        if owner == target and isinstance(user, dict) and user.get("is_private") is True:
+            return
         children = node.get("carousel_media")
         has_carousel = isinstance(children, list) and bool(children)
         if owner == target and not has_carousel:
@@ -424,27 +449,34 @@ def _extract_structured_videos(post: ThreadsPost, soup: Any) -> List[ThreadsMedi
                 (v for key in ("playable_url", "video_url") if (v := _direct_video(node.get(key)))), None
             )
             if video:
-                _append_media_unique(videos, video)
+                _append_media_unique(media, video)
+            # Images must be on the post itself or an explicit carousel/linked
+            # attachment node, not an arbitrary descendant that inherited owner.
+            elif identity == target or image_attachment:
+                image = _best_structured_image(node)
+                if image:
+                    _append_media_unique(media, image)
         for key, child in node.items():
             if key in {"video_versions", "playable_url", "video_url", "image_versions", "image_versions2", "author", "owner", "profile", "user"}:
                 continue
-            boundary = bool(re.search(r"parent_post|quoted|reply_to|repost", key, re.I))
-            # A linked IG Reel has its own shortcode, but this exact attachment
+            boundary = bool(re.search(r"parent_post|quoted|reply_to|repost|recommend|related|direct_replies", key, re.I))
+            # A linked IG post has its own shortcode, but this exact attachment
             # edge binds it to the target Threads post. Quotes/replies still reset ownership.
             linked_inline = in_post_info and key == "linked_inline_media" and owner == target
             visit(child, None if boundary else owner, depth + 1,
                   not boundary and (attached_media or key == "carousel_media" or linked_inline),
-                  key == "text_post_app_info" and owner == target and not boundary)
+                  key == "text_post_app_info" and owner == target and not boundary,
+                  not boundary and (key == "carousel_media" or linked_inline))
 
     for script in soup.find_all("script", attrs={"type": "application/json"}):
         raw = script.string or ""
-        if len(raw) > MAX_EMBED_HTML_BYTES or not any(key in raw for key in ("video_versions", "playable_url", "video_url")):
+        if len(raw) > MAX_EMBED_HTML_BYTES or not any(key in raw for key in ("video_versions", "playable_url", "video_url", "image_versions")):
             continue
         try:
             visit(json.loads(raw))
         except (ValueError, RecursionError):
             continue
-    return videos
+    return media
 
 
 def _is_probable_fallback_avatar(item: ThreadsMedia) -> bool:
@@ -793,10 +825,10 @@ def _parse_html(url: str, html_text: str) -> ThreadsPost:
     explicit_media_found = False
 
     # Post-bound structured data precedes page-wide DOM/meta fallbacks.
-    structured_videos = _extract_structured_videos(post, soup)
-    post.media.extend(structured_videos)
-    explicit_media_found = bool(structured_videos)
-    if structured_videos:
+    structured_media = _extract_structured_media(post, soup)
+    post.media.extend(structured_media)
+    explicit_media_found = bool(structured_media)
+    if first_direct_video(structured_media):
         post.debug["video_source"] = "structured_json"
 
     # 作者 @ 從 URL 推回

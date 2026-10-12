@@ -83,6 +83,22 @@ class SocialPreviewViewTests(unittest.IsolatedAsyncioTestCase):
         buttons = [item for item in view.walk_children() if isinstance(item, discord.ui.Button)]
         self.assertEqual([button.url for button in buttons], [None, canonical, links["影片直連"]])
 
+    def test_threads_username_underscores_are_not_escaped_inside_link_label(self):
+        for username in ("bucky_su", "a_b_c", "a__b", "_leading_", "name.with.dots"):
+            with self.subTest(username=username):
+                url = f"https://www.threads.com/@{username}/post/DeY0uPKj92t"
+                view, = make_views(original_url=url, video_url=None, title=f"Threads @{username}", author=f"@{username}")
+                texts = [item.content for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay)]
+                self.assertTrue(any(f"[Threads @{username}](<{url}>)" in text for text in texts))
+
+    def test_link_label_escapes_delimiters_but_keeps_ordinary_punctuation(self):
+        title = "Name_One [special]\\test\nnext"
+        view, = make_views(title=title, author="*name*")
+        header = next(item.content for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay) and "Name_One" in item.content)
+        self.assertIn(r"[Name_One \[special\]\\test next](<", header)
+        self.assertIn(r"**\*name\***", header)
+        self.assertTrue(header.endswith(f"(<{POST_URL}>)"))
+
     def test_native_spoiler_hides_post_even_with_embedded_spoiler_markers(self):
         body = "劇透前 ||內文自己的遮罩|| 劇透後"
         view, = make_views(text=body, spoiler=True)
@@ -170,6 +186,32 @@ class SocialPreviewViewTests(unittest.IsolatedAsyncioTestCase):
             user=types.SimpleNamespace(global_name="tester"),
         )
         await view._delete(interaction)
+
+    @patch.object(preview_module, "cleanup_source_message", new_callable=AsyncMock)
+    @patch("discord_bot.features.social_preview.sender.send_preview_as_author", new_callable=AsyncMock)
+    @patch.object(preview_module, "_download_bytes", new_callable=AsyncMock)
+    @patch.object(preview_module.asyncio, "to_thread")
+    async def test_linked_instagram_images_reach_first_image_v2_upload(self, fetch, download, send, cleanup):
+        from tests.test_threads_linked_images import FIXTURE, IMAGES, URL
+        from discord_bot.features.social_preview.threads_fetch import _parse_html
+
+        fetch.return_value = _parse_html(URL, FIXTURE)
+        download.return_value = b"synthetic image bytes"
+        send.return_value = types.SimpleNamespace(id=123)
+        source = make_source(f"評論 ||{URL}||")
+        self.assertTrue(await preview_module.handle_threads_in_message(source))
+        download.assert_awaited_once()
+        self.assertEqual(download.await_args.args[1], IMAGES[0])
+        send.assert_awaited_once()
+        view = send.await_args.kwargs["view"]
+        files = send.await_args.kwargs["files"]
+        self.assertEqual(len(files), 1)
+        self.assertTrue(files[0].spoiler)
+        self.assertEqual([item.media.url for item in media_items(view)], [f"attachment://{files[0].filename}"])
+        headers = [item.content for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay)]
+        self.assertTrue(any("[Threads @demo_user](<" in text for text in headers))
+        self.assertEqual(view.children[0].content, "評論")
+        cleanup.assert_awaited_once()
 
     @patch.object(preview_module, "cleanup_source_message", new_callable=AsyncMock)
     @patch("discord_bot.features.social_preview.sender.send_preview_as_author", new_callable=AsyncMock)

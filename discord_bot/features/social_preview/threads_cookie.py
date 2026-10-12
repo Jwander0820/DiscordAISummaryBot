@@ -11,9 +11,9 @@ from .cookie_store import prepare_cookie, response_cookies, save_response_cookie
 from .download import is_trusted_media_url
 from .threads_fetch import (
     DEFAULT_ACCEPT, DEFAULT_LANG, MAX_EMBED_HTML_BYTES, REQUEST_TIMEOUT,
-    THREADS_RE, THREADS_REDIRECT_STATUSES, UA_MOBILE, ThreadsMedia, ThreadsPost,
-    _append_media_unique, _direct_video, _has_only_fallback_media, _parse_html,
-    _post_code, _safe_int, _strip_tracking_query, _structured_page_error,
+    THREADS_RE, THREADS_REDIRECT_STATUSES, UA_MOBILE, ThreadsPost,
+    _append_media_unique, _best_structured_image, _direct_video, _has_only_fallback_media, _parse_html,
+    _post_code, _strip_tracking_query, _structured_page_error,
 )
 
 logger = logging.getLogger("discord_digest_bot")
@@ -67,12 +67,28 @@ def _read_post_node(url: str, node: dict, *, json_ld: bool) -> ThreadsPost:
         caption = caption.get("text")
     if isinstance(caption, str):
         post.text = html.unescape(caption).strip() or None
-    children = node.get("carousel_media")
-    media_nodes = list(children) if isinstance(children, list) and children else [node]
+    media_nodes = []
+
+    def add_media(media, depth=0):
+        # Only this explicit attachment edge is traversed. Quotes, replies and
+        # recommendations inside a media object are not part of the carousel.
+        if not isinstance(media, dict) or depth > 40 or len(media_nodes) >= 1000:
+            return
+        owner = media.get("user") or {}
+        if isinstance(owner, dict) and owner.get("is_private") is True:
+            return
+        children = media.get("carousel_media")
+        if isinstance(children, list) and children:
+            for child in children:
+                add_media(child, depth + 1)
+        else:
+            media_nodes.append(media)
+
+    add_media(node)
     info = node.get("text_post_app_info")
     linked = info.get("linked_inline_media") if isinstance(info, dict) else None
     if isinstance(linked, dict):
-        media_nodes.append(linked)
+        add_media(linked)
     for media in media_nodes:
         if not isinstance(media, dict):
             continue
@@ -91,15 +107,9 @@ def _read_post_node(url: str, node: dict, *, json_ld: bool) -> ThreadsPost:
         if video:
             _append_media_unique(post.media, video)
             continue
-        images = media.get("image_versions2") or media.get("image_versions") or {}
-        candidates = images.get("candidates", []) if isinstance(images, dict) else images
-        images = []
-        for candidate in candidates if isinstance(candidates, list) else []:
-            if isinstance(candidate, dict) and is_trusted_media_url(candidate.get("url")):
-                images.append(ThreadsMedia("image", candidate["url"],
-                                           _safe_int(candidate.get("width")), _safe_int(candidate.get("height"))))
-        if images:
-            _append_media_unique(post.media, max(images, key=lambda m: (m.width or 0) * (m.height or 0)))
+        image = _best_structured_image(media)
+        if image:
+            _append_media_unique(post.media, image)
     return post
 
 
