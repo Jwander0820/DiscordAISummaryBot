@@ -46,7 +46,7 @@ Discord AI 總結討論機器人
 12. **部署與維運支援**
     - 提供 Flask health check、Docker 啟動配置，以及 PostgreSQL 同步到本地 SQLite 的備份工具。
 
-摘要與對話問答的 `len_msg` 可填 1～20,000；省略時沿用各指令預設值（1,000／5,000／5,000／10,000），實際只取時間範圍內存在的訊息。Threads 每次最多嘗試 6 次頁面請求，另保留分享連結解析與一次 oEmbed 後援。
+摘要與對話問答的 `len_msg` 可填 1～20,000；省略時沿用各指令預設值（1,000／5,000／5,000／10,000），實際只取時間範圍內存在的訊息。Threads 每次最多嘗試 6 次匿名頁面請求，另保留分享連結解析、各一次官方 embed / oEmbed 後援。選填 `THREADS_COOKIE` 後，僅在仍無正文或媒體時再嘗試一次登入抓取。
 
 # 🔧 環境變數設定
 
@@ -110,6 +110,10 @@ THREADS_PREVIEW_ENABLED=1
 FACEBOOK_PREVIEW_ENABLED=1
 INSTAGRAM_PREVIEW_ENABLED=1
 
+# Threads 登入備援（選填；空白表示停用）
+# 只填瀏覽器 Request Headers 的 Cookie 值，不含「Cookie:」。
+THREADS_COOKIE=
+
 # 偽裝功能設定
 # DEEPFAKER_FAILURE_NOTICE 使用"|"分隔，隨機選擇台詞
 DEEPFAKER_FAILURE_NOTICE='台詞A|台詞B' 
@@ -120,6 +124,46 @@ DISCORD_NOTIFY_FORWARD_CHANNEL_ID=12345678
 DISCORD_NOTIFY_FORWARD_GUILD_ID=12345678
 
 ```
+
+## Threads Cookie 備援
+
+預設先匿名抓取；匿名流程仍無有效正文或媒體時，才使用 `THREADS_COOKIE` 嘗試一次。Cookie 只送到 `https://www.threads.com` 的目標貼文頁，不跟隨跳轉，也不會送到圖片／影片 CDN、oEmbed、Facebook 或 Instagram。登入 HTML 不寫入 `_threads_debug`，log 只記錄固定失敗分類、HTTP 狀態與解析計數。
+
+在 Chrome 取得 Cookie：
+
+1. 登入你要提供給 bot 使用的 Threads 帳號，開啟該貼文，先確認瀏覽器裡確實看得到內容。
+2. 按 `F12`，切到 **Network（網路）**，勾選 **Disable cache（停用快取）**，重新整理頁面。
+3. 用 **Doc** 篩選，點選網址為 `https://www.threads.com/@.../post/...` 的主文件請求。
+4. 開啟 **Headers → Request Headers → Cookie**，複製整段 Cookie 的「值」。也可切換 **view source** 後只選取 `cookie:` 後面的內容；不要複製 Response Headers 的 `Set-Cookie` 或整份 HAR。
+5. 在 bot 實際使用的 `.env` 加入下列一行，以自己的值取代範例，維持單行；外層單引號包住整個值：
+
+   ```env
+   THREADS_COOKIE='cookie_name=value; another_cookie=value'
+   ```
+
+6. 重新啟動 bot，再貼一次原本失敗的 Threads 連結；既有 Discord 訊息不會自動重建。
+
+若看不到 Request Headers 的 Cookie，先確認已登入，保持 DevTools 開啟且停用快取後重新整理，再選一次主文件。操作位置可參考 [Chrome DevTools 官方 Network 文件](https://developer.chrome.com/docs/devtools/network/reference#headers)。不要使用 `document.cookie` 當完整來源，它不包含 HttpOnly Cookie。
+
+Cookie 相當於登入憑證，只保留在自己的環境設定；不要貼進聊天、log、截圖或 Git。登入備援不保證每篇都成功：過期、驗證挑戰、限流、需執行 JavaScript 或頁面格式變動仍會失敗。
+
+- 卡片提示「重新登入或驗證」：先在瀏覽器完成登入／驗證，重新複製 Cookie、更新 `.env` 並重啟 bot。401／403 也可能是存取被拒，不能單憑狀態碼斷言 Cookie 已過期。
+- 提示「暫時限制請求」：稍後再試，程式不會自動重試或切換帳號。
+- 提示「仍無法取得」：沒有找到能對應這則貼文的資料，保留原連結供手動開啟。
+- 提示「登入備援仍收到限制觀看頁」：請用提供 Cookie 的同一帳號在瀏覽器確認；這個狀態不會被誤報為 Cookie 過期。平台限制頁不再當成正文，會正常觸發備援。
+- 清空或移除 `THREADS_COOKIE` 並重啟，就會恢復全程匿名抓取。
+
+`cookie_no_content` 不等於 Cookie 過期。log 的 `reason=parse_budget_exhausted` 代表解析額度不足，`json_missing` 代表未找到 JSON 資料，`target_not_found` 代表沒有對應目標貼文的節點；`viewer=present` 僅是頁面包含登入狀態線索，不能單獨保證登入有效。
+
+需要單次本機診斷時，可手動執行：
+
+```powershell
+.\.venv\Scripts\python.exe tools/diagnose_threads_cookie.py 'https://www.threads.com/@使用者/post/貼文代碼'
+```
+
+工具會使用環境或 bot 對應 `.env` 中的 `THREADS_COOKIE`，只請求一次，只輸出狀態、是否有正文與媒體數量等診斷資訊；不輸出 Cookie、正文、媒體網址或 HTML，不保存回應，也不更新設定。
+
+目前沒有自動輪換 Cookie：每次使用固定的環境設定，不會保存伺服器回傳的 `Set-Cookie`。未來可用持續保存的 cookie jar 接收伺服器更新，但登入已失效或要求驗證時，仍需重新登入取得有效憑證，不能保證自動恢復。
 
 ## PostgreSQL 歷史紀錄同步到本地 SQLite
 

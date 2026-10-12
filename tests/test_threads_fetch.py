@@ -74,6 +74,11 @@ class FakeSoup:
 
 
 class ThreadsFetchTests(unittest.TestCase):
+    def setUp(self):
+        cookie_env = patch.dict("os.environ", {"THREADS_COOKIE": ""})
+        cookie_env.start()
+        self.addCleanup(cookie_env.stop)
+
     def test_page_attempt_budget_limits_retryable_statuses_and_exceptions(self):
         url = "https://www.threads.com/@demo/post/abc"
         for result in (429, 503, RuntimeError("network unavailable")):

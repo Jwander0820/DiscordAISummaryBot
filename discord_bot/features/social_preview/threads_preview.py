@@ -180,6 +180,20 @@ async def build_threads_preview(
         embed.set_author(name="Threads")
         return PreviewResult(embed=embed, files=[])
 
+    preview_errors = {
+        "restricted_content": "Threads 限制這則貼文的觀看權限，請直接開啟原連結。",
+        "cookie_restricted_content": "Threads 登入備援仍收到限制觀看頁，請用提供 Cookie 的帳號開啟原連結確認。",
+        "cookie_login_required": "Threads 要求重新登入或驗證，請管理員確認登入狀態並更新 Cookie 設定，或直接開啟原連結。",
+        "cookie_rate_limited": "Threads 暫時限制請求，請稍後再試或直接開啟原連結。",
+        "cookie_config_invalid": "Threads 登入備援設定格式不正確，請管理員檢查設定。",
+        "cookie_fetch_failed": "Threads 登入備援抓取失敗，請稍後再試或直接開啟原連結。",
+        "cookie_no_content": "Threads 登入備援仍無法取得這則貼文，請直接開啟原連結。",
+    }
+    if post.preview_error in preview_errors:
+        embed = discord.Embed(title="Threads", description=preview_errors[post.preview_error], url=url)
+        embed.set_author(name="Threads")
+        return PreviewResult(embed=embed, files=[])
+
     # Embed 僅作為內部資料容器；Discord 訊息由共用 V2 view 組裝。
     title = f"Threads @{post.author_username or ''}".strip() or "Threads 貼文"
     description = post.text or "(無文字內容)"

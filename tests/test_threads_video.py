@@ -10,6 +10,7 @@ from discord_bot.features.social_preview import threads_fetch as tf
 POST_URL = "https://www.threads.com/@demo/post/Video001"
 FIRST_VIDEO = "https://scontent.cdninstagram.com/first.mp4?oh=signature&oe=expiry"
 EMBED_HTML = (Path(__file__).parent / "fixtures" / "threads_embed_video.html").read_text(encoding="utf-8")
+LINKED_IG_HTML = (Path(__file__).parent / "fixtures" / "threads_linked_instagram_video.html").read_text(encoding="utf-8")
 
 
 def structured_html(payload):
@@ -20,6 +21,33 @@ def structured_html(payload):
 
 
 class ThreadsVideoFetchTests(unittest.TestCase):
+    def setUp(self):
+        cookie_env = patch.dict("os.environ", {"THREADS_COOKIE": ""})
+        cookie_env.start()
+        self.addCleanup(cookie_env.stop)
+
+    def test_linked_inline_instagram_video_belongs_to_target_threads_post(self):
+        post = tf._parse_html(POST_URL, LINKED_IG_HTML)
+        self.assertEqual(post.text, "Threads 轉發的正文")
+        self.assertIsNotNone(tf.first_direct_video(post.media))
+        self.assertEqual(tf.first_direct_video(post.media).url,
+                         "https://instagram.example.fna.fbcdn.net/linked-reel.mp4?oh=test-signature&oe=test-expiry")
+
+    def test_linked_inline_video_does_not_cross_post_or_quote_boundaries(self):
+        inline = {"code": "IG001", "video_versions": [{"url": FIRST_VIDEO}]}
+        for payload in (
+            {"code": "Other001", "text_post_app_info": {"linked_inline_media": inline}},
+            {"code": "Video001", "__typename": "ThreadsPost", "quoted_post": {"text_post_app_info": {"linked_inline_media": inline}}},
+            {"code": "Video001", "__typename": "ThreadsPost", "linked_inline_media": inline},
+        ):
+            with self.subTest(payload=payload):
+                self.assertIsNone(tf.first_direct_video(tf._parse_html(POST_URL, structured_html(payload)).media))
+
+    def test_native_video_precedes_linked_inline_video(self):
+        payload = {"code": "Video001", "video_versions": [{"url": FIRST_VIDEO}],
+                   "text_post_app_info": {"linked_inline_media": {"code": "IG001", "video_url": FIRST_VIDEO + "&linked=1"}}}
+        self.assertEqual(tf.first_direct_video(tf._parse_html(POST_URL, structured_html(payload)).media).url, FIRST_VIDEO)
+
     def test_structured_video_is_found_alongside_poster(self):
         page = structured_html({"data": {"post": {"code": "Video001", "video_versions": [
             {"url": FIRST_VIDEO, "width": 720, "height": 1280},

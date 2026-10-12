@@ -344,6 +344,41 @@ def _post_code(url: Any) -> Optional[str]:
     return urlparse(clean).path.rsplit("/", 1)[-1] if THREADS_RE.fullmatch(clean) else None
 
 
+def _structured_page_error(url: str, soup: Any) -> Optional[str]:
+    """Identify the active post's restriction route without matching UI wording."""
+    target = _post_code(url)
+    if not target:
+        return None
+    remaining = 20000
+    for script in soup.find_all("script", attrs={"type": "application/json"}):
+        raw = script.string or ""
+        if len(raw) > MAX_EMBED_HTML_BYTES or "initialRouteInfo" not in raw:
+            continue
+        try:
+            stack = [(json.loads(raw), 0)]
+        except (ValueError, RecursionError):
+            continue
+        while stack and remaining > 0:
+            node, depth = stack.pop()
+            remaining -= 1
+            if depth > 40:
+                continue
+            if isinstance(node, dict):
+                info = node.get("initialRouteInfo")
+                route = info.get("route") if isinstance(info, dict) else None
+                if isinstance(route, dict) and isinstance(route.get("url"), str):
+                    route_url = urljoin(url, route["url"])
+                    root = route.get("rootView")
+                    entry = root.get("entryPoint") if isinstance(root, dict) else None
+                    if (_post_code(route_url) == target and isinstance(entry, dict)
+                            and entry.get("__dr") == "BarcelonaGeoBlockedErrorRoot.entrypoint"):
+                        return "restricted_content"
+                stack.extend((child, depth + 1) for child in node.values() if isinstance(child, (dict, list)))
+            elif isinstance(node, list):
+                stack.extend((child, depth + 1) for child in node if isinstance(child, (dict, list)))
+    return None
+
+
 def _extract_structured_videos(post: ThreadsPost, soup: Any) -> List[ThreadsMedia]:
     """Adapt Threads Plugin's post-bound video_versions/carousel selection."""
     target = _post_code(post.url)
@@ -353,14 +388,14 @@ def _extract_structured_videos(post: ThreadsPost, soup: Any) -> List[ThreadsMedi
     remaining_nodes = 20000
     media_keys = {"video_versions", "playable_url", "video_url", "carousel_media", "image_versions2", "image_versions"}
 
-    def visit(node, owner=None, depth=0, carousel=False):
+    def visit(node, owner=None, depth=0, attached_media=False, in_post_info=False):
         nonlocal remaining_nodes
         if remaining_nodes <= 0 or depth > 40:
             return
         remaining_nodes -= 1
         if isinstance(node, list):
             for child in node:
-                visit(child, owner, depth + 1, carousel)
+                visit(child, owner, depth + 1, attached_media, in_post_info)
             return
         if not isinstance(node, dict):
             return
@@ -369,7 +404,7 @@ def _extract_structured_videos(post: ThreadsPost, soup: Any) -> List[ThreadsMedi
         if not identity and (media_keys.intersection(node) or re.search("post|thread|media", str(node.get("__typename", "")), re.I)):
             identity = next((node[key] for key in ("code", "shortcode", "media_code", "post_code", "thread_code", "permalink_code")
                              if isinstance(node.get(key), str) and re.fullmatch(r"[A-Za-z0-9_-]+", node[key])), None)
-        owner = owner if carousel and owner else identity or owner
+        owner = owner if attached_media and owner else identity or owner
         children = node.get("carousel_media")
         has_carousel = isinstance(children, list) and bool(children)
         if owner == target and not has_carousel:
@@ -394,7 +429,12 @@ def _extract_structured_videos(post: ThreadsPost, soup: Any) -> List[ThreadsMedi
             if key in {"video_versions", "playable_url", "video_url", "image_versions", "image_versions2", "author", "owner", "profile", "user"}:
                 continue
             boundary = bool(re.search(r"parent_post|quoted|reply_to|repost", key, re.I))
-            visit(child, None if boundary else owner, depth + 1, not boundary and (carousel or key == "carousel_media"))
+            # A linked IG Reel has its own shortcode, but this exact attachment
+            # edge binds it to the target Threads post. Quotes/replies still reset ownership.
+            linked_inline = in_post_info and key == "linked_inline_media" and owner == target
+            visit(child, None if boundary else owner, depth + 1,
+                  not boundary and (attached_media or key == "carousel_media" or linked_inline),
+                  key == "text_post_app_info" and owner == target and not boundary)
 
     for script in soup.find_all("script", attrs={"type": "application/json"}):
         raw = script.string or ""
@@ -746,6 +786,10 @@ def _parse_html(url: str, html_text: str) -> ThreadsPost:
 
     soup = BeautifulSoup(html_text, "html.parser")
     post = ThreadsPost(url=url)
+    page_error = _structured_page_error(url, soup)
+    if page_error:
+        post.preview_error = page_error
+        return post
     explicit_media_found = False
 
     # Post-bound structured data precedes page-wide DOM/meta fallbacks.
@@ -944,6 +988,11 @@ def _try_requests(url: str) -> ThreadsPost:
                 completed_pairs.add(pair)
             elif resp.status_code == 200 and "<html" in resp.text.lower():
                 post = _parse_html(_strip_tracking_query(resp.url), resp.text)
+                if post.preview_error:
+                    # A verified access restriction is not post text, and UA
+                    # retries should not keep presenting that error page as content.
+                    post.debug["requests_attempts"] = attempts
+                    return post
                 if post.text or post.media:
                     return post
                 last_html = resp.text
@@ -1063,6 +1112,16 @@ def fetch_threads_post(url: str) -> ThreadsPost:
     # 若最後只剩可疑 fallback/avatar 圖，直接清掉，避免純文字貼文誤帶頭貼。
     if _has_only_fallback_media(post.media):
         post.media = []
+
+    # Optional account state is restricted to one separate, post-bound request.
+    # Never spend credentials to improve an already usable anonymous preview.
+    if not post.text and not post.media:
+        cookie = os.environ.get("THREADS_COOKIE", "")
+        if cookie.strip():
+            from .threads_cookie import try_cookie_fallback
+            authenticated = try_cookie_fallback(clean_url, cookie)
+            authenticated.debug = {**post.debug, **authenticated.debug}
+            post = authenticated
 
     return post
 

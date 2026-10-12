@@ -39,6 +39,55 @@ def gallery_items(view):
 
 
 class ThreadsPreviewTests(unittest.IsolatedAsyncioTestCase):
+    @patch("discord_bot.features.social_preview.threads_preview.cleanup_source_message", new_callable=AsyncMock)
+    @patch("discord_bot.features.social_preview.sender.send_preview_as_author", new_callable=AsyncMock)
+    @patch("discord_bot.features.social_preview.threads_preview._download_bytes", new_callable=AsyncMock)
+    @patch("discord_bot.features.social_preview.threads_preview.asyncio.to_thread")
+    async def test_cookie_failures_keep_v2_spoiler_commentary_and_original_link(self, fetch, download, send, cleanup):
+        for reason, expected in (("cookie_login_required", "重新登入或驗證"),
+                                 ("restricted_content", "觀看權限"),
+                                 ("cookie_restricted_content", "仍收到限制觀看頁"),
+                                 ("cookie_rate_limited", "暫時限制請求"),
+                                 ("cookie_config_invalid", "設定格式不正確"),
+                                 ("cookie_fetch_failed", "抓取失敗"),
+                                 ("cookie_no_content", "仍無法取得")):
+            with self.subTest(reason=reason):
+                url = "https://www.threads.com/@demo/post/Cookie001"
+                fetch.return_value = ThreadsPost(url=url, preview_error=reason)
+                send.return_value = types.SimpleNamespace(id=123)
+                message = types.SimpleNamespace(author=types.SimpleNamespace(bot=False, nick="demo", global_name="demo"),
+                                                channel=types.SimpleNamespace(name="general"), content=f"我的留言 ||{url}||")
+                self.assertTrue(await handle_threads_in_message(message))
+                view = send.await_args.kwargs["view"]
+                self.assertIsInstance(view, discord.ui.LayoutView)
+                text = "\n".join(item.content for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay))
+                self.assertIn(expected, text)
+                self.assertIn("我的留言", text)
+                self.assertTrue(next(item for item in view.children if isinstance(item, discord.ui.Container)).spoiler)
+                self.assertEqual(next(item for item in view.walk_children() if getattr(item, "label", None) == "原連結").url, url)
+                self.assertEqual(gallery_items(view), [])
+                self.assertEqual(set(send.await_args.kwargs), {"view"})
+        download.assert_not_awaited()
+
+    @patch("discord_bot.features.social_preview.threads_preview.cleanup_source_message", new_callable=AsyncMock)
+    @patch("discord_bot.features.social_preview.sender.send_preview_as_author", new_callable=AsyncMock)
+    @patch("discord_bot.features.social_preview.threads_preview._download_bytes", new_callable=AsyncMock)
+    @patch("discord_bot.features.social_preview.threads_preview.asyncio.to_thread")
+    async def test_linked_ig_video_reaches_v2_gallery_without_upload(self, fetch, download, send, cleanup):
+        from pathlib import Path
+        from discord_bot.features.social_preview.threads_fetch import _parse_html
+        url = "https://www.threads.com/@demo/post/Video001"
+        fixture = (Path(__file__).parent / "fixtures" / "threads_linked_instagram_video.html").read_text(encoding="utf-8")
+        fetch.return_value = _parse_html(url, fixture)
+        send.return_value = types.SimpleNamespace(id=123)
+        message = types.SimpleNamespace(author=types.SimpleNamespace(bot=False, nick="demo", global_name="demo"),
+                                        channel=types.SimpleNamespace(name="general"), content=url)
+        self.assertTrue(await handle_threads_in_message(message))
+        gallery = gallery_items(send.await_args.kwargs["view"])
+        self.assertEqual(len(gallery), 1)
+        self.assertIn("linked-reel.mp4", gallery[0].media.url)
+        download.assert_not_awaited()
+
     @patch("discord_bot.features.social_preview.threads_preview._download_bytes", new_callable=AsyncMock)
     @patch("discord_bot.features.social_preview.threads_preview.asyncio.to_thread")
     async def test_video_post_uses_only_first_video_without_downloading_poster_or_video(self, fetch, download):
