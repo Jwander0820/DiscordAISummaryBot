@@ -56,7 +56,11 @@ class InstagramPreviewTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(len(kwargs["files"]), min(count, 4))
                     self.assertTrue(all(f.spoiler == spoiler for f in kwargs["files"]))
                     self.assertTrue(all(m.spoiler == spoiler for m in gallery(view)))
-                    self.assertEqual(next(c for c in view.children if isinstance(c, discord.ui.Container)).spoiler, spoiler)
+                    card = next(c for c in view.children if isinstance(c, discord.ui.Container))
+                    self.assertFalse(card.spoiler)
+                    self.assertIn("||原文||" if spoiler else "原文", [item.content for item in card.children if isinstance(item, discord.ui.TextDisplay)])
+                    self.assertIn("Instagram", card.children[0].content)
+                    self.assertFalse(card.children[0].content.startswith("||"))
                     self.assertEqual(view.children[0].content, "我的留言")
                     buttons = [x for x in view.walk_children() if isinstance(x, discord.ui.Button)]
                     self.assertEqual([x.url for x in buttons], [None, URL])
@@ -116,7 +120,7 @@ class InstagramPreviewTests(unittest.IsolatedAsyncioTestCase):
         view = send.await_args.kwargs["view"]
         self.assertEqual([m.media.url for m in gallery(view)], [video])
         self.assertTrue(all(m.spoiler for m in gallery(view)))
-        self.assertTrue(next(x for x in view.children if isinstance(x, discord.ui.Container)).spoiler)
+        self.assertFalse(next(x for x in view.children if isinstance(x, discord.ui.Container)).spoiler)
         buttons = [x.url for x in view.walk_children() if isinstance(x, discord.ui.Button)]
         self.assertIn(url, buttons)
         self.assertNotIn("kkinstagram", str(view.to_components()))

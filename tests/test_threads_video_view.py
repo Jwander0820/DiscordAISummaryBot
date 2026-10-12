@@ -99,20 +99,61 @@ class SocialPreviewViewTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(r"**\*name\***", header)
         self.assertTrue(header.endswith(f"(<{POST_URL}>)"))
 
-    def test_native_spoiler_hides_post_even_with_embedded_spoiler_markers(self):
+    def test_manual_spoiler_masks_body_and_media_but_keeps_header_and_controls_visible(self):
         body = "劇透前 ||內文自己的遮罩|| 劇透後"
         view, = make_views(text=body, spoiler=True)
         self.assertEqual(view.children[0].content, "原留言")
         card = next(item for item in view.children if isinstance(item, discord.ui.Container))
-        self.assertTrue(card.spoiler)
+        self.assertFalse(card.spoiler)
         self.assertTrue(media_items(view)[0].spoiler)
-        self.assertIn(body, [item.content for item in card.children if isinstance(item, discord.ui.TextDisplay)])
-        controls = next(item for item in view.children if isinstance(item, discord.ui.ActionRow))
+        texts = [item.content for item in card.children if isinstance(item, discord.ui.TextDisplay)]
+        self.assertIn(r"||劇透前 \|\|內文自己的遮罩\|\| 劇透後||", texts)
+        self.assertIn(f"**作者**\n[Threads @demo](<{POST_URL}>)", texts)
+        controls = next(item for item in card.children if isinstance(item, discord.ui.ActionRow))
         self.assertIsNone(controls.children[0].url)
         self.assertEqual(controls.children[1].url, POST_URL)
         self.assertTrue(any(item.url == POST_URL for item in controls.children))
         self.assertTrue(any(item.url is None for item in controls.children))
-        self.assertFalse(any(isinstance(item, discord.ui.ActionRow) for item in card.children))
+        self.assertFalse(any(isinstance(item, discord.ui.ActionRow) for item in view.children))
+
+    def test_unforced_partial_text_spoiler_is_preserved_without_masking_media(self):
+        body = "公開文字 ||原文防雷段落|| 其他公開文字"
+        view, = make_views(text=body)
+        card = next(item for item in view.children if isinstance(item, discord.ui.Container))
+        self.assertFalse(card.spoiler)
+        self.assertIn(body, [item.content for item in card.children if isinstance(item, discord.ui.TextDisplay)])
+        self.assertTrue(all(not item.spoiler for item in media_items(view)))
+
+    def test_manual_spoiler_closes_safely_across_escape_and_emoji_page_boundaries(self):
+        baseline, = make_views(text="", commentary="", spoiler=True)
+        header = next(item for item in baseline.children if isinstance(item, discord.ui.Container)).children[0].content
+        budget = 4000 - len(header.encode("utf-16-le")) // 2 - 4
+        for ending in ("\\", "||", "`", "```\n", "😀", "[link](https://example.com/a_b)"):
+            # Put an escape or astral character exactly across the first cut.
+            body = ("文" * (budget - 1) + ending + "結尾\n") * 3
+            with self.subTest(ending=ending):
+                views = make_views(text=body, commentary="", spoiler=True)
+                parts = []
+                for view in views:
+                    card = next(item for item in view.children if isinstance(item, discord.ui.Container))
+                    for item in card.children[1:]:
+                        if not isinstance(item, discord.ui.TextDisplay):
+                            continue
+                        self.assertTrue(item.content.startswith("||") and item.content.endswith("||"))
+                        inner = item.content[2:-2]
+                        self.assertEqual((len(inner) - len(inner.rstrip("\\"))) % 2, 0)
+                        parts.append(inner)
+                    self.assertLessEqual(sum(len(item.content.encode("utf-16-le")) // 2
+                                             for item in view.walk_children()
+                                             if isinstance(item, discord.ui.TextDisplay)), 4000)
+                self.assertEqual("".join(parts), discord.utils.escape_markdown(body, ignore_links=False))
+
+    def test_manual_spoiler_does_not_create_body_for_media_only_post(self):
+        view, = make_views(text="", spoiler=True)
+        card = next(item for item in view.children if isinstance(item, discord.ui.Container))
+        self.assertFalse(card.spoiler)
+        self.assertEqual(len([item for item in card.children if isinstance(item, discord.ui.TextDisplay)]), 1)
+        self.assertTrue(all(item.spoiler for item in media_items(view)))
 
     def test_long_commentary_and_body_survive_utf16_safe_splitting(self):
         commentary = "😀評" * 1500
@@ -130,8 +171,9 @@ class SocialPreviewViewTests(unittest.IsolatedAsyncioTestCase):
                     self.assertLessEqual(view.content_length(), 4000)
                     comments.extend(item.content for item in view.children if isinstance(item, discord.ui.TextDisplay))
                     for card in (item for item in view.children if isinstance(item, discord.ui.Container)):
-                        self.assertEqual(card.spoiler, spoiler)
-                        bodies.extend(item.content for item in card.children[1:] if isinstance(item, discord.ui.TextDisplay))
+                        self.assertFalse(card.spoiler)
+                        bodies.extend(item.content[2:-2] if spoiler else item.content
+                                      for item in card.children[1:] if isinstance(item, discord.ui.TextDisplay))
                 self.assertEqual("".join(comments), commentary)
                 self.assertEqual("".join(bodies), body)
                 self.assertEqual([item.media.url for view in views for item in media_items(view)], [VIDEO_URL])
@@ -280,8 +322,8 @@ class SocialPreviewViewTests(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(view.has_components_v2())
                     self.assertEqual(view.children[0].content, "留言")
                     card = next(item for item in view.children if isinstance(item, discord.ui.Container))
-                    self.assertEqual(card.spoiler, spoiler)
-                    self.assertIn("貼文", [item.content for item in card.children if isinstance(item, discord.ui.TextDisplay)])
+                    self.assertFalse(card.spoiler)
+                    self.assertIn("||貼文||" if spoiler else "貼文", [item.content for item in card.children if isinstance(item, discord.ui.TextDisplay)])
                     self.assertEqual(download.await_count, int(has_image))
                     if has_image:
                         files = send.await_args_list[-1].kwargs["files"]

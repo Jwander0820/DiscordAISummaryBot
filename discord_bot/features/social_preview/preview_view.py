@@ -33,6 +33,17 @@ def _take_text(text: str, budget: int) -> tuple[str, str]:
     return text, ""
 
 
+def _take_body(text: str, budget: int, spoiler: bool) -> tuple[str, str]:
+    """Split prepared text without breaking an escape before the closing mask."""
+    part, rest = _take_text(text, budget)
+    if not spoiler or not part:
+        return part, rest
+    trailing_slashes = len(part) - len(part.rstrip("\\"))
+    if trailing_slashes % 2:
+        part, rest = part[:-1], part[-1:] + rest
+    return (f"||{part}||" if part else ""), rest
+
+
 class SocialPreviewView(discord.ui.LayoutView):
     """One preview card or continuation; every page can delete the entire group."""
 
@@ -59,7 +70,7 @@ class SocialPreviewView(discord.ui.LayoutView):
 
         card = None
         if header or text or media_urls:
-            card = discord.ui.Container(spoiler=spoiler)
+            card = discord.ui.Container()
             if header:
                 card.add_item(discord.ui.TextDisplay(header))
             if text:
@@ -78,8 +89,8 @@ class SocialPreviewView(discord.ui.LayoutView):
         if video_url and len(video_url) <= 512:
             controls.add_item(discord.ui.Button(label="影片直連", style=discord.ButtonStyle.link, url=video_url))
 
-        # A spoiler must not force the user to reveal the post just to delete it.
-        if card is not None and not spoiler:
+        # Only the body and media are masked; the header and controls stay visible.
+        if card is not None:
             card.add_item(controls)
         else:
             self.add_item(controls)
@@ -120,7 +131,11 @@ def build_social_preview_views(
             f"[{_escape_link_label(title)}](<{original_url}>)" if title else "",
         ) if part
     )
-    body_budget = MAX_TEXT_UNITS - _text_units(header)
+    # Force one body mask, regardless of existing spoiler/code Markdown. Escape
+    # before splitting so each page can independently close its spoiler safely.
+    if spoiler:
+        text = discord.utils.escape_markdown(text, ignore_links=False)
+    body_budget = MAX_TEXT_UNITS - _text_units(header) - (4 if spoiler else 0)
     if body_budget < 2:
         raise ValueError("Preview author and title exceed the component text budget")
 
@@ -139,13 +154,13 @@ def build_social_preview_views(
         part, commentary = _take_text(commentary, MAX_TEXT_UNITS)
         views.append(SocialPreviewView(original_url=original_url, commentary=part, timeout=timeout))
 
-    part, rest = _take_text(text, body_budget - _text_units(commentary))
+    part, rest = _take_body(text, body_budget - _text_units(commentary), spoiler)
     views.append(SocialPreviewView(
         original_url=original_url, video_url=video_url, header=header, text=part,
         commentary=commentary, spoiler=spoiler, timeout=timeout, media_urls=media_urls, files=files,
     ))
     while rest:
-        part, rest = _take_text(rest, body_budget)
+        part, rest = _take_body(rest, body_budget, spoiler)
         views.append(SocialPreviewView(
             original_url=original_url, header=header, text=part, spoiler=spoiler, timeout=timeout,
         ))

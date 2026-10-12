@@ -276,8 +276,11 @@ class FacebookPreviewAsyncTests(unittest.IsolatedAsyncioTestCase):
                     view = kwargs["view"]
                     self.assertEqual(view.children[0].content, "我的留言")
                     card = next(item for item in view.children if isinstance(item, discord.ui.Container))
-                    self.assertEqual(card.spoiler, spoiler)
-                    self.assertIn("貼文正文", [item.content for item in card.children if isinstance(item, discord.ui.TextDisplay)])
+                    self.assertFalse(card.spoiler)
+                    self.assertIn("||貼文標題\n貼文正文||" if spoiler else "貼文正文", [item.content for item in card.children if isinstance(item, discord.ui.TextDisplay)])
+                    if spoiler:
+                        self.assertNotIn("貼文標題", card.children[0].content)
+                        self.assertIn("Facebook", card.children[0].content)
                     media = [item for child in view.walk_children() if isinstance(child, discord.ui.MediaGallery) for item in child.items]
                     expected = [f"attachment://{file.filename}" for file in kwargs.get("files", [])]
                     if has_video:
@@ -351,9 +354,9 @@ class FacebookPreviewAsyncTests(unittest.IsolatedAsyncioTestCase):
         view = send.await_args.kwargs["view"]
         self.assertEqual(view.children[0].content, "留言")
         card = next(item for item in view.children if isinstance(item, discord.ui.Container))
-        self.assertTrue(card.spoiler)
-        self.assertIn("Facebook預覽失敗 爛meta", [item.content for item in card.children if isinstance(item, discord.ui.TextDisplay)])
-        self.assertTrue(any(isinstance(item, discord.ui.ActionRow) for item in view.children))
+        self.assertFalse(card.spoiler)
+        self.assertIn("||Facebook預覽失敗 爛meta||", [item.content for item in card.children if isinstance(item, discord.ui.TextDisplay)])
+        self.assertTrue(any(isinstance(item, discord.ui.ActionRow) for item in card.children))
 
     @patch("discord_bot.features.social_preview.facebook_preview.cleanup_source_message", new_callable=AsyncMock)
     @patch("discord_bot.features.social_preview.sender.send_preview_as_author", new_callable=AsyncMock)

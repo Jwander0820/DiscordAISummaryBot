@@ -426,11 +426,17 @@ async def _send_facebook_preview(
 ) -> None:
     from .preview_view import build_social_preview_views
 
+    title = preview.embed.title or "Facebook"
+    text = preview.embed.description or ""
+    if spoiler and title not in {"Facebook", "Facebook 貼文"}:
+        # OG titles can contain the post itself, unlike a platform/author label.
+        text = "\n".join(part for part in (title, text) if part)
+        title = "Facebook 貼文"
     views = build_social_preview_views(
         original_url=original_url,
-        title=preview.embed.title or "Facebook",
+        title=title,
         author=preview.embed.author.name or "Facebook",
-        text=preview.embed.description or "",
+        text=text,
         commentary=commentary,
         spoiler=spoiler,
         timeout=DELETE_VIEW_TIMEOUT,
