@@ -61,7 +61,7 @@ Guild 管理者可用 `/社群預覽設定` 即時覆蓋全域預設，包括在
 
 | 變數 | 省略時 | 範本與用途 |
 | --- | --- | --- |
-| `DISCORD_NOTIFY_FORWARD_CHANNEL_ID` | 無；略過轉發 | 留空；填有效數字頻道 ID 才轉發摘要／問答通知，不是轉發所有 log |
+| `DISCORD_NOTIFY_FORWARD_CHANNEL_ID` | 無；略過轉發 | 留空；填有效數字頻道 ID 才轉發摘要／問答通知及 Threads／Facebook／Instagram 預覽異常，不是轉發所有 log |
 | `DISCORD_NOTIFY_FORWARD_GUILD_ID` | 使用來源 guild | 留空；可選的通知目標 guild ID |
 | `GMAIL_NOTIFY_ENABLED` | `1` | `0`；準備好 OAuth 與收件者後才開啟 |
 | `GMAIL_CLIENT_ID` | 無 | 留空待填，Gmail 啟用時需要 |

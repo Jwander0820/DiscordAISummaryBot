@@ -95,13 +95,14 @@ class SocialPreviewCogTests(unittest.IsolatedAsyncioTestCase):
         self.facebook_stub.extract_facebook_urls.return_value = ["https://facebook.com/demo"]
         self.facebook_stub.handle_facebook_in_message.return_value = True
 
-        await self.cog.on_message(FakeMessage("https://facebook.com/demo"))
+        message = FakeMessage("https://facebook.com/demo")
+        await self.cog.on_message(message)
 
         self.assertEqual(self.cog_module.is_social_preview_enabled.call_count, 1)
         self.facebook_stub.extract_facebook_urls.assert_called_once()
         self.threads_stub.handle_threads_in_message.assert_not_awaited()
         self.instagram_stub.handle_instagram_in_message.assert_not_awaited()
-        self.facebook_stub.handle_facebook_in_message.assert_awaited_once()
+        self.facebook_stub.handle_facebook_in_message.assert_awaited_once_with(message, bot_client=self.cog.bot)
 
     async def test_instagram_enabled_handles_instagram_before_facebook(self):
         def enabled(_guild_id, platform):
@@ -112,12 +113,13 @@ class SocialPreviewCogTests(unittest.IsolatedAsyncioTestCase):
         self.instagram_stub.handle_instagram_in_message.return_value = True
         self.facebook_stub.extract_facebook_urls.return_value = ["https://facebook.com/demo"]
 
-        await self.cog.on_message(FakeMessage("https://www.instagram.com/p/abc https://facebook.com/demo"))
+        message = FakeMessage("https://www.instagram.com/p/abc https://facebook.com/demo")
+        await self.cog.on_message(message)
 
         self.threads_stub.extract_threads_urls.assert_called_once()
         self.instagram_stub.extract_instagram_urls.assert_called_once()
         self.facebook_stub.extract_facebook_urls.assert_called_once()
-        self.instagram_stub.handle_instagram_in_message.assert_awaited_once()
+        self.instagram_stub.handle_instagram_in_message.assert_awaited_once_with(message, bot_client=self.cog.bot)
         self.facebook_stub.handle_facebook_in_message.assert_not_awaited()
         self.assertEqual(self.cog_module.is_social_preview_enabled.call_count, 1)
 
@@ -127,9 +129,10 @@ class SocialPreviewCogTests(unittest.IsolatedAsyncioTestCase):
         self.facebook_stub.extract_facebook_urls.return_value = ["https://facebook.com/demo"]
         self.threads_stub.handle_threads_in_message.return_value = True
 
-        await self.cog.on_message(FakeMessage("https://threads.com/@demo/post/abc https://facebook.com/demo"))
+        message = FakeMessage("https://threads.com/@demo/post/abc https://facebook.com/demo")
+        await self.cog.on_message(message)
 
-        self.threads_stub.handle_threads_in_message.assert_awaited_once()
+        self.threads_stub.handle_threads_in_message.assert_awaited_once_with(message, bot_client=self.cog.bot)
         self.instagram_stub.handle_instagram_in_message.assert_not_awaited()
         self.facebook_stub.handle_facebook_in_message.assert_not_awaited()
         self.assertEqual(self.cog_module.is_social_preview_enabled.call_count, 1)

@@ -2,7 +2,8 @@ import unittest
 import sys
 import types
 import importlib.util
-from unittest.mock import AsyncMock, patch
+import os
+from unittest.mock import AsyncMock, Mock, patch
 from tests.support import isolated_discord_suite
 
 from discord_bot.features.social_preview.threads_fetch import ThreadsMedia, ThreadsPost
@@ -39,11 +40,12 @@ def gallery_items(view):
 
 
 class ThreadsPreviewTests(unittest.IsolatedAsyncioTestCase):
+    @patch("discord_bot.features.social_preview.failure_notifications.forward_notify_to_channel", new_callable=AsyncMock)
     @patch("discord_bot.features.social_preview.threads_preview.cleanup_source_message", new_callable=AsyncMock)
     @patch("discord_bot.features.social_preview.sender.send_preview_as_author", new_callable=AsyncMock)
     @patch("discord_bot.features.social_preview.threads_preview._download_bytes", new_callable=AsyncMock)
     @patch("discord_bot.features.social_preview.threads_preview.asyncio.to_thread")
-    async def test_cookie_failures_keep_v2_spoiler_commentary_and_original_link(self, fetch, download, send, cleanup):
+    async def test_cookie_failures_keep_v2_spoiler_commentary_and_original_link(self, fetch, download, send, cleanup, notify):
         for reason, expected in (("cookie_login_required", "重新登入或驗證"),
                                  ("restricted_content", "觀看權限"),
                                  ("cookie_restricted_content", "仍收到限制觀看頁"),
@@ -52,8 +54,11 @@ class ThreadsPreviewTests(unittest.IsolatedAsyncioTestCase):
                                  ("cookie_fetch_failed", "抓取失敗"),
                                  ("cookie_no_content", "仍無法取得")):
             with self.subTest(reason=reason):
+                notify.reset_mock()
+                cleanup.reset_mock()
                 url = "https://www.threads.com/@demo/post/Cookie001"
-                fetch.return_value = ThreadsPost(url=url, preview_error=reason)
+                fetch.return_value = ThreadsPost(url=url, preview_error=reason, text="private-body-marker",
+                                                debug={"cookie": "private-cookie-marker", "html": "private-html-marker"})
                 send.return_value = types.SimpleNamespace(id=123)
                 message = types.SimpleNamespace(author=types.SimpleNamespace(bot=False, nick="demo", global_name="demo"),
                                                 channel=types.SimpleNamespace(name="general"), content=f"我的留言 ||{url}||")
@@ -61,16 +66,116 @@ class ThreadsPreviewTests(unittest.IsolatedAsyncioTestCase):
                 view = send.await_args.kwargs["view"]
                 self.assertIsInstance(view, discord.ui.LayoutView)
                 text = "\n".join(item.content for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay))
-                self.assertIn(expected, text)
+                self.assertIn(THREADS_INVALID_POST_MESSAGE, text)
+                self.assertNotIn(expected, text)
+                self.assertNotIn(reason, text)
                 self.assertIn("我的留言", text)
                 card = next(item for item in view.children if isinstance(item, discord.ui.Container))
+                self.assertNotIn("Cookie", card.children[1].content)
                 self.assertFalse(card.spoiler)
                 self.assertTrue(card.children[1].content.startswith("||"))
                 self.assertTrue(card.children[1].content.endswith("||"))
                 self.assertEqual(next(item for item in view.walk_children() if getattr(item, "label", None) == "原連結").url, url)
                 self.assertEqual(gallery_items(view), [])
                 self.assertEqual(set(send.await_args.kwargs), {"view"})
+                notify.assert_awaited_once()
+                self.assertEqual(notify.await_args.kwargs["notify_type"], "error")
+                self.assertIn(reason, notify.await_args.kwargs["error"])
+                self.assertIn(expected, notify.await_args.kwargs["error"])
+                self.assertEqual(notify.await_args.kwargs["record"]["question"], url)
+                self.assertNotIn("private-", text + str(notify.await_args))
+                cleanup.assert_awaited_once()
         download.assert_not_awaited()
+
+    @patch("discord_bot.features.social_preview.threads_preview.cleanup_source_message", new_callable=AsyncMock)
+    @patch("discord_bot.features.social_preview.sender.send_preview_as_author", new_callable=AsyncMock)
+    @patch("discord_bot.features.social_preview.threads_preview.asyncio.to_thread")
+    async def test_restriction_diagnostic_reaches_configured_botlog_in_another_guild(self, fetch, send, cleanup):
+        url = "https://www.threads.com/@demo/post/Restricted001"
+        fetch.return_value = ThreadsPost(url=url, preview_error="cookie_restricted_content")
+        send.return_value = types.SimpleNamespace(id=123)
+        botlog = types.SimpleNamespace(send=AsyncMock())
+        target_guild = types.SimpleNamespace(id=99, get_channel=Mock(return_value=botlog))
+        bot = types.SimpleNamespace(get_guild=Mock(return_value=target_guild))
+        source_guild = types.SimpleNamespace(id=1, get_channel=Mock())
+        message = types.SimpleNamespace(
+            author=types.SimpleNamespace(bot=False, id=10, nick="demo", global_name="demo"),
+            channel=types.SimpleNamespace(id=20, name="general"), guild=source_guild,
+            content=f"{url}?xmt=tracking-marker", reply=AsyncMock(),
+        )
+        with patch.dict(os.environ, {"DISCORD_NOTIFY_FORWARD_CHANNEL_ID": "456", "DISCORD_NOTIFY_FORWARD_GUILD_ID": "99"}):
+            self.assertTrue(await handle_threads_in_message(message, bot_client=bot))
+
+        bot.get_guild.assert_called_once_with(99)
+        target_guild.get_channel.assert_called_once_with(456)
+        source_guild.get_channel.assert_not_called()
+        botlog.send.assert_awaited_once()
+        diagnostic = botlog.send.await_args.args[0]
+        self.assertIn("cookie_restricted_content", diagnostic)
+        self.assertIn("登入備援仍收到限制觀看頁", diagnostic)
+        self.assertIn(url, diagnostic)
+        self.assertIn("使用者: `10`", diagnostic)
+        self.assertIn("來源頻道: `20`", diagnostic)
+        self.assertNotIn("tracking-marker", diagnostic)
+        self.assertNotIn("Email:", diagnostic)
+        self.assertEqual(botlog.send.await_args.kwargs["allowed_mentions"].to_dict()["parse"], [])
+        view = send.await_args.kwargs["view"]
+        card = next(item for item in view.children if isinstance(item, discord.ui.Container))
+        self.assertEqual(card.children[1].content, THREADS_INVALID_POST_MESSAGE)
+        self.assertEqual(next(item for item in view.walk_children() if getattr(item, "label", None) == "原連結").url, url)
+        cleanup.assert_awaited_once()
+        message.reply.assert_not_awaited()
+
+    @patch("discord_bot.features.social_preview.threads_preview.cleanup_source_message", new_callable=AsyncMock)
+    @patch("discord_bot.features.social_preview.sender.send_preview_as_author", new_callable=AsyncMock)
+    @patch("discord_bot.features.social_preview.threads_preview.asyncio.to_thread")
+    async def test_unconfigured_or_failed_botlog_does_not_break_public_preview(self, fetch, send, cleanup):
+        url = "https://www.threads.com/@demo/post/Restricted001"
+        fetch.return_value = ThreadsPost(url=url, preview_error="cookie_restricted_content")
+        send.return_value = types.SimpleNamespace(id=123)
+        botlog = types.SimpleNamespace(send=AsyncMock(side_effect=RuntimeError("notify-send-failed")))
+        guild = types.SimpleNamespace(id=1, get_channel=Mock(return_value=botlog))
+        message = types.SimpleNamespace(
+            author=types.SimpleNamespace(bot=False, id=10, nick="demo", global_name="demo"),
+            channel=types.SimpleNamespace(id=20, name="general"), guild=guild, content=url, reply=AsyncMock(),
+        )
+        for channel_id in ("", "456"):
+            with self.subTest(channel_id=channel_id), patch.dict(
+                os.environ, {"DISCORD_NOTIFY_FORWARD_CHANNEL_ID": channel_id, "DISCORD_NOTIFY_FORWARD_GUILD_ID": ""}
+            ), self.assertLogs("discord_digest_bot", level="WARNING"):
+                self.assertTrue(await handle_threads_in_message(message))
+                card = next(item for item in send.await_args.kwargs["view"].children if isinstance(item, discord.ui.Container))
+                self.assertEqual(card.children[1].content, THREADS_INVALID_POST_MESSAGE)
+        botlog.send.assert_awaited_once()
+        self.assertEqual(cleanup.await_count, 2)
+        message.reply.assert_not_awaited()
+
+        with patch("discord_bot.features.social_preview.failure_notifications.forward_notify_to_channel",
+                   new=AsyncMock(side_effect=RuntimeError("unexpected-notify-error"))), \
+                self.assertLogs("discord_digest_bot", level="WARNING"):
+            self.assertTrue(await handle_threads_in_message(message))
+        self.assertEqual(cleanup.await_count, 3)
+        message.reply.assert_not_awaited()
+
+    @patch("discord_bot.features.social_preview.failure_notifications.forward_notify_to_channel", new_callable=AsyncMock)
+    @patch("discord_bot.features.social_preview.threads_preview.cleanup_source_message", new_callable=AsyncMock)
+    @patch("discord_bot.features.social_preview.sender.send_preview_as_author", new_callable=AsyncMock)
+    @patch("discord_bot.features.social_preview.threads_preview.asyncio.to_thread")
+    async def test_success_is_quiet_and_invalid_post_reports_failure(self, fetch, send, cleanup, notify):
+        url = "https://www.threads.com/@demo/post/Example001"
+        send.return_value = types.SimpleNamespace(id=123)
+        message = types.SimpleNamespace(
+            author=types.SimpleNamespace(bot=False, nick="demo", global_name="demo"),
+            channel=types.SimpleNamespace(name="general"), content=url,
+        )
+        for reason in (None, "invalid_post"):
+            with self.subTest(reason=reason):
+                fetch.return_value = ThreadsPost(url=url, preview_error=reason, text="正常正文" if reason is None else "")
+                self.assertTrue(await handle_threads_in_message(message))
+                if reason is None:
+                    notify.assert_not_awaited()
+        notify.assert_awaited_once()
+        self.assertIn("invalid_post", notify.await_args.kwargs["error"])
 
     @patch("discord_bot.features.social_preview.threads_preview.cleanup_source_message", new_callable=AsyncMock)
     @patch("discord_bot.features.social_preview.sender.send_preview_as_author", new_callable=AsyncMock)

@@ -129,18 +129,25 @@ class InstagramPreviewTests(unittest.IsolatedAsyncioTestCase):
     @patch.object(preview, "cleanup_source_message", new_callable=AsyncMock)
     @patch("discord_bot.features.social_preview.sender.send_preview_as_author", new_callable=AsyncMock)
     @patch.object(preview.asyncio, "to_thread")
-    async def test_errors_are_v2_with_original_link_and_no_third_party(self, fetch, send, cleanup):
+    @patch("discord_bot.features.social_preview.failure_notifications.forward_notify_to_channel", new_callable=AsyncMock)
+    async def test_errors_are_v2_with_original_link_and_no_third_party(self, notify, fetch, send, cleanup):
         for error in preview.ERROR_MESSAGES:
             with self.subTest(error=error):
+                notify.reset_mock()
                 fetch.return_value = InstagramPost(url=URL, shortcode="ABC123", preview_error=error)
                 send.return_value = types.SimpleNamespace(id=123)
                 self.assertTrue(await preview.handle_instagram_in_message(source(f"說明 ||{URL}||")))
                 view = send.await_args.kwargs["view"]
                 texts = " ".join(x.content for x in view.walk_children() if isinstance(x, discord.ui.TextDisplay))
-                self.assertIn(preview.ERROR_MESSAGES[error], texts)
+                self.assertIn("Instagram預覽失敗 爛meta", texts)
+                self.assertNotIn(preview.ERROR_MESSAGES[error], texts)
                 self.assertIn("說明", texts)
                 self.assertNotIn("kkinstagram", str(view.to_components()))
                 self.assertEqual(gallery(view), [])
+                notify.assert_awaited_once()
+                self.assertIn(error, notify.await_args.kwargs["error"])
+                self.assertIn(preview.ERROR_MESSAGES[error], notify.await_args.kwargs["error"])
+                self.assertEqual(next(x.url for x in view.walk_children() if getattr(x, "label", None) == "原連結"), URL)
 
     @patch.object(preview, "_download_bytes", new_callable=AsyncMock)
     @patch.object(preview.asyncio, "to_thread")
@@ -148,7 +155,8 @@ class InstagramPreviewTests(unittest.IsolatedAsyncioTestCase):
         fetch.return_value = InstagramPost(url=URL, shortcode="ABC123", author_username="demo",
                                            media=[InstagramMedia("image", "https://evil.example/image.jpg")])
         result = await preview.build_instagram_preview(URL)
-        self.assertEqual(result.embed.description, preview.ERROR_MESSAGES["no_content"])
+        self.assertEqual(result.embed.description, preview.INSTAGRAM_INVALID_POST_MESSAGE)
+        self.assertEqual(result.preview_error, "no_content")
         download.assert_not_awaited()
 
     @patch.object(preview, "_download_bytes", new_callable=AsyncMock)
@@ -198,7 +206,8 @@ class InstagramPreviewTests(unittest.IsolatedAsyncioTestCase):
         message = source(URL)
         with self.assertLogs(preview.logger, level="INFO") as logs:
             self.assertFalse(await preview.handle_instagram_in_message(message))
-        event = json.loads(logs.records[-1].getMessage().split(" ", 1)[1])
+        event = next(json.loads(r.getMessage().split(" ", 1)[1]) for r in logs.records
+                     if r.getMessage().startswith("instagram_diagnostic ") and '"phase":"send"' in r.getMessage())
         self.assertEqual((event["event"], event["phase"], event["result"], event["error_type"]),
                          ("preview_delivery", "send", "failed", "HTTPException"))
         self.assertEqual((event["http_status"], event["error_code"]), (400, 50035))
@@ -214,7 +223,8 @@ class InstagramPreviewTests(unittest.IsolatedAsyncioTestCase):
         message = source(URL)
         with self.assertLogs(preview.logger, level="INFO") as logs:
             self.assertFalse(await preview.handle_instagram_in_message(message))
-        event = json.loads(logs.records[-1].getMessage().split(" ", 1)[1])
+        event = next(json.loads(r.getMessage().split(" ", 1)[1]) for r in logs.records
+                     if r.getMessage().startswith("instagram_diagnostic "))
         self.assertEqual(event["phase"], "prepare")
         self.assertEqual(event["trace_id"], fetch.call_args.kwargs["trace_id"])
         self.assertTrue(event["trace_id"])

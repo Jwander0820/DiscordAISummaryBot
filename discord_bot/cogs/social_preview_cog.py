@@ -33,17 +33,17 @@ class SocialPreviewCog(commands.Cog):
 
         # Threads 優先處理；若已經成功代發 preview，Facebook 就不用再接手。
         if has_threads_url and is_social_preview_enabled(guild_id, PLATFORM_THREADS):
-            handled = await handle_threads_in_message(message)
+            handled = await handle_threads_in_message(message, bot_client=self.bot)
             if handled:
                 return
 
         if has_instagram_url and is_social_preview_enabled(guild_id, PLATFORM_INSTAGRAM):
-            handled = await handle_instagram_in_message(message)
+            handled = await handle_instagram_in_message(message, bot_client=self.bot)
             if handled:
                 return
 
         if has_facebook_url and is_social_preview_enabled(guild_id, PLATFORM_FACEBOOK):
-            await handle_facebook_in_message(message)
+            await handle_facebook_in_message(message, bot_client=self.bot)
 
 
 async def setup(bot: commands.Bot) -> None:

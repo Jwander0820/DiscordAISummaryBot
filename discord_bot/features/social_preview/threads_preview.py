@@ -36,6 +36,7 @@ from .download import (
 from .sender import cleanup_source_message, log_preview_link, send_preview_group
 from .media_gallery import prepare_gallery
 from .text import TextSpan, extract_message_commentary
+from .failure_notifications import failure_reason, notify_preview_failure, public_failure_message, reply_preview_failure
 
 
 THREADS_URL_RE = re.compile(
@@ -43,7 +44,7 @@ THREADS_URL_RE = re.compile(
     re.IGNORECASE,
 )
 SPOILER_BLOCK_RE = re.compile(r"\|\|(.+?)\|\|", re.DOTALL)
-THREADS_INVALID_POST_MESSAGE = "Threads預覽失敗 爛meta"
+THREADS_INVALID_POST_MESSAGE = public_failure_message("Threads")
 
 # --- 小工具資料結構 ---
 
@@ -85,6 +86,7 @@ class PreviewResult:
     media_urls: Optional[List[str]] = None
     media_spoilers: Optional[List[bool]] = None
     text_spans: Optional[List[TextSpan]] = None
+    preview_error: Optional[str] = None
 
 
 # --- URL 擷取 ---
@@ -177,25 +179,11 @@ async def build_threads_preview(
     # fetch_threads_post() 仍是同步 parser，這裡轉到 thread 避免卡住 bot event loop。
     post = await asyncio.to_thread(fetch_threads_post, url)
 
-    if post.preview_error == "invalid_post":
-        description = THREADS_INVALID_POST_MESSAGE
-        embed = discord.Embed(title="Threads", description=description, url=url)
+    error = failure_reason("Threads", post.preview_error or ("no_content" if not (post.text or post.media) else None))
+    if error:
+        embed = discord.Embed(title="Threads", description=THREADS_INVALID_POST_MESSAGE, url=url)
         embed.set_author(name="Threads")
-        return PreviewResult(embed=embed, files=[])
-
-    preview_errors = {
-        "restricted_content": "Threads 限制這則貼文的觀看權限，請直接開啟原連結。",
-        "cookie_restricted_content": "Threads 登入備援仍收到限制觀看頁，請用提供 Cookie 的帳號開啟原連結確認。",
-        "cookie_login_required": "Threads 要求重新登入或驗證，請管理員確認登入狀態並更新 Cookie 設定，或直接開啟原連結。",
-        "cookie_rate_limited": "Threads 暫時限制請求，請稍後再試或直接開啟原連結。",
-        "cookie_config_invalid": "Threads 登入備援設定格式不正確，請管理員檢查設定。",
-        "cookie_fetch_failed": "Threads 登入備援抓取失敗，請稍後再試或直接開啟原連結。",
-        "cookie_no_content": "Threads 登入備援仍無法取得這則貼文，請直接開啟原連結。",
-    }
-    if post.preview_error in preview_errors:
-        embed = discord.Embed(title="Threads", description=preview_errors[post.preview_error], url=url)
-        embed.set_author(name="Threads")
-        return PreviewResult(embed=embed, files=[])
+        return PreviewResult(embed=embed, files=[], preview_error=error)
 
     # Embed 僅作為內部資料容器；Discord 訊息由共用 V2 view 組裝。
     title = f"Threads @{post.author_username or ''}".strip() or "Threads 貼文"
@@ -214,6 +202,9 @@ async def build_threads_preview(
                                         prefix="threads_image", spoiler=spoiler, reupload_images=reupload_image)
     if gallery.files:
         embed.set_image(url=f"attachment://{gallery.files[0].filename}")
+    if not gallery.media_urls and not post.text:
+        embed.description = THREADS_INVALID_POST_MESSAGE
+        return PreviewResult(embed=embed, files=[], preview_error="media_unavailable")
 
     # V2 references the URL as media, so the message-content limit does not apply.
     inline_video_url = gallery.video_url if not spoiler else None
@@ -257,7 +248,9 @@ async def _send_threads_preview(
 
 # --- Discord 事件整合（範例） ---
 
-async def handle_threads_in_message(message: discord.Message) -> bool:
+async def handle_threads_in_message(
+    message: discord.Message, *, bot_client: Optional[discord.Client] = None
+) -> bool:
     """
     Threads 訊息處理主流程。
 
@@ -277,18 +270,26 @@ async def handle_threads_in_message(message: discord.Message) -> bool:
 
     # 限制一次只處理第一個（多個可自行迴圈）
     url = urls[0]
+    phase, use_spoiler = "prepare", False
     try:
         log_preview_link(message, platform="Threads", url=url)
         use_spoiler = _is_threads_url_spoilered(message.content or "", url)
         user_commentary = _extract_threads_commentary(message.content or "", url)
 
         preview = await build_threads_preview(url, reupload_image=True, spoiler=use_spoiler)
+        await notify_preview_failure(message, platform="Threads", url=url,
+                                     reason=preview.preview_error, bot_client=bot_client)
+        phase = "send"
         await _send_threads_preview(
             message, preview, original_url=url, commentary=user_commentary, spoiler=use_spoiler,
         )
+        phase = "cleanup"
         await cleanup_source_message(message, platform="Threads", url=url)
         return True
     except Exception as e:
-        logger.error("Threads 預覽失敗: %s", e, exc_info=True)
-        await message.reply("Threads 預覽失敗，請稍後再試或直接開啟原連結。", mention_author=False)
+        await notify_preview_failure(message, platform="Threads", url=url, reason=f"{phase}_failed",
+                                     bot_client=bot_client, exception=e)
+        if phase == "cleanup":
+            return True
+        await reply_preview_failure(message, platform="Threads", spoiler=use_spoiler)
         return False

@@ -18,6 +18,14 @@ Threads、Facebook、Instagram 使用 Components V2 卡片，圖片與影片依�
 
 刪除按鈕逾時由 `SOCIAL_PREVIEW_DELETE_TIMEOUT_SECONDS` 控制；`0` 代表同一程序內不自動逾時，目前未跨 bot 重啟恢復互動按鈕。
 
+## 異常訊息與 botlog
+
+Threads／Facebook／Instagram 遇到最終存取限制、Cookie 失敗、無可用內容或未預期處理／發送錯誤時，公開提示統一為「平台名預覽失敗 爛meta」。卡片保留評論、防雷及原連結；無法送出卡片時以同樣的固定文字回覆，原訊息保留。
+
+詳細原因只轉發既有 `DISCORD_NOTIFY_FORWARD_CHANNEL_ID`（botlog），可用 `DISCORD_NOTIFY_FORWARD_GUILD_ID` 指定其他伺服器。通知包含固定分類、來源 ID、時間、去除 tracking 的原連結，以及可用的錯誤類型／HTTP 狀態／Discord code／IG trace ID，不包含 Cookie、HTML、貼文正文、媒體簽名網址或原始例外字串；此通知不寄 Gmail、不寫歷史表。
+
+通知未設定、送達失敗或等待超過 5 秒時，伺服器仍保留安全的原因紀錄，公開卡片不改顯示診斷資訊；通知逾時就停止等待，繼續公開處理。成功備援與可用的部分內容維持既有呈現；若卡片已送出但來源清理發生未預期例外，只通知 botlog，不再追加失敗回覆。
+
 ## 兩種防雷
 
 - **手動防雷**：在 Discord 用 `||來源連結||` 包住 URL，三平台都遮正文與全部圖片／影片；作者／平台標籤、留言及按鈕保持可見，外層卡片不再遮一層。
@@ -51,11 +59,16 @@ Cookie 是登入憑證，三平台分別設定。以下流程中的「重啟」�
 
 Cookie 相當於登入憑證，只保留在自己的環境設定與本機受保護的 Cookie 儲存檔；不要貼進聊天、log、截圖或 Git。登入備援不保證每篇都成功：過期、驗證挑戰、限流、需執行 JavaScript 或頁面格式變動仍會失敗。
 
-- 卡片提示「重新登入或驗證」：先在瀏覽器完成登入／驗證，重新複製 Cookie、更新 `.env` 並重啟 bot。401／403 也可能是存取被拒，不能單憑狀態碼斷言 Cookie 已過期。
-- 提示「暫時限制請求」：稍後再試，程式不會自動重試或切換帳號。
-- 提示「仍無法取得」：沒有找到能對應這則貼文的資料，保留原連結供手動開啟。
-- 提示「登入備援仍收到限制觀看頁」：請用提供 Cookie 的同一帳號在瀏覽器確認；這個狀態不會被誤報為 Cookie 過期。平台限制頁不再當成正文，會正常觸發備援。
-- 清空或移除 `THREADS_COOKIE` 並重啟，就會恢復全程匿名抓取。
+觀看限制、登入驗證、限流與 Cookie 備援失敗時，公開卡片統一顯示「Threads預覽失敗 爛meta」；通知行為見上方「異常訊息與 botlog」。
+
+管理員可依 botlog 的原因處理：
+
+- `cookie_login_required`／「重新登入或驗證」：先在瀏覽器確認登入／驗證狀態，有需要時重新複製 Cookie、更新 `.env` 並套用設定。401／403 也可能是存取被拒，不能單憑狀態碼斷言 Cookie 已過期。
+- `cookie_rate_limited`／「暫時限制請求」：稍後再試，程式不會自動重試或切換帳號。
+- `cookie_no_content`／「仍無法取得」：沒有找到能對應這則貼文的資料，保留原連結供手動開啟。
+- `cookie_restricted_content`／「登入備援仍收到限制觀看頁」：請用提供 Cookie 的同一帳號在瀏覽器確認；這個狀態不會被誤報為 Cookie 過期。平台限制頁不再當成正文，會正常觸發備援。
+
+清空或移除 `THREADS_COOKIE` 並套用設定，就會恢復全程匿名抓取。
 
 `cookie_no_content` 不等於 Cookie 過期。log 的 `reason=parse_budget_exhausted` 代表解析額度不足，`json_missing` 代表未找到 JSON 資料，`target_not_found` 代表沒有對應目標貼文的節點；`viewer=present` 僅是頁面包含登入狀態線索，不能單獨保證登入有效。
 

@@ -17,6 +17,7 @@ from .download import (
 from .media_gallery import prepare_gallery
 from .sender import cleanup_source_message, log_preview_link, send_preview_group
 from .text import extract_message_commentary
+from .failure_notifications import failure_reason, notify_preview_failure, public_failure_message, reply_preview_failure
 from .facebook_fetch import (
     MAX_FACEBOOK_HTML_BYTES, FacebookMedia, FacebookPostData, direct_facebook_mp4, extract_facebook_post,
     facebook_post_identity, is_facebook_video_page,
@@ -47,7 +48,7 @@ FACEBOOK_URL_RE = re.compile(
     re.IGNORECASE,
 )
 SPOILER_BLOCK_RE = re.compile(r"\|\|(.+?)\|\|", re.DOTALL)
-FACEBOOK_INVALID_POST_MESSAGE = "Facebook預覽失敗 爛meta"
+FACEBOOK_INVALID_POST_MESSAGE = public_failure_message("Facebook")
 
 FACEBOOK_CONTENT_HOSTS = ("www.facebook.com", "m.facebook.com", "mbasic.facebook.com")
 FACEBOOK_REDIRECT_ONLY_HOSTS = {"l.facebook.com", "lm.facebook.com", "fb.watch", "www.fb.watch"}
@@ -75,14 +76,18 @@ class FacebookPreview:
     video_url: Optional[str] = None
     image_urls: Optional[List[str]] = None
     media_urls: Optional[List[str]] = None
+    preview_error: Optional[str] = None
 
 
 class FacebookPreviewUnavailable(RuntimeError):
     """Facebook 未提供可用的公開貼文資料。"""
 
-    def __init__(self, message: str, *, target_url: str | None = None):
+    def __init__(self, message: str, *, target_url: str | None = None,
+                 reason: str = "fetch_failed", status: int | None = None):
         super().__init__(message)
         self.target_url = target_url
+        self.reason = failure_reason("Facebook", reason)
+        self.status = status
 
 
 def extract_facebook_urls(content: str) -> List[str]:
@@ -191,9 +196,9 @@ async def _fetch_candidate_following_redirects(
 
     for _ in range(FACEBOOK_MAX_REDIRECTS + 1):
         if current_url in visited:
-            raise FacebookPreviewUnavailable("Facebook 重新導向形成循環")
+            raise FacebookPreviewUnavailable("Facebook 重新導向形成循環", reason="redirect_failed")
         if not _is_supported_facebook_url(current_url):
-            raise FacebookPreviewUnavailable("Facebook 重新導向指向非 Facebook 網域")
+            raise FacebookPreviewUnavailable("Facebook 重新導向指向非 Facebook 網域", reason="redirect_rejected")
         visited.add(current_url)
 
         async with session.get(current_url, timeout=25, allow_redirects=False) as resp:
@@ -203,20 +208,20 @@ async def _fetch_candidate_following_redirects(
                 body = bytearray()
                 async for chunk in resp.content.iter_chunked(64 * 1024):
                     if len(body) + len(chunk) > MAX_FACEBOOK_HTML_BYTES:
-                        raise FacebookPreviewUnavailable("Facebook 頁面超過解析大小上限")
+                        raise FacebookPreviewUnavailable("Facebook 頁面超過解析大小上限", reason="response_too_large", status=status)
                     body.extend(chunk)
                 return response_url, status, body.decode("utf-8", errors="replace")
 
             location = resp.headers.get("Location")
             if not location:
-                raise FacebookPreviewUnavailable("Facebook 重新導向缺少 Location")
+                raise FacebookPreviewUnavailable("Facebook 重新導向缺少 Location", reason="redirect_failed", status=status)
 
             next_url = urljoin(response_url, location)
             if not _is_supported_facebook_url(next_url):
-                raise FacebookPreviewUnavailable("Facebook 重新導向指向非 Facebook 網域")
+                raise FacebookPreviewUnavailable("Facebook 重新導向指向非 Facebook 網域", reason="redirect_rejected", status=status)
             current_url = next_url
 
-    raise FacebookPreviewUnavailable("Facebook 重新導向次數超過上限")
+    raise FacebookPreviewUnavailable("Facebook 重新導向次數超過上限", reason="redirect_failed")
 
 
 async def _download_bytes(
@@ -299,6 +304,7 @@ def _extract_og_data(html: str, page_url: str = "") -> Tuple[str, str, List[str]
 async def _fetch_html_with_aiohttp(url: str) -> FacebookPostData:
     """展開受限 redirect 後抓 OG 資料，登入牆與外部目的地直接失敗。"""
     last_error = "Facebook 頁面讀取失敗"
+    last_reason = "fetch_failed"
     last_status = 0
     cookie_target = None
 
@@ -321,6 +327,7 @@ async def _fetch_html_with_aiohttp(url: str) -> FacebookPostData:
                 last_status = status
                 if _is_facebook_access_wall(final_url, html):
                     last_error = "Facebook 頁面要求登入或存取限制"
+                    last_reason = "login_required"
                     continue
 
                 post = _extract_page_data(html, final_url)
@@ -338,15 +345,18 @@ async def _fetch_html_with_aiohttp(url: str) -> FacebookPostData:
 
                 if status >= 400:
                     last_error = f"Facebook 頁面讀取失敗（HTTP {status}）"
+                    last_reason = "rate_limited" if status == 429 else "request_rejected"
                 else:
                     last_error = "Facebook 頁面未提供可用的 Open Graph metadata"
+                    last_reason = "no_content"
             except FacebookPreviewUnavailable:
                 raise
-            except Exception as exc:
-                last_error = f"Facebook 頁面讀取失敗（{exc}）"
+            except Exception:
+                last_error = "Facebook 頁面讀取失敗"
+                last_reason, last_status = "fetch_failed", 0
 
     raise FacebookPreviewUnavailable(last_error if last_status else "Facebook 頁面讀取失敗（無有效回應）",
-                                     target_url=cookie_target)
+                                     target_url=cookie_target, reason=last_reason, status=last_status or None)
 
 
 async def _fetch_og_data(url: str) -> FacebookPostData:
@@ -357,10 +367,12 @@ async def _fetch_og_data(url: str) -> FacebookPostData:
     try:
         anonymous = await _fetch_html_with_aiohttp(url)
         if anonymous.status >= 400 and not (anonymous.title or anonymous.has_content):
-            raise FacebookPreviewUnavailable(f"HTTP {anonymous.status} 且無可用 Open Graph")
+            raise FacebookPreviewUnavailable(f"HTTP {anonymous.status} 且無可用 Open Graph",
+                                             reason="rate_limited" if anonymous.status == 429 else "request_rejected",
+                                             status=anonymous.status)
     except Exception as http_error:
         anonymous = None
-        logger.warning("aiohttp 擷取 Facebook Open Graph 失敗: %s", http_error)
+        logger.warning("aiohttp 擷取 Facebook Open Graph 失敗: error_type=%s", type(http_error).__name__)
         last_error = http_error
         cookie_target = getattr(http_error, "target_url", None) or url
 
@@ -385,10 +397,11 @@ async def _fetch_og_data(url: str) -> FacebookPostData:
             last_error = FacebookPreviewUnavailable(
                 f"Facebook Cookie 備援失敗（{authenticated.reason}; {status_text}）",
                 target_url=authenticated.url,
+                reason=authenticated.reason, status=status if type(status) is int else None,
             )
     if anonymous:
         return anonymous
-    raise last_error or FacebookPreviewUnavailable("Facebook 頁面未提供可用的公開內容")
+    raise last_error or FacebookPreviewUnavailable("Facebook 頁面未提供可用的公開內容", reason="no_content")
 
 
 async def build_facebook_preview(
@@ -415,9 +428,15 @@ async def build_facebook_preview(
     if gallery.files:
         embed.set_image(url=f"attachment://{gallery.files[0].filename}")
 
+    error = None
+    has_text = post.description or post.title.strip() not in {"", "Facebook", "Facebook 貼文"}
+    if not gallery.media_urls and not has_text:
+        error = "media_unavailable" if post.ordered_media else "no_content"
+        embed.title, embed.description = "Facebook", FACEBOOK_INVALID_POST_MESSAGE
+
     return FacebookPreview(
         embed=embed, files=gallery.files, image_urls=gallery.image_urls,
-        video_url=gallery.video_url, media_urls=gallery.media_urls,
+        video_url=gallery.video_url, media_urls=gallery.media_urls, preview_error=error,
     )
 
 
@@ -448,7 +467,7 @@ async def _send_facebook_preview(
     await send_preview_group(message, views)
 
 
-async def handle_facebook_in_message(message: discord.Message) -> bool:
+async def handle_facebook_in_message(message: discord.Message, *, bot_client=None) -> bool:
     """Facebook 訊息處理主流程，負責留言保留、preview 代發與原文清理。"""
     if message.author.bot:
         return False
@@ -466,16 +485,29 @@ async def handle_facebook_in_message(message: discord.Message) -> bool:
         preview = await build_facebook_preview(
             url, reupload_image=True, max_images=4, spoiler=use_spoiler,
         )
+        await notify_preview_failure(message, platform="Facebook", url=url,
+                                     reason=preview.preview_error, bot_client=bot_client)
     except Exception as exc:
-        logger.error("Facebook 預覽失敗: %s", exc, exc_info=True)
+        await notify_preview_failure(
+            message, platform="Facebook", url=url, bot_client=bot_client, exception=exc,
+            reason=exc.reason if isinstance(exc, FacebookPreviewUnavailable) else "prepare_failed",
+        )
         embed = discord.Embed(title="Facebook", description=FACEBOOK_INVALID_POST_MESSAGE, url=url)
         embed.set_author(name="Facebook")
         preview = FacebookPreview(embed=embed, files=[])
 
-    # Sending errors leave the original message intact; do not replace a failed
-    # transmission with a misleading "Facebook unavailable" card.
-    await _send_facebook_preview(
-        message, preview, original_url=url, commentary=user_commentary, spoiler=use_spoiler,
-    )
-    await cleanup_source_message(message, platform="Facebook", url=url)
-    return True
+    phase = "send"
+    try:
+        await _send_facebook_preview(
+            message, preview, original_url=url, commentary=user_commentary, spoiler=use_spoiler,
+        )
+        phase = "cleanup"
+        await cleanup_source_message(message, platform="Facebook", url=url)
+        return True
+    except Exception as exc:
+        await notify_preview_failure(message, platform="Facebook", url=url, reason=f"{phase}_failed",
+                                     bot_client=bot_client, exception=exc)
+        if phase == "cleanup":
+            return True
+        await reply_preview_failure(message, platform="Facebook", spoiler=use_spoiler)
+        return False

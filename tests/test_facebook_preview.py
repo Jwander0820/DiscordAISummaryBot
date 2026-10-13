@@ -198,6 +198,8 @@ class FacebookPreviewAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("400", str(error.exception))
         self.assertNotIn("xs=synthetic-test", str(error.exception))
         self.assertEqual(error.exception.target_url, url)
+        self.assertEqual(error.exception.reason, "cookie_request_rejected")
+        self.assertEqual(error.exception.status, 400)
 
     async def test_cookie_can_add_mp4_to_anonymous_cover_without_replacing_body(self):
         from discord_bot.features.social_preview.facebook_fetch import FacebookPostData
@@ -368,10 +370,13 @@ class FacebookPreviewAsyncTests(unittest.IsolatedAsyncioTestCase):
         send.side_effect = [first, RuntimeError("sending failed")]
         message = types.SimpleNamespace(
             author=types.SimpleNamespace(bot=False, nick="demo", global_name="demo"),
-            channel=types.SimpleNamespace(name="general"), content=url,
+            channel=types.SimpleNamespace(name="general"), content=url, reply=AsyncMock(),
         )
-        with self.assertRaisesRegex(RuntimeError, "sending failed"):
-            await handle_facebook_in_message(message)
+        with patch("discord_bot.features.social_preview.failure_notifications.forward_notify_to_channel", new_callable=AsyncMock) as notify:
+            self.assertFalse(await handle_facebook_in_message(message))
+        notify.assert_awaited_once()
+        self.assertIn("send_failed", notify.await_args.kwargs["error"])
+        self.assertEqual(message.reply.await_args.args[0], "Facebook預覽失敗 爛meta")
         first.delete.assert_awaited_once()
         cleanup.assert_not_awaited()
         self.assertEqual(send.await_count, 2)
@@ -531,7 +536,8 @@ class FacebookPreviewAsyncTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch(
                 "discord_bot.features.social_preview.facebook_preview.build_facebook_preview",
-                new=AsyncMock(side_effect=RuntimeError("Facebook 頁面要求登入或存取限制")),
+                new=AsyncMock(side_effect=FacebookPreviewUnavailable(
+                    "Facebook 頁面要求登入或存取限制", reason="login_required", status=403)),
             ),
             patch(
                 "discord_bot.features.social_preview.sender.send_preview_as_author",
@@ -541,10 +547,15 @@ class FacebookPreviewAsyncTests(unittest.IsolatedAsyncioTestCase):
                 "discord_bot.features.social_preview.facebook_preview.cleanup_source_message",
                 new=AsyncMock(),
             ) as cleanup_source,
+            patch("discord_bot.features.social_preview.failure_notifications.forward_notify_to_channel",
+                  new_callable=AsyncMock) as notify,
         ):
             handled = await handle_facebook_in_message(message)
 
         self.assertTrue(handled)
+        notify.assert_awaited_once()
+        self.assertIn("login_required", notify.await_args.kwargs["error"])
+        self.assertIn("http_status=403", notify.await_args.kwargs["record"]["summary"])
         message.reply.assert_not_awaited()
         send_preview.assert_awaited_once()
         sent_kwargs = send_preview.await_args.kwargs

@@ -18,6 +18,9 @@ from .instagram_fetch import fetch_instagram_post, instagram_shortcode, normaliz
 from .instagram_logging import elapsed_ms, log_event, new_trace_id
 from .sender import cleanup_source_message, log_preview_link, send_preview_group
 from .text import extract_message_commentary
+from .failure_notifications import (
+    PLATFORM_DIAGNOSTICS, failure_reason, notify_preview_failure, public_failure_message, reply_preview_failure,
+)
 
 logger = logging.getLogger("discord_digest_bot")
 INSTAGRAM_URL_RE = re.compile(
@@ -25,17 +28,8 @@ INSTAGRAM_URL_RE = re.compile(
     r"(?:\?[^\s<>()|]+)?(?:#[^\s<>()|]+)?", re.IGNORECASE,
 )
 SPOILER_BLOCK_RE = re.compile(r"\|\|(.+?)\|\|", re.DOTALL)
-ERROR_MESSAGES = {
-    "login_required": "Instagram 要求登入或驗證，請管理員更新 Instagram Cookie，或直接開啟原連結。",
-    "checkpoint_required": "Instagram 要求完成登入安全驗證，請管理員在 Instagram 完成驗證後更新 Cookie，或直接開啟原連結。",
-    "request_rejected": "Instagram 拒絕這次媒體請求，請稍後再試或直接開啟原連結。",
-    "cookie_config_invalid": "Instagram 登入備援設定格式不正確，請管理員檢查設定。",
-    "rate_limited": "Instagram 暫時限制請求，請稍後再試或直接開啟原連結。",
-    "private_or_unverified": "Instagram 貼文為私人內容或無法確認公開範圍，請直接開啟原連結。",
-    "not_found": "Instagram 貼文不存在或已無法存取，請直接開啟原連結。",
-    "no_content": "Instagram 未回傳可用的貼文內容；可設定 Instagram Cookie 備援，或直接開啟原連結。",
-    "fetch_failed": "Instagram 預覽抓取失敗，請稍後再試或直接開啟原連結。",
-}
+ERROR_MESSAGES = PLATFORM_DIAGNOSTICS["Instagram"]
+INSTAGRAM_INVALID_POST_MESSAGE = public_failure_message("Instagram")
 
 
 def _delete_view_timeout_from_env():
@@ -60,6 +54,7 @@ class InstagramPreview:
     trace_id: Optional[str] = None
     fetch_source: str = "unknown"
     outcome: str = "content"
+    preview_error: Optional[str] = None
 
 
 def _sanitize_instagram_url(url):
@@ -93,11 +88,11 @@ async def build_instagram_preview(url, *, reupload_image=True, spoiler=False, tr
     trace_id = trace_id or new_trace_id()
     post = await asyncio.to_thread(fetch_instagram_post, url, trace_id=trace_id)
     selected = select_media(post.media)
-    error = post.preview_error
+    error = failure_reason("Instagram", post.preview_error)
     if not error and not (post.text or selected):
         error = "no_content"
     title = f"Instagram @{post.author_username}" if post.author_username else "Instagram"
-    description = ERROR_MESSAGES.get(error, ERROR_MESSAGES["fetch_failed"]) if error else post.text or ""
+    description = INSTAGRAM_INVALID_POST_MESSAGE if error else post.text or ""
     embed = discord.Embed(title=title, description=description, url=post.url)
     embed.set_author(name=post.author_name or (f"@{post.author_username}" if post.author_username else "Instagram"))
     preview = InstagramPreview(embed, trace_id=post.trace_id or trace_id, fetch_source=post.fetch_source)
@@ -106,6 +101,7 @@ async def build_instagram_preview(url, *, reupload_image=True, spoiler=False, tr
         images = len(preview.files) + len(preview.image_urls)
         rendered = len(preview.media_urls or [])
         preview.outcome = "error_card" if error else "content"
+        preview.preview_error = error
         log_event("preview_prepared", trace_id=preview.trace_id, shortcode=post.shortcode,
                   source=preview.fetch_source, result=error or "success", outcome=preview.outcome,
                   selected_count=len(selected), rendered_count=rendered, dropped_count=len(selected) - rendered,
@@ -122,11 +118,11 @@ async def build_instagram_preview(url, *, reupload_image=True, spoiler=False, tr
     preview.video_url, preview.media_urls = gallery.video_url, gallery.media_urls
     if not gallery.media_urls and not post.text:
         error = "fetch_failed"
-        embed.description = ERROR_MESSAGES["fetch_failed"]
+        embed.description = INSTAGRAM_INVALID_POST_MESSAGE
     return finish()
 
 
-async def handle_instagram_in_message(message):
+async def handle_instagram_in_message(message, *, bot_client=None):
     if message.author.bot:
         return False
     urls = extract_instagram_urls(message.content or "")
@@ -135,12 +131,15 @@ async def handle_instagram_in_message(message):
     url = urls[0]
     phase_started, phase, preview = perf_counter(), "prepare", None
     trace_id = new_trace_id()
+    spoiler = False
     try:
         log_preview_link(message, platform="Instagram", url=url)
         from .preview_view import build_social_preview_views
 
         spoiler = _is_instagram_url_spoilered(message.content or "", url)
         preview = await build_instagram_preview(url, spoiler=spoiler, trace_id=trace_id)
+        await notify_preview_failure(message, platform="Instagram", url=url, reason=preview.preview_error,
+                                     bot_client=bot_client, trace_id=preview.trace_id)
         views = build_social_preview_views(
             original_url=url, title=preview.embed.title or "Instagram", author=preview.embed.author.name or "Instagram",
             text=preview.embed.description or "", commentary=_extract_instagram_commentary(message.content or "", url),
@@ -161,5 +160,10 @@ async def handle_instagram_in_message(message):
                   result="failed", phase=phase, error_type=type(exc).__name__,
                   http_status=getattr(exc, "status", None), error_code=getattr(exc, "code", None),
                   elapsed_ms=elapsed_ms(phase_started))
-        await message.reply("Instagram 預覽失敗，請稍後再試或直接開啟原連結。", mention_author=False)
+        await notify_preview_failure(message, platform="Instagram", url=url, reason=f"{phase}_failed",
+                                     bot_client=bot_client, exception=exc,
+                                     trace_id=preview.trace_id if preview else trace_id)
+        if phase == "cleanup":
+            return True
+        await reply_preview_failure(message, platform="Instagram", spoiler=spoiler)
         return False
