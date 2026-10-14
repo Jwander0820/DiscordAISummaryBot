@@ -2,6 +2,7 @@ import unittest
 import types
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
+from urllib.parse import urlencode
 
 import discord
 from tests.support import isolated_discord_suite
@@ -69,6 +70,32 @@ class FakeSession:
 
 
 class FacebookPreviewTests(unittest.TestCase):
+    def test_php_access_walls_are_not_content_targets(self):
+        from discord_bot.features.social_preview.facebook_preview import _facebook_content_target, _is_facebook_access_wall
+        for path in ("login.php", "checkpoint.php", "recover.php", "unsupportedbrowser.php"):
+            with self.subTest(path=path):
+                url = f"https://www.facebook.com/{path}?fbid=123"
+                self.assertTrue(_is_facebook_access_wall(url, ""))
+                self.assertIsNone(_facebook_content_target(url))
+
+    def test_login_next_only_accepts_one_supported_facebook_content_target(self):
+        from discord_bot.features.social_preview.facebook_preview import _facebook_login_next_target
+        photo = "https://www.facebook.com/photo.php?fbid=123&set=a.456&type=3"
+        for value in (photo, "/photo.php?fbid=123&set=a.456&type=3"):
+            with self.subTest(value=value):
+                login = "https://m.facebook.com/login.php?" + urlencode({"next": value})
+                self.assertEqual(_facebook_login_next_target(login), photo)
+        for value in ("https://outside.example/photo.php?fbid=123", "https://www.facebook.com:8443/photo.php?fbid=123",
+                      "https://user:password@www.facebook.com/photo.php?fbid=123", "/login.php?fbid=123",
+                      "/share/example", "/photo.php?fbid=123%26fake", "javascript:alert(1)",
+                      "https://[invalid/photo.php?fbid=123"):
+            with self.subTest(value=value):
+                login = "https://www.facebook.com/login/?" + urlencode({"next": value})
+                self.assertIsNone(_facebook_login_next_target(login))
+        self.assertIsNone(_facebook_login_next_target("https://outside.example/login/?" + urlencode({"next": photo})))
+        self.assertIsNone(_facebook_login_next_target("https://www.facebook.com/login/?" + urlencode({"next": [photo, photo]}, doseq=True)))
+        self.assertIsNone(_facebook_login_next_target("https://www.facebook.com/checkpoint/?" + urlencode({"next": photo})))
+
     def test_extract_urls_supports_mobile_redirect_host(self):
         content = "看看 https://lm.facebook.com/l.php?u=https%3A%2F%2Fwww.facebook.com%2Fshare%2Fp%2Fabc"
 
@@ -117,6 +144,111 @@ class FacebookPreviewAsyncTests(unittest.IsolatedAsyncioTestCase):
         cookie_env = patch.dict("os.environ", {"FACEBOOK_COOKIE": ""})
         cookie_env.start()
         self.addCleanup(cookie_env.stop)
+
+    async def test_vps_photo_share_login_chain_preserves_cookie_target(self):
+        share = "https://www.facebook.com/share/example-photo/"
+        photo = "https://www.facebook.com/photo.php?fbid=123&set=a.456&type=3"
+        login = "https://www.facebook.com/login/?" + urlencode({"next": photo})
+        session = FakeSession([
+            FakeResponse(share, "", status=302, headers={"Location": photo}),
+            FakeResponse(photo, "", status=302, headers={"Location": login}),
+            FakeResponse(login, '<form id="login_form"></form>'),
+        ])
+        public = FacebookPostData(url=photo, description="public caption", image_urls=["https://scontent.xx.fbcdn.net/photo.jpg"], public=True)
+        with patch("discord_bot.features.social_preview.facebook_preview._build_candidate_urls", side_effect=lambda url: [url]), patch(
+            "discord_bot.features.social_preview.facebook_preview.aiohttp.ClientSession", return_value=session
+        ), patch.dict("os.environ", {"FACEBOOK_COOKIE": "xs=synthetic-test"}), patch(
+            "discord_bot.features.social_preview.facebook_cookie.try_facebook_cookie", new=AsyncMock(return_value=public)
+        ) as cookie:
+            result = await _fetch_og_data(share)
+        cookie.assert_awaited_once_with(photo, "xs=synthetic-test")
+        self.assertEqual(result, public)
+        self.assertEqual(session.requested_urls, [share, photo, login])
+
+    async def test_vps_photo_share_all_hosts_keep_canonical_target_for_one_cookie_request(self):
+        share = "https://www.facebook.com/share/example-photo/"
+        mobile_share = share.replace("www.", "m.")
+        basic_share = share.replace("www.", "mbasic.")
+        photo = "https://www.facebook.com/photo.php?fbid=123&set=a.456&type=3"
+        basic_photo = photo.replace("www.", "mbasic.")
+        login = "https://www.facebook.com/login/?" + urlencode({"next": photo})
+        basic_login = "https://mbasic.facebook.com/login.php?" + urlencode({"next": basic_photo})
+        final_basic_login = basic_login.replace("mbasic.", "www.")
+        session = FakeSession([
+            FakeResponse(share, "", status=302, headers={"Location": photo}),
+            FakeResponse(photo, "", status=302, headers={"Location": login}),
+            FakeResponse(login, "login"),
+            FakeResponse(mobile_share, "", status=301, headers={"Location": share}),
+            FakeResponse(share, "", status=302, headers={"Location": photo}),
+            FakeResponse(photo, "", status=302, headers={"Location": login}),
+            FakeResponse(login, "login"),
+            FakeResponse(basic_share, "", status=302, headers={"Location": basic_photo}),
+            FakeResponse(basic_photo, "", status=302, headers={"Location": basic_login}),
+            FakeResponse(basic_login, "", status=301, headers={"Location": final_basic_login}),
+            FakeResponse(final_basic_login, "login"),
+        ])
+        public = FacebookPostData(url=photo, description="public caption", public=True)
+        with patch("discord_bot.features.social_preview.facebook_preview.aiohttp.ClientSession", return_value=session), patch.dict(
+            "os.environ", {"FACEBOOK_COOKIE": "xs=synthetic-test"}
+        ), patch("discord_bot.features.social_preview.facebook_cookie.try_facebook_cookie", new=AsyncMock(return_value=public)) as cookie:
+            self.assertEqual(await _fetch_og_data(share), public)
+        cookie.assert_awaited_once_with(photo, "xs=synthetic-test")
+        self.assertEqual(session.requested_urls, [share, photo, login, mobile_share, share, photo, login,
+                                                  basic_share, basic_photo, basic_login, final_basic_login])
+
+    async def test_content_target_survives_login_and_transport_or_bounded_errors(self):
+        photo = "https://www.facebook.com/photo.php?fbid=123"
+        share = "https://www.facebook.com/share/example-photo/"
+        login = "https://www.facebook.com/login.php?" + urlencode({"next": photo})
+        unrelated_login = "https://www.facebook.com/login/?" + urlencode({"next": "https://www.facebook.com/photo.php?fbid=456"})
+        cases = (
+            (photo, [FakeResponse(photo, "", status=302, headers={"Location": login}), FakeResponse(login, "login")], "login_required"),
+            (share, [FakeResponse(share, "", status=302, headers={"Location": login}), FakeResponse(login, "login")], "login_required"),
+            (share, [FakeResponse(share, "", status=302, headers={"Location": photo}), FakeResponse(photo, "", status=302,
+                    headers={"Location": unrelated_login}), FakeResponse(unrelated_login, "login")], "login_required"),
+            (share, [FakeResponse(share, "", status=302, headers={"Location": photo}), FakeResponse(photo, "", status=302)], "redirect_failed"),
+            (share, [FakeResponse(share, "", status=302, headers={"Location": photo}), FakeResponse(photo, "x" * 20)], "response_too_large"),
+        )
+        for url, responses, reason in cases:
+            with self.subTest(reason=reason, url=url):
+                session = FakeSession(responses)
+                with patch("discord_bot.features.social_preview.facebook_preview._build_candidate_urls", side_effect=lambda value: [value]), patch(
+                    "discord_bot.features.social_preview.facebook_preview.aiohttp.ClientSession", return_value=session
+                ), patch("discord_bot.features.social_preview.facebook_preview.MAX_FACEBOOK_HTML_BYTES", 10):
+                    with self.assertRaises(FacebookPreviewUnavailable) as error:
+                        await _fetch_html_with_aiohttp(url)
+                self.assertEqual(error.exception.target_url, photo)
+                self.assertEqual(error.exception.reason, reason)
+
+        session = FakeSession([FakeResponse(share, "", status=302, headers={"Location": photo})])
+        with patch("discord_bot.features.social_preview.facebook_preview._build_candidate_urls", side_effect=lambda value: [value]), patch(
+            "discord_bot.features.social_preview.facebook_preview.aiohttp.ClientSession", return_value=session
+        ):
+            with self.assertRaises(FacebookPreviewUnavailable) as error:
+                await _fetch_html_with_aiohttp(share)
+        self.assertEqual(error.exception.target_url, photo)
+        self.assertEqual(error.exception.reason, "fetch_failed")
+
+    async def test_unresolved_share_keeps_anonymous_reason_without_cookie_request(self):
+        share = "https://www.facebook.com/share/example-photo/"
+        error = FacebookPreviewUnavailable("login wall", reason="login_required", status=200)
+        with patch.dict("os.environ", {"FACEBOOK_COOKIE": "xs=synthetic-test"}), patch(
+            "discord_bot.features.social_preview.facebook_preview._fetch_html_with_aiohttp", new=AsyncMock(side_effect=error)
+        ), patch("discord_bot.features.social_preview.facebook_cookie.try_facebook_cookie", new=AsyncMock()) as cookie:
+            with self.assertRaises(FacebookPreviewUnavailable) as caught:
+                await _fetch_og_data(share)
+        self.assertIs(caught.exception, error)
+        cookie.assert_not_awaited()
+
+    async def test_rejected_redirect_keeps_failure_without_cookie_request(self):
+        photo = "https://www.facebook.com/photo.php?fbid=123"
+        error = FacebookPreviewUnavailable("rejected", target_url=photo, reason="redirect_rejected")
+        with patch.dict("os.environ", {"FACEBOOK_COOKIE": "xs=synthetic-test"}), patch(
+            "discord_bot.features.social_preview.facebook_preview._fetch_html_with_aiohttp", new=AsyncMock(side_effect=error)
+        ), patch("discord_bot.features.social_preview.facebook_cookie.try_facebook_cookie", new=AsyncMock()) as cookie:
+            with self.assertRaises(FacebookPreviewUnavailable):
+                await _fetch_og_data(photo)
+        cookie.assert_not_awaited()
 
     async def test_cookie_adds_public_image_after_anonymous_failure(self):
         from discord_bot.features.social_preview.facebook_fetch import FacebookPostData

@@ -125,6 +125,7 @@ async def notify_preview_failure(
             forward_notify_to_channel(
                 record=record, guild=getattr(message, "guild", None), bot=bot_client,
                 notify_type="error", error=f"{reason}: {diagnostic}",
+                source_user=message.author, source_channel=message.channel,
             ),
             timeout=NOTIFICATION_TIMEOUT_SECONDS,
         )

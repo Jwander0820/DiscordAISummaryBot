@@ -79,6 +79,10 @@ class PreviewFailureTests(unittest.IsolatedAsyncioTestCase):
                 handled = await getattr(module, f"handle_{key}_in_message")(message, bot_client=bot)
                 notify.assert_awaited_once()
                 self.assertIs(notify.await_args.kwargs["bot"], bot)
+                self.assertIs(notify.await_args.kwargs["source_user"], message.author)
+                self.assertIs(notify.await_args.kwargs["source_channel"], message.channel)
+                self.assertEqual(notify.await_args.kwargs["record"]["user_id"], "10")
+                self.assertEqual(notify.await_args.kwargs["record"]["channel_id"], "20")
                 self.assertIn("prepare_failed", notify.await_args.kwargs["error"])
                 self.assertIn("RuntimeError", notify.await_args.kwargs["record"]["summary"])
                 if platform == "Facebook":
@@ -183,6 +187,8 @@ class PreviewFailureTests(unittest.IsolatedAsyncioTestCase):
                 guild.get_channel.assert_called_once_with(456)
                 channel.send.assert_awaited_once()
                 self.assertIn(f"{platform} 預覽", channel.send.await_args.args[0])
+                self.assertIn("使用者: `demo（10）`", channel.send.await_args.args[0])
+                self.assertIn("來源頻道: `general（20）`", channel.send.await_args.args[0])
                 self.assertEqual(channel.send.await_args.kwargs["allowed_mentions"].to_dict()["parse"], [])
 
     async def test_excess_tracking_parameters_do_not_prevent_failure_notification(self):

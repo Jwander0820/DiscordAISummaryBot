@@ -5,7 +5,7 @@ import os
 import re
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
-from urllib.parse import urljoin, urlparse, urlunparse
+from urllib.parse import parse_qs, urljoin, urlparse, urlunparse
 
 import aiohttp
 import discord
@@ -20,7 +20,7 @@ from .text import extract_message_commentary
 from .failure_notifications import failure_reason, notify_preview_failure, public_failure_message, reply_preview_failure
 from .facebook_fetch import (
     MAX_FACEBOOK_HTML_BYTES, FacebookMedia, FacebookPostData, direct_facebook_mp4, extract_facebook_post,
-    facebook_post_identity, is_facebook_video_page,
+    canonical_facebook_url, facebook_post_identity, is_facebook_video_page,
 )
 
 logger = logging.getLogger("discord_digest_bot")
@@ -88,6 +88,14 @@ class FacebookPreviewUnavailable(RuntimeError):
         self.target_url = target_url
         self.reason = failure_reason("Facebook", reason)
         self.status = status
+
+
+@dataclass
+class _FacebookFetchResult:
+    url: str
+    status: int
+    html: str
+    target_url: str | None
 
 
 def extract_facebook_urls(content: str) -> List[str]:
@@ -170,7 +178,8 @@ def _is_supported_facebook_url(url: str) -> bool:
 def _is_facebook_access_wall(url: str, html: str) -> bool:
     """辨識明確的登入／checkpoint 頁面，不把通用 metadata 當貼文。"""
     path = urlparse(url).path.lower()
-    if any(path == prefix or path.startswith(f"{prefix}/") for prefix in FACEBOOK_ACCESS_WALL_PATHS):
+    if any(path in {prefix, f"{prefix}.php"} or path.startswith(f"{prefix}/")
+           for prefix in FACEBOOK_ACCESS_WALL_PATHS):
         return True
 
     html_lower = html.lower()
@@ -186,42 +195,72 @@ def _is_facebook_access_wall(url: str, html: str) -> bool:
     )
 
 
+def _facebook_content_target(url: str) -> str | None:
+    """A resolved content URL is separate from login/redirect destinations."""
+    canonical = canonical_facebook_url(url)
+    if not canonical or _is_facebook_access_wall(canonical, ""):
+        return None
+    return canonical if facebook_post_identity(canonical) else None
+
+
+def _facebook_login_next_target(url: str) -> str | None:
+    """Read one validated login-next hint; it never establishes visibility."""
+    login = canonical_facebook_url(url)
+    if not login or len(login) > 8192 or urlparse(login).path.lower() not in {"/login", "/login/", "/login.php"}:
+        return None
+    try:
+        values = parse_qs(urlparse(login).query, max_num_fields=64).get("next", [])
+        if len(values) != 1:
+            return None
+        return _facebook_content_target(urljoin(login, values[0]))
+    except ValueError:
+        return None
+
+
 async def _fetch_candidate_following_redirects(
     session: aiohttp.ClientSession,
     url: str,
-) -> Tuple[str, int, str]:
-    """逐段跟隨受限的 Facebook redirect，回傳最終 URL、狀態與 HTML。"""
+) -> _FacebookFetchResult:
+    """Follow bounded redirects while retaining the resolved content target."""
     current_url = url
+    target_url = _facebook_content_target(url)
     visited = set()
 
-    for _ in range(FACEBOOK_MAX_REDIRECTS + 1):
-        if current_url in visited:
-            raise FacebookPreviewUnavailable("Facebook 重新導向形成循環", reason="redirect_failed")
-        if not _is_supported_facebook_url(current_url):
-            raise FacebookPreviewUnavailable("Facebook 重新導向指向非 Facebook 網域", reason="redirect_rejected")
-        visited.add(current_url)
+    try:
+        for _ in range(FACEBOOK_MAX_REDIRECTS + 1):
+            if current_url in visited:
+                raise FacebookPreviewUnavailable("Facebook 重新導向形成循環", reason="redirect_failed")
+            if not _is_supported_facebook_url(current_url):
+                raise FacebookPreviewUnavailable("Facebook 重新導向指向非 Facebook 網域", reason="redirect_rejected")
+            visited.add(current_url)
+            target_url = _facebook_content_target(current_url) or target_url or _facebook_login_next_target(current_url)
 
-        async with session.get(current_url, timeout=25, allow_redirects=False) as resp:
-            status = resp.status
-            response_url = str(resp.url)
-            if status not in FACEBOOK_REDIRECT_STATUSES:
-                body = bytearray()
-                async for chunk in resp.content.iter_chunked(64 * 1024):
-                    if len(body) + len(chunk) > MAX_FACEBOOK_HTML_BYTES:
-                        raise FacebookPreviewUnavailable("Facebook 頁面超過解析大小上限", reason="response_too_large", status=status)
-                    body.extend(chunk)
-                return response_url, status, body.decode("utf-8", errors="replace")
+            async with session.get(current_url, timeout=25, allow_redirects=False) as resp:
+                status = resp.status
+                response_url = str(resp.url)
+                if status not in FACEBOOK_REDIRECT_STATUSES:
+                    body = bytearray()
+                    async for chunk in resp.content.iter_chunked(64 * 1024):
+                        if len(body) + len(chunk) > MAX_FACEBOOK_HTML_BYTES:
+                            raise FacebookPreviewUnavailable("Facebook 頁面超過解析大小上限", reason="response_too_large", status=status)
+                        body.extend(chunk)
+                    return _FacebookFetchResult(response_url, status, body.decode("utf-8", errors="replace"), target_url)
 
-            location = resp.headers.get("Location")
-            if not location:
-                raise FacebookPreviewUnavailable("Facebook 重新導向缺少 Location", reason="redirect_failed", status=status)
+                location = resp.headers.get("Location")
+                if not location:
+                    raise FacebookPreviewUnavailable("Facebook 重新導向缺少 Location", reason="redirect_failed", status=status)
 
-            next_url = urljoin(response_url, location)
-            if not _is_supported_facebook_url(next_url):
-                raise FacebookPreviewUnavailable("Facebook 重新導向指向非 Facebook 網域", reason="redirect_rejected", status=status)
-            current_url = next_url
+                next_url = urljoin(response_url, location)
+                if not _is_supported_facebook_url(next_url):
+                    raise FacebookPreviewUnavailable("Facebook 重新導向指向非 Facebook 網域", reason="redirect_rejected", status=status)
+                current_url = next_url
 
-    raise FacebookPreviewUnavailable("Facebook 重新導向次數超過上限", reason="redirect_failed")
+        raise FacebookPreviewUnavailable("Facebook 重新導向次數超過上限", reason="redirect_failed")
+    except FacebookPreviewUnavailable as exc:
+        exc.target_url = exc.target_url or target_url
+        raise
+    except Exception:
+        raise FacebookPreviewUnavailable("Facebook 頁面讀取失敗", target_url=target_url, reason="fetch_failed") from None
 
 
 async def _download_bytes(
@@ -306,7 +345,7 @@ async def _fetch_html_with_aiohttp(url: str) -> FacebookPostData:
     last_error = "Facebook 頁面讀取失敗"
     last_reason = "fetch_failed"
     last_status = 0
-    cookie_target = None
+    cookie_target = _facebook_content_target(url)
 
     async with aiohttp.ClientSession(headers=DEFAULT_HEADERS) as session:
         candidates = _build_candidate_urls(url)
@@ -320,9 +359,9 @@ async def _fetch_html_with_aiohttp(url: str) -> FacebookPostData:
             attempted.add(candidate)
 
             try:
-                final_url, status, html = await _fetch_candidate_following_redirects(session, candidate)
-                if facebook_post_identity(final_url):
-                    cookie_target = final_url
+                fetched = await _fetch_candidate_following_redirects(session, candidate)
+                final_url, status, html = fetched.url, fetched.status, fetched.html
+                cookie_target = fetched.target_url or cookie_target
                 attempted.add(final_url)
                 last_status = status
                 if _is_facebook_access_wall(final_url, html):
@@ -349,8 +388,12 @@ async def _fetch_html_with_aiohttp(url: str) -> FacebookPostData:
                 else:
                     last_error = "Facebook 頁面未提供可用的 Open Graph metadata"
                     last_reason = "no_content"
-            except FacebookPreviewUnavailable:
-                raise
+            except FacebookPreviewUnavailable as exc:
+                cookie_target = exc.target_url or cookie_target
+                if exc.reason != "fetch_failed":
+                    exc.target_url = cookie_target
+                    raise
+                last_error, last_reason, last_status = "Facebook 頁面讀取失敗", exc.reason, 0
             except Exception:
                 last_error = "Facebook 頁面讀取失敗"
                 last_reason, last_status = "fetch_failed", 0
@@ -380,9 +423,11 @@ async def _fetch_og_data(url: str) -> FacebookPostData:
     needs_cookie = (anonymous is None or not anonymous.has_content
                     or (needs_video and not anonymous.video_urls))
     cookie = os.environ.get("FACEBOOK_COOKIE", "")
-    if needs_cookie and cookie.strip():
+    cookie_target = _facebook_content_target(anonymous.url if anonymous else cookie_target)
+    if (needs_cookie and cookie.strip() and cookie_target
+            and getattr(last_error, "reason", None) != "redirect_rejected"):
         from .facebook_cookie import try_facebook_cookie
-        authenticated = await try_facebook_cookie(anonymous.url if anonymous else cookie_target, cookie)
+        authenticated = await try_facebook_cookie(cookie_target, cookie)
         if authenticated.has_content:
             if anonymous:
                 authenticated.title = anonymous.title or authenticated.title

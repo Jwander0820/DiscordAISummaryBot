@@ -22,7 +22,7 @@ Threads、Facebook、Instagram 使用 Components V2 卡片，圖片與影片依�
 
 Threads／Facebook／Instagram 遇到最終存取限制、Cookie 失敗、無可用內容或未預期處理／發送錯誤時，公開提示統一為「平台名預覽失敗 爛meta」。卡片保留評論、防雷及原連結；無法送出卡片時以同樣的固定文字回覆，原訊息保留。
 
-詳細原因只轉發既有 `DISCORD_NOTIFY_FORWARD_CHANNEL_ID`（botlog），可用 `DISCORD_NOTIFY_FORWARD_GUILD_ID` 指定其他伺服器。通知包含固定分類、來源 ID、時間、去除 tracking 的原連結，以及可用的錯誤類型／HTTP 狀態／Discord code／IG trace ID，不包含 Cookie、HTML、貼文正文、媒體簽名網址或原始例外字串；此通知不寄 Gmail、不寫歷史表。
+詳細原因只轉發既有 `DISCORD_NOTIFY_FORWARD_CHANNEL_ID`（botlog），可用 `DISCORD_NOTIFY_FORWARD_GUILD_ID` 指定其他伺服器。使用者與來源頻道優先顯示「名稱（ID）」；社群通知使用來源訊息已有的名稱，其他數字 ID 只查現成快取，名稱缺失時保留 ID，不額外呼叫 Discord API。通知另包含固定分類、時間、去除 tracking 的原連結，以及可用的錯誤類型／HTTP 狀態／Discord code／IG trace ID，不包含 Cookie、HTML、貼文正文、媒體簽名網址或原始例外字串；此通知不寄 Gmail、不寫歷史表。
 
 通知未設定、送達失敗或等待超過 5 秒時，伺服器仍保留安全的原因紀錄，公開卡片不改顯示診斷資訊；通知逾時就停止等待，繼續公開處理。成功備援與可用的部分內容維持既有呈現；若卡片已送出但來源清理發生未預期例外，只通知 botlog，不再追加失敗回覆。
 
@@ -87,6 +87,8 @@ Cookie 相當於登入憑證，只保留在自己的環境設定與本機受保�
 Facebook 公開影片使用可用的 MP4 直連，從 Open Graph 或目標貼文的 JSON 資料取得，同一影片優先使用 HD。有明確附件順序時，圖片與影片一起取前四項，直接放入 V2 卡片；只有 OG 備援時使用第一支影片，避免把封面當成額外照片。不下載／重新上傳影片；沒有可用 MP4 時維持文字、封面與原連結。DASH／HLS manifest、分段網址、已知無聲影像、直播或需 DRM 的來源不會當成完整 MP4。
 
 選填 `FACEBOOK_COOKIE` 可啟用獨立 Facebook 登入備援：匿名流程無可用內容，或影片頁只有封面卻沒有 MP4 時，最多對已解析的目標貼文增加一次請求。若匿名已取得影片，或一般圖片貼文已有內容，就不使用 Cookie。
+
+照片分享可能先導向 `photo.php`，再導向登入頁。程式會保留轉址途中已確認的照片／貼文目標；只有登入頁提供 `next` 時，也只接受經驗證的 Facebook 內容 URL 作為目標提示。登入頁和提示本身不是公開證明，Cookie 回應仍須確認目標與公開範圍。所有匿名候選仍未取得目標時，不送出 Cookie，保留匿名流程的失敗分類；外部 redirect 仍直接拒絕。
 
 取得方式與 Threads 相同：在已登入的 Facebook 目標頁開啟 Chrome DevTools → Network → 重新整理 → 選主文件 → Headers → Request Headers → Cookie，複製整段值，放入 bot 實際使用的 `.env`：
 

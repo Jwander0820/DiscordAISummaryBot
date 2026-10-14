@@ -1,10 +1,13 @@
 import logging
 import os
+import re
+import unicodedata
 from typing import Optional, Union
 
 import discord
 
 logger = logging.getLogger("discord_digest_bot")
+_BIDI_FORMATTING_CONTROLS = frozenset("\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
 
 
 def _truncate(text: object, limit: int = 260) -> str:
@@ -28,6 +31,43 @@ def _resolve_int_env(name: str) -> Optional[int]:
     return int(raw)
 
 
+def _display_name(entity, *, user: bool = False) -> str:
+    fields = ("nick", "display_name", "global_name", "name") if user else ("name",)
+    for field in fields:
+        value = getattr(entity, field, None)
+        if isinstance(value, str) and value.strip():
+            return value
+    return ""
+
+
+def _cached_source(entity, method: str, identifier):
+    """Names are optional; resolve them only from existing Discord caches."""
+    lookup = getattr(entity, method, None)
+    value = str(identifier or "")
+    if not callable(lookup) or not value.isdecimal():
+        return None
+    try:
+        return lookup(int(value))
+    except Exception:
+        return None
+
+
+def _identity_label(identifier, name: str) -> str:
+    """Keep IDs visible and display names on one bounded inline-code line."""
+    def inline(value):
+        text = re.sub(r"\s+", " ", str(value or ""))
+        text = "".join(char for char in text
+                       if unicodedata.category(char) != "Cc" and char not in _BIDI_FORMATTING_CONTROLS)
+        return text.strip().replace("`", "′")
+
+    source_id = _truncate(inline(identifier)) or "N/A"
+    source_name = inline(name)
+    suffix = f"（{source_id}）"
+    if not source_name or len(suffix) >= 260:
+        return source_id
+    return f"{_truncate(source_name, min(120, 260 - len(suffix)))}{suffix}"
+
+
 async def forward_notify_to_channel(
     *,
     record: dict,
@@ -37,6 +77,8 @@ async def forward_notify_to_channel(
     email_sent: Optional[bool] = None,
     email_message_id: Optional[str] = None,
     error: Optional[Union[Exception, str]] = None,
+    source_user=None,
+    source_channel=None,
 ) -> bool:
     """
     將通知記錄轉發到指定 Discord 頻道。
@@ -79,10 +121,18 @@ async def forward_notify_to_channel(
         icon = "🔴"
         title = "SERN Error 轉發"
 
+    user_id = record.get("user_id")
+    channel_id = record.get("channel_id")
+    user_name = (_display_name(source_user, user=True)
+                 or _display_name(_cached_source(guild, "get_member", user_id), user=True)
+                 or _display_name(_cached_source(bot, "get_user", user_id), user=True))
+    channel_name = (_display_name(source_channel)
+                    or _display_name(_cached_source(guild, "get_channel", channel_id))
+                    or _display_name(_cached_source(bot, "get_channel", channel_id)))
     lines = [
         f"{icon} **{title}**",
-        f"使用者: `{_truncate(record.get('user_id')) or 'N/A'}`",
-        f"來源頻道: `{_truncate(record.get('channel_id')) or 'N/A'}`",
+        f"使用者: `{_identity_label(user_id, user_name)}`",
+        f"來源頻道: `{_identity_label(channel_id, channel_name)}`",
         f"指令: `{_truncate(record.get('command')) or 'N/A'}`",
         f"時間: `{_truncate(record.get('call_time')) or 'N/A'}`",
     ]
