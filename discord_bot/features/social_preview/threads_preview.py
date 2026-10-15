@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import re
 import asyncio
-import logging
 import os
 from dataclasses import dataclass
 from typing import List, Optional
@@ -49,7 +48,6 @@ THREADS_INVALID_POST_MESSAGE = public_failure_message("Threads")
 # --- 小工具資料結構 ---
 
 load_dotenv()
-logger = logging.getLogger('discord_digest_bot')
 
 
 def _delete_view_timeout_from_env() -> Optional[float]:
@@ -75,13 +73,10 @@ class PreviewResult:
     建立 V2 所需的預覽資料。
     :param embed: 沿用的內部文字資料容器，不直接傳送 Embed
     :param files: discord.File 附件清單（最多四張圖片）
-    :param extra_text: 額外要貼在訊息裡的文字（例如影片連結）
     """
     embed: discord.Embed
     files: List[discord.File]
-    extra_text: Optional[str] = None
     video_url: Optional[str] = None
-    inline_video_url: Optional[str] = None
     image_urls: Optional[List[str]] = None
     media_urls: Optional[List[str]] = None
     media_spoilers: Optional[List[bool]] = None
@@ -206,15 +201,10 @@ async def build_threads_preview(
         embed.description = THREADS_INVALID_POST_MESSAGE
         return PreviewResult(embed=embed, files=[], preview_error="media_unavailable")
 
-    # V2 references the URL as media, so the message-content limit does not apply.
-    inline_video_url = gallery.video_url if not spoiler else None
-    if inline_video_url and gallery.media_spoilers[gallery.media_urls.index(inline_video_url)]:
-        inline_video_url = None
     return PreviewResult(
         embed=embed,
         files=gallery.files,
         video_url=gallery.video_url,
-        inline_video_url=inline_video_url,
         image_urls=gallery.image_urls,
         media_urls=gallery.media_urls,
         media_spoilers=gallery.media_spoilers,

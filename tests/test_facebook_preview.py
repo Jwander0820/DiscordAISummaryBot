@@ -11,7 +11,6 @@ load_tests = isolated_discord_suite(__name__)
 
 from discord_bot.features.social_preview.facebook_preview import (
     _build_candidate_urls,
-    _extract_og_data,
     _extract_page_data,
     _fetch_html_with_aiohttp,
     _fetch_og_data,
@@ -116,19 +115,19 @@ class FacebookPreviewTests(unittest.TestCase):
         self.assertEqual(_build_candidate_urls(url), [url])
 
     def test_empty_html_does_not_report_placeholder_as_fetched_metadata(self):
-        title, description, image_urls, video_urls = _extract_og_data("<html><body></body></html>")
+        post = _extract_page_data("<html><body></body></html>")
 
-        self.assertEqual(title, "")
-        self.assertEqual(description, "")
-        self.assertEqual(image_urls, [])
-        self.assertEqual(video_urls, [])
+        self.assertEqual(post.title, "")
+        self.assertEqual(post.description, "")
+        self.assertEqual(post.image_urls, [])
+        self.assertEqual(post.video_urls, [])
 
     def test_open_graph_title_counts_as_metadata(self):
         html = '<meta property="og:title" content="Real post title">'
 
-        title, _, _, _ = _extract_og_data(html)
+        post = _extract_page_data(html)
 
-        self.assertEqual(title, "Real post title")
+        self.assertEqual(post.title, "Real post title")
 
     def test_reel_og_video_replaces_structured_cover_only_media(self):
         url = "https://www.facebook.com/reel/123/"

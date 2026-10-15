@@ -180,23 +180,6 @@ def _normalize(url: str) -> str:
     return urlunparse((scheme, "threads.net", path, "", "hl=en", ""))
 
 
-def _variants(url: str) -> List[str]:
-    """回傳不同 Threads host 與 `hl=en` 組合的變體網址。"""
-    p = urlparse(_strip_tracking_query(url))
-    path = p.path.rstrip("/")
-    out = []
-    for host in ("threads.net", "threads.com"):
-        for q in ("hl=en", ""):
-            out.append(urlunparse((p.scheme or "https", host, path, "", q, "")))
-    # 去重保序
-    seen, uniq = set(), []
-    for u in out:
-        if u not in seen:
-            seen.add(u);
-            uniq.append(u)
-    return uniq
-
-
 def _threads_error_from_url(url: Optional[str]) -> Optional[str]:
     """Return a known Threads error code from a redirected final URL."""
     if not url:
@@ -812,12 +795,6 @@ def _render_text_spans(node: Any, *, spoiler_active: bool = False) -> List[TextS
     for child in _node_children(node):
         parts.extend(_render_text_spans(child, spoiler_active=next_spoiler_state))
     return coalesce_text_spans(parts)
-
-
-def _render_text_subtree(node: Any, *, spoiler_active: bool = False) -> str:
-    """Compatibility renderer for callers needing Markdown rather than spans."""
-    return "".join(f"||{span.text}||" if span.spoiler else span.text
-                   for span in _render_text_spans(node, spoiler_active=spoiler_active))
 
 
 def _extract_dom_text(post: ThreadsPost, soup: Any) -> bool:

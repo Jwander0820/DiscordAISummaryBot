@@ -61,6 +61,23 @@ def truncate_for_discord(text: str, *, limit: int = 1900, suffix: str = "...ï¼ˆå
     return text[: limit - len(suffix)] + suffix
 
 
+def split_for_discord(text: str, *, limit: int = 2000) -> list[str]:
+    """Split the complete reply without dropping text or cutting an emoji in half."""
+    if limit < 2:
+        raise ValueError("Discord page limit must allow a UTF-16 surrogate pair")
+    pages = []
+    start = units = 0
+    for index, char in enumerate(text):
+        width = 2 if ord(char) > 0xFFFF else 1
+        if units + width > limit:
+            pages.append(text[start:index])
+            start, units = index, 0
+        units += width
+    if start < len(text):
+        pages.append(text[start:])
+    return pages
+
+
 TZ_8 = datetime.now().astimezone().tzinfo
 try:
     from datetime import timedelta, timezone

@@ -1,3 +1,5 @@
+import asyncio
+from contextlib import suppress
 import logging
 import os
 
@@ -13,6 +15,7 @@ bootstrap_application()
 
 from .cogs import load_extensions
 from .integrations.gemini_client import gemini_model
+from .features.notifications.database import run_database_notifications
 
 logger = logging.getLogger("discord_digest_bot")
 
@@ -37,10 +40,21 @@ class DiscordSummaryBot(commands.Bot):
             allowed_mentions=discord.AllowedMentions.none(),
         )
         self._synced = False
+        self._database_notifications_task = None
 
     async def setup_hook(self) -> None:
         """在連上 Discord 前先載入所有 cogs。"""
         await load_extensions(self)
+        if self._database_notifications_task is None:
+            self._database_notifications_task = asyncio.create_task(run_database_notifications(self))
+
+    async def close(self) -> None:
+        if self._database_notifications_task is not None:
+            self._database_notifications_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._database_notifications_task
+            self._database_notifications_task = None
+        await super().close()
 
 
 bot = DiscordSummaryBot()

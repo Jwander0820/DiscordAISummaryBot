@@ -6,7 +6,7 @@ import html
 import json
 import re
 from typing import Any
-from urllib.parse import parse_qs, urljoin, urlparse, urlunparse
+from urllib.parse import parse_qs, urlparse, urlunparse
 
 from bs4 import BeautifulSoup
 

@@ -9,7 +9,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from ..db.repository import summary_repository
-from ..features.chat.history import MAX_HISTORY_MESSAGES, collect_non_bot_messages, format_message_history, truncate_for_discord
+from ..features.chat.history import MAX_HISTORY_MESSAGES, collect_non_bot_messages, format_message_history, split_for_discord, truncate_for_discord
 from ..features.chat.records import build_summary_record
 from ..features.notifications.service import notification_service
 from ..features.summaries.service import call_cloud_llm
@@ -247,10 +247,12 @@ class ConversationCog(commands.Cog):
 
     async def _send_requester_followup(self, interaction: discord.Interaction, content: str) -> None:
         """Send a public response that notifies only the command requester."""
-        await interaction.followup.send(
-            content,
-            allowed_mentions=_allowed_mentions_for_requester(interaction.user),
-        )
+        for index, page in enumerate(split_for_discord(content)):
+            await interaction.followup.send(
+                page,
+                allowed_mentions=(_allowed_mentions_for_requester(interaction.user)
+                                  if index == 0 else discord.AllowedMentions.none()),
+            )
 
     async def _send_as_amadeus(
         self,
@@ -290,12 +292,13 @@ class ConversationCog(commands.Cog):
             webhook = await channel.create_webhook(name=webhook_name)
         if allowed_mentions is None:
             allowed_mentions = discord.AllowedMentions.none()
-        await webhook.send(
-            content,
-            username=username,
-            avatar_url=avatar_url,
-            allowed_mentions=allowed_mentions,
-        )
+        for index, page in enumerate(split_for_discord(content)):
+            await webhook.send(
+                page,
+                username=username,
+                avatar_url=avatar_url,
+                allowed_mentions=allowed_mentions if index == 0 else discord.AllowedMentions.none(),
+            )
 
 
 async def setup(bot: commands.Bot) -> None:

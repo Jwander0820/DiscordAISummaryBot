@@ -73,9 +73,10 @@ async def summarize_messages(messages: list[discord.Message], prompt_scope: str 
 
         summary_text = response.text
         record["summary"] = summary_text
-        summary_repository.insert_summary(record)
-
-        logger.info("Summary saved successfully.")
+        if summary_repository.insert_summary(record):
+            logger.info("Summary saved successfully.")
+        else:
+            logger.warning("Summary generated but DB persistence failed; see database health notification.")
 
         await notification_service.dispatch(
             record=record,

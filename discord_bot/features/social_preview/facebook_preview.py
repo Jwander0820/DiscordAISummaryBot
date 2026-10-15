@@ -4,7 +4,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import List, Optional
 from urllib.parse import parse_qs, urljoin, urlparse, urlunparse
 
 import aiohttp
@@ -333,11 +333,6 @@ def _extract_page_data(html: str, page_url: str = "") -> FacebookPostData:
                             description=description or structured.description,
                             image_urls=image_urls or structured.image_urls, video_urls=unique_video_urls,
                             media=media)
-
-
-def _extract_og_data(html: str, page_url: str = "") -> Tuple[str, str, List[str], List[str]]:
-    post = _extract_page_data(html, page_url)
-    return post.title, post.description, post.image_urls, post.video_urls
 
 
 async def _fetch_html_with_aiohttp(url: str) -> FacebookPostData:

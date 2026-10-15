@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from discord_bot.features.social_preview import instagram_direct as direct
+from discord_bot.features.social_preview import instagram_fetch
 from discord_bot.features.social_preview.instagram_fetch import normalize_instagram_url
 
 URL = "https://www.instagram.com/p/ABC123"
@@ -51,7 +52,47 @@ class InstagramDirectTests(unittest.TestCase):
         self.assertEqual([m.url for m in post.media], IMAGES)
         self.assertEqual(post.author_username, "demo_user")
         self.assertEqual(post.text, "target caption")
-        self.assertIsNone(post.native_embed_url)
+
+    def test_bound_open_graph_extracts_caption_and_author_with_both_parsers(self):
+        for parser in (instagram_fetch.BeautifulSoup, None):
+            for caption in ('"hello world"', 'hello without quotes'):
+                with self.subTest(parser=parser, caption=caption), patch.object(instagram_fetch, "BeautifulSoup", parser):
+                    html = f"""
+                    <meta property="og:url" content="{URL}/">
+                    <meta property="og:title" content="Demo User (@demo.user) on Instagram">
+                    <meta property="og:description" content='12 likes, 1 comments - demo.user on Instagram: {caption}'>
+                    <meta property="twitter:image" content="{IMAGES[0]}">
+                    """
+                    post = direct.parse_instagram_page(URL, html)
+                    self.assertEqual(post.author_username, "demo.user")
+                    self.assertEqual(post.text, caption.strip('"'))
+                    self.assertEqual([m.url for m in post.media], IMAGES[:1])
+                    self.assertIsNone(post.preview_error)
+
+    def test_bound_open_graph_filters_profile_images(self):
+        html = og_page() + '<meta property="og:image" content="https://scontent.cdninstagram.com/v/t51.2885-19/avatar.jpg">'
+        post = direct.parse_instagram_page(URL, html)
+        self.assertEqual([m.url for m in post.media], IMAGES[:1])
+
+    def test_api_preserves_caption_and_selects_best_carousel_candidates(self):
+        video = "https://scontent.cdninstagram.com/large.mp4"
+        children = [
+            {"image_versions2": {"candidates": [
+                {"url": IMAGES[0], "width": 320, "height": 320},
+                {"url": IMAGES[1], "width": 1080, "height": 1080},
+            ]}},
+            {"thumbnail_url": IMAGES[2], "video_versions": [
+                {"url": "https://scontent.cdninstagram.com/small.mp4", "width": 320, "height": 320},
+                {"url": video, "width": 720, "height": 1280},
+            ]},
+        ]
+        for caption in ("api caption", {"text": "api caption"}):
+            with self.subTest(caption=caption):
+                post = direct.parse_instagram_api(URL, json.dumps({"items": [target(caption=caption, carousel_media=children)]}))
+                self.assertEqual(post.author_username, "demo_user")
+                self.assertEqual(post.author_name, "Demo")
+                self.assertEqual(post.text, "api caption")
+                self.assertEqual([(m.type, m.url) for m in post.media], [("image", IMAGES[1]), ("video", video)])
 
     def test_real_caption_precedes_accessibility_description(self):
         caption = "台北RH🫵😍🫵\n\nTシャツ\nThe Rolling Stones\n\n📷\n@nishimaki_tkmi"
@@ -212,7 +253,10 @@ class InstagramDirectTests(unittest.TestCase):
 
     def test_graph_sidecar_chooses_best_image_and_skips_video_poster(self):
         node = target(carousel_media=None, edge_sidecar_to_children={"edges": [
-            {"node": {"display_resources": [{"src": IMAGES[0], "config_width": 1080, "config_height": 1350}]}},
+            {"node": {"display_resources": [
+                {"src": IMAGES[2], "config_width": 320, "config_height": 320},
+                {"src": IMAGES[0], "config_width": 1080, "config_height": 1350},
+            ]}},
             {"node": {"video_url": "https://scontent.cdninstagram.com/reel.mp4", "display_url": IMAGES[1]}},
         ]})
         post = direct.parse_instagram_page(URL, page(node))

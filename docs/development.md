@@ -20,6 +20,8 @@ Bot 使用 Message Content Intent，應用程式也須開啟；邀請時包含 `
 
 前四個指令的 `len_msg` 接受 1～20,000；跳過 bot 訊息，實際數量依時間範圍與可取得內容決定。共同 history helper 的額外讀取也受 20,000 上限約束。`ROLE_MODE` 只控制最後兩個指令。
 
+三個問答指令保留原有答案截斷方式，再將包含使用者 mention、問題與答案的完整回覆分成每頁最多 2,000 UTF-16 units；後續頁不重複通知發問者。一般 followup 與 Amadeus webhook 共用相同長度界線。
+
 ## 架構
 
 | 位置 | 責任 |
@@ -35,6 +37,10 @@ Bot 使用 Message Content Intent，應用程式也須開啟；邀請時包含 `
 | `app.py` | 獨立 Flask `/`、`/health`；不啟動 Discord bot |
 
 `python bot.py` 只啟動 Discord bot。若本機另需 health server，可在另一個終端執行 `python app.py`；它不自行載入 `.env`，改 port 時先設定程序環境，例如 PowerShell 的 `$env:PORT='8081'`。Docker 入口會啟動兩者並使用注入的環境。`/health` 正常不代表 Discord Gateway 或 LLM 已通過功能驗證。
+
+DB 層的 `health.py` 只收集去識別化故障／恢復事件；`features/notifications/database.py` 的單一 consumer 由 bot lifecycle 管理，等待 ready 後發送 botlog，關閉 bot 時取消。這條路徑不輪詢 DB、不呼叫 Gmail，也不把通知寫回 DB。
+
+Instagram 的現行抓取入口是 `fetch_instagram_post()` → `instagram_direct.py`，必要時才走 Cookie／KK 備援。舊 `urllib` 抓取、原生 embed 與猜測 `/media/` URL 的備援入口已移除；共用資料模型與仍使用的解析 helper 保留。
 
 ## 測試
 

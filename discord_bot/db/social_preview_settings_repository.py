@@ -7,6 +7,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from .health import database_health
 from .schema import (
     POSTGRES_CREATE_GUILD_SOCIAL_PREVIEW_SETTINGS_SQL,
     SQLITE_CREATE_GUILD_SOCIAL_PREVIEW_SETTINGS_SQL,
@@ -53,18 +54,20 @@ class SocialPreviewSettingsRepository:
             self._init_sqlite()
 
         self._initialized = True
+        if self._ready:
+            database_health.succeeded("guild_social_preview_settings", self.db_type, "initialize")
         return self._ready
 
     def _init_postgres(self) -> None:
         if psycopg2 is None:
             logger.error("psycopg2 未安裝，無法初始化 Social Preview 設定表")
-            self.db_enabled = False
+            self._mark_unavailable(reason="DriverUnavailable", operation="initialize")
             return
 
         database_url = os.getenv("DATABASE_URL")
         if not database_url:
             logger.error("使用 PostgreSQL 但未設定 DATABASE_URL，停用 Social Preview 設定寫入")
-            self.db_enabled = False
+            self._mark_unavailable(reason="ConfigurationMissing", operation="initialize")
             return
 
         try:
@@ -76,7 +79,7 @@ class SocialPreviewSettingsRepository:
             logger.info("Social Preview guild settings PostgreSQL 初始化完成")
         except Exception as exc:
             logger.error("Social Preview guild settings PostgreSQL 初始化失敗: %s", exc, exc_info=True)
-            self.db_enabled = False
+            self._mark_unavailable(error=exc, operation="initialize")
 
     def _init_sqlite(self) -> None:
         sqlite_path = os.getenv("SQLITE_PATH", "summaries.db")
@@ -94,7 +97,7 @@ class SocialPreviewSettingsRepository:
             logger.info("Social Preview guild settings SQLite 初始化完成 (%s)", sqlite_path)
         except Exception as exc:
             logger.error("Social Preview guild settings SQLite 初始化失敗: %s", exc, exc_info=True)
-            self.db_enabled = False
+            self._mark_unavailable(error=exc, operation="initialize")
 
     def close(self) -> None:
         self._close_connection()
@@ -120,9 +123,12 @@ class SocialPreviewSettingsRepository:
             return self.init(force=True)
         return False
 
-    def _mark_unavailable(self) -> None:
+    def _mark_unavailable(self, *, error: Exception | None = None,
+                          reason: str = "DatabaseError", operation: str = "read") -> None:
         self.db_enabled = False
+        self._last_init_attempt = time.monotonic()
         self._close_connection()
+        database_health.failed("guild_social_preview_settings", self.db_type, operation, error=error, reason=reason)
 
     def get_setting(self, guild_id: str, platform: str) -> Optional[bool]:
         if not self._ensure_ready():
@@ -137,7 +143,7 @@ class SocialPreviewSettingsRepository:
             row = self.cursor.fetchone()
         except Exception as exc:
             logger.error("讀取 Social Preview guild setting 失敗: %s", exc, exc_info=True)
-            self._mark_unavailable()
+            self._mark_unavailable(error=exc)
             return None
         if row is None:
             return None
@@ -172,7 +178,7 @@ class SocialPreviewSettingsRepository:
             return True
         except Exception as exc:
             logger.error("寫入 Social Preview guild setting 失敗: %s", exc, exc_info=True)
-            self._mark_unavailable()
+            self._mark_unavailable(error=exc, operation="write")
             return False
 
     def clear_setting(self, guild_id: str, platform: str) -> bool:
@@ -190,7 +196,7 @@ class SocialPreviewSettingsRepository:
             return True
         except Exception as exc:
             logger.error("清除 Social Preview guild setting 失敗: %s", exc, exc_info=True)
-            self._mark_unavailable()
+            self._mark_unavailable(error=exc, operation="write")
             return False
 
     def list_guild_settings(self, guild_id: str) -> dict[str, bool]:
@@ -203,7 +209,7 @@ class SocialPreviewSettingsRepository:
             return {str(platform): bool(enabled) for platform, enabled in self.cursor.fetchall()}
         except Exception as exc:
             logger.error("列出 Social Preview guild settings 失敗: %s", exc, exc_info=True)
-            self._mark_unavailable()
+            self._mark_unavailable(error=exc)
             return {}
 
     def is_available(self) -> bool:

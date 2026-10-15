@@ -37,6 +37,8 @@ Gemini 模型順序在 `discord_bot/integrations/gemini_client.py` 的 `SUMMARY_
 
 資料庫包含 `summaries`、`deepfaker_events` 與 `guild_social_preview_settings`。SQLite 放在容器內預設路徑不保證跨重建保留；正式環境使用持久 PostgreSQL，或將 SQLite 檔案置於持久 volume。
 
+三個 repository 連線失效後會冷卻 30 秒，在下一次實際 DB 需求時重新初始化；正常連線持續重用，不固定輪詢。歷史寫入失敗會先 rollback；連線仍可用時讓下一次寫入繼續使用。失敗／跳過的紀錄不自動補寫，commit 結果不確定時也不立即重送，避免重複資料。DB 故障與恢復通知見下節。
+
 同步工具預設只備份兩個歷史表 `summaries`、`deepfaker_events`，不包含 guild 設定，也不能取代 PostgreSQL 全庫備份。命令與模式見[開發與工具指南](development.md#歷史紀錄備份)。
 
 ## 社群預覽
@@ -61,8 +63,8 @@ Guild 管理者可用 `/社群預覽設定` 即時覆蓋全域預設，包括在
 
 | 變數 | 省略時 | 範本與用途 |
 | --- | --- | --- |
-| `DISCORD_NOTIFY_FORWARD_CHANNEL_ID` | 無；略過轉發 | 留空；填有效數字頻道 ID 才轉發摘要／問答通知及 Threads／Facebook／Instagram 預覽異常，不是轉發所有 log |
-| `DISCORD_NOTIFY_FORWARD_GUILD_ID` | 使用來源 guild | 留空；可選的通知目標 guild ID |
+| `DISCORD_NOTIFY_FORWARD_CHANNEL_ID` | 無；略過轉發 | 留空；填有效數字頻道 ID 才轉發摘要／問答、三平台預覽異常與 DB 故障／恢復，不是轉發所有 log |
+| `DISCORD_NOTIFY_FORWARD_GUILD_ID` | 一般通知使用來源 guild；DB 通知由目標頻道決定 | 留空；可選的通知目標 guild ID，DB 通知會檢查頻道是否符合 |
 | `GMAIL_NOTIFY_ENABLED` | `1` | `0`；準備好 OAuth 與收件者後才開啟 |
 | `GMAIL_CLIENT_ID` | 無 | 留空待填，Gmail 啟用時需要 |
 | `GMAIL_CLIENT_SECRET` | 無 | 留空待填，Gmail 啟用時需要 |
@@ -72,6 +74,8 @@ Guild 管理者可用 `/社群預覽設定` 即時覆蓋全域預設，包括在
 | `GMAIL_CLIENT_SECRET_PATH` | `../client_secret.json` | `client_secret.json`；僅手動 OAuth 維護 helper 使用，路徑相對於工作目錄 |
 
 Gmail 關閉時完全略過 Gmail API，不影響 Discord 通知。日期欄位目前只是以輸入日期加 7 天產生郵件提醒，並非向 Google 查得的實際有效期；不需要提醒就留空，不填 `YYYY-MM-DD` 等占位文字。
+
+DB botlog 通知包含資料表、DB 類型、失敗階段、例外型別／SQLSTATE 與恢復方式，不含 SQL、紀錄內容、連線字串或原始例外訊息。啟動故障等 Discord ready 後送出；首次故障與恢復各通知，同一 repository 持續失敗最多每五分鐘提醒一次，沒有操作時不額外查 DB。通知在有限事件佇列中獨立處理，單次送出最多五秒，失敗不影響使用者指令，也不寄 Gmail。詳細 traceback 留在 Server log；持續故障先檢查 DB 服務、網路或 volume／權限，再決定是否重啟容器。恢復不代表舊紀錄已補回。
 
 `generate_gmail_env_tokens()`／`extract_gmail_env_tokens()` 會輸出或寫回敏感資訊，只能在本機明確需要時手動使用，不屬於啟動或日常診斷流程。
 

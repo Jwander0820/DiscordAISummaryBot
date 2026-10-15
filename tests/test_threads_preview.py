@@ -205,9 +205,8 @@ class ThreadsPreviewTests(unittest.IsolatedAsyncioTestCase):
             ThreadsMedia("video", "https://scontent.cdninstagram.com/second.mp4"),
         ])
         preview = await build_threads_preview(fetch.return_value.url)
-        self.assertEqual(preview.inline_video_url, first)
+        self.assertEqual(preview.video_url, first)
         self.assertEqual(preview.media_urls, [first, "https://scontent.cdninstagram.com/second.mp4"])
-        self.assertIsNone(preview.extra_text)
         self.assertEqual(preview.files, [])
         image = getattr(preview.embed, "image", None)
         self.assertFalse(image.get("url") if isinstance(image, dict) else getattr(image, "url", None))
@@ -272,7 +271,7 @@ class ThreadsPreviewTests(unittest.IsolatedAsyncioTestCase):
         fetch.return_value = ThreadsPost(url="https://www.threads.com/@demo/post/Video001", media=[ThreadsMedia("video", video)])
         preview = await build_threads_preview(fetch.return_value.url)
         self.assertEqual(preview.video_url, video)
-        self.assertEqual(preview.inline_video_url, video)
+        self.assertEqual(preview.media_urls, [video])
         download.assert_not_awaited()
 
     def test_extract_threads_urls_accepts_share_link(self):
@@ -296,7 +295,7 @@ class ThreadsPreviewTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(preview.embed.description, THREADS_INVALID_POST_MESSAGE)
         self.assertEqual(preview.embed.url, url)
         self.assertEqual(preview.files, [])
-        self.assertIsNone(preview.inline_video_url)
+        self.assertIsNone(preview.video_url)
 
     @patch("discord_bot.features.social_preview.threads_preview.cleanup_source_message", new_callable=AsyncMock)
     @patch("discord_bot.features.social_preview.sender.send_preview_as_author", new_callable=AsyncMock)
@@ -408,8 +407,7 @@ class ThreadsPreviewTests(unittest.IsolatedAsyncioTestCase):
         preview = await build_threads_preview("https://www.threads.com/@demo/post/abc")
 
         self.assertEqual(preview.video_url, video_url)
-        self.assertEqual(preview.inline_video_url, video_url)
-        self.assertIsNone(preview.extra_text)
+        self.assertEqual(preview.media_urls, [video_url])
         self.assertEqual(preview.files, [])
 
     def test_delete_preview_view_adds_video_link_button(self):
@@ -439,7 +437,6 @@ class ThreadsPreviewTests(unittest.IsolatedAsyncioTestCase):
             embed=discord.Embed(title="Threads @demo"),
             files=[],
             video_url=video_url,
-            inline_video_url=video_url,
         )
         mock_send_preview_as_author.return_value = types.SimpleNamespace(id=123)
 

@@ -1,10 +1,8 @@
-import re
 import os
 import json
 import pickle
 import base64
 import mimetypes
-from typing import Union
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv, set_key
 from email import encoders
