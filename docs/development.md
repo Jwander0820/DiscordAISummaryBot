@@ -40,7 +40,7 @@ Bot 使用 Message Content Intent，應用程式也須開啟；邀請時包含 `
 
 DB 層的 `health.py` 只收集去識別化故障／恢復事件；`features/notifications/database.py` 的單一 consumer 由 bot lifecycle 管理，等待 ready 後發送 botlog，關閉 bot 時取消。這條路徑不輪詢 DB、不呼叫 Gmail，也不把通知寫回 DB。
 
-`social_duplicate_cog.py` 獨立接收 X／Twitter 原留言與管理出警設定；三平台則由既有預覽流程在完整送達後登記分享。判重與持久資料放在 `duplicate_service.py`／`social_duplicate_repository.py`，關閉出警不會停用三平台預覽。
+`social_duplicate_cog.py` 獨立接收 X／Twitter 與 YouTube 原留言並管理出警設定；三平台則由既有預覽流程在完整送達後登記分享。YouTube 影片 ID／網址正規化放在 `youtube_links.py`，不抓取頁面。判重與持久資料放在 `duplicate_service.py`／`social_duplicate_repository.py`，關閉出警不會停用三平台預覽。
 
 Instagram 的現行抓取入口是 `fetch_instagram_post()` → `instagram_direct.py`，必要時才走 Cookie／KK 備援。舊 `urllib` 抓取、原生 embed 與猜測 `/media/` URL 的備援入口已移除；共用資料模型與仍使用的解析 helper 保留。
 
@@ -76,6 +76,7 @@ Parser 或預覽變更時先跑對應回歸，例如：
 ```powershell
 .\.venv\Scripts\python.exe -m unittest tests.test_social_duplicate_service tests.test_social_duplicate_patrol tests.test_social_duplicate_webhook tests.test_x_duplicate_links tests.test_x_duplicate_patrol
 .\.venv\Scripts\python.exe -m unittest tests.test_cross_channel_patrol tests.test_cross_channel_patrol_view
+.\.venv\Scripts\python.exe -m unittest tests.test_youtube_duplicate_links tests.test_youtube_duplicate_patrol
 ```
 
 部署腳本測試需要 Bash，透過 fake Docker 執行，不操作實際 Docker daemon。Windows 若誤選 WSL Bash，改用已安裝的 Git for Windows Bash；以此工作區的安裝路徑為例，僅在本次終端調整：

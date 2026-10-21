@@ -11,6 +11,7 @@ from discord.ext import commands
 from ..features.social_preview.duplicate_service import social_duplicate_service
 from ..features.social_preview.duplicate_patrol import record_original_share
 from ..features.social_preview.x_links import extract_first_x_url
+from ..features.social_preview.youtube_links import extract_first_youtube_url
 from ..features.social_preview.sender import log_preview_link
 
 
@@ -38,10 +39,12 @@ class SocialDuplicateCog(commands.Cog):
         if (message.author.bot or getattr(message, "webhook_id", None) is not None
                 or message.guild is None):
             return
-        url = extract_first_x_url(message.content or "")
-        if url is not None:
-            log_preview_link(message, platform="X", url=url)
-            await record_original_share(message, platform="x", url=url)
+        for platform, label, extract in (("x", "X", extract_first_x_url),
+                                          ("youtube", "YouTube", extract_first_youtube_url)):
+            url = extract(message.content or "")
+            if url is not None:
+                log_preview_link(message, platform=label, url=url)
+                await record_original_share(message, platform=platform, url=url)
 
     @app_commands.command(name="社群出警設定", description="設定社群重複分享出警的開關、天數與跨頻道範圍")
     @app_commands.default_permissions(manage_guild=True)

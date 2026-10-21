@@ -2,7 +2,7 @@
 
 Threads、Facebook、Instagram 共用 Components V2 卡片、Webhook 代發與刪除流程。所有設定名稱及預設值見[環境變數指南](configuration.md)，完整範本見 [`.env.example`](../.env.example)。
 
-X／Twitter 僅提供[重複分享偵測](#xtwitter-僅偵測重複分享)，不接管其他 bot 的預覽。出警有獨立開關，見[同頻道重複分享出警](#同頻道重複分享出警)。
+X／Twitter 與 YouTube 僅提供重複分享偵測，不接管預覽，詳見下方各平台說明。出警有獨立開關，見[同頻道重複分享出警](#同頻道重複分享出警)。
 
 ## 伺服器開關
 
@@ -129,7 +129,7 @@ Cookie 只傳給 HTTPS `www.instagram.com` 的目標媒體 API，不跟隨轉址
 
 ### 社群預覽 log
 
-進入預覽處理時，Threads、Facebook、Instagram 各記錄一行 INFO；X 在偵測到有效 status 連結時記錄。沿用 console 與 `bot.log`。以下為虛構格式範例，名稱與大括號內的帳號／貼文代碼均為占位符，不對應真實訊息或可使用的貼文網址：
+進入預覽處理時，Threads、Facebook、Instagram 各記錄一行 INFO；X 與 YouTube 分別在偵測到有效 status／影片連結時記錄。沿用 console 與 `bot.log`。以下為虛構格式範例，名稱與大括號內的帳號／貼文代碼均為占位符，不對應真實訊息或可使用的貼文網址：
 
 ```text
 範例使用者 在 範例頻道 貼了 Threads url https://www.threads.com/@{example_author}/post/{example_post_id}
@@ -156,7 +156,7 @@ Instagram 成功階段、完整成功摘要與 V2 發送成功的詳細診斷均
 
 ```powershell
 rg 'instagram_diagnostic' bot.log
-rg '貼了 (Threads|Facebook|Instagram|X) url' bot.log
+rg '貼了 (Threads|Facebook|Instagram|X|YouTube) url' bot.log
 rg '某筆紀錄的trace_id' bot.log
 ```
 
@@ -202,11 +202,11 @@ Threads／Facebook／Instagram 只對已啟用預覽的平台、已確認的文�
 
 警報採 Components V2：橘色色條 Container 內有粗體「不看訊息警察」、警報文字、原始連結，右側為 GIF 縮圖。頭像與 GIF 使用固定 CDN 資源，位置集中在 `duplicate_webhook.py`；頭像以每則 `avatar_url` 指定，既有專用 webhook 也會使用新資源。卡片不附測試註記，只允許通知本次分享者，無其他互動控制鈕；CDN 內容是否正常顯示仍受來源可用性及 Discord 客戶端影響。
 
-Threads、Instagram、Facebook 與 X／Twitter 均經過共用出警流程，使用相同 V2 格式及 CDN 資源；各平台原有的觸發條件與開關維持不變。缺少 Webhook 權限或發送失敗時，仍保留 bot 文字回覆備援。
+Threads、Instagram、Facebook、X／Twitter 與 YouTube 均經過共用出警流程，使用相同 V2 格式及 CDN 資源；各平台原有的觸發條件與開關維持不變。缺少 Webhook 權限或發送失敗時，仍保留 bot 文字回覆備援。
 
 同連結在同頻道總共第 2 次出現（首次出警）用 CDN 狗狗 PNG 頭像，第 3 次起改用 CDN 警察 JPG；右側始終為同一個狗狗 GIF。不同連結各自計數，不因另一篇已升級就改掉自己的頭像。兩種頭像仍使用各自的專用 webhook，顯示名稱都維持「不看訊息警察」，不修改 webhook 全域頭像。計數隨快取從 DB 的載入期間恢復，運作中增量累計；重送相同來源事件不重複計數。調整天數／重啟時，只計重建範圍內的分享，不計整個 DB 的永久累積次數。
 
-出警連結行顯示為 `⬆️ 查看原始連結`，只有文字可點擊，跳轉到先前的 Discord 分享訊息（三平台為預覽，X 為原留言）。第 2 次不加尾句；第 3～5 次在連結後分別加上「第 3 次了！三回啊三回！」、「第 4 次了！你是只看自己傳的訊息是不是！」、「第 5 次了！警察都認得這篇了，你還不認得！」。第 6 次分享起先生成吐槽，再發警報；固定由程式加上「第 N 次了！」，N 使用阿拉伯數字，模型只提供後面的原句，吐槽不包在連結內。
+出警連結行顯示為 `⬆️ 查看原始連結`，只有文字可點擊，跳轉到先前的 Discord 分享訊息（三平台為預覽，X／YouTube 為原留言）。第 2 次不加尾句；第 3～5 次在連結後分別加上「第 3 次了！三回啊三回！」、「第 4 次了！你是只看自己傳的訊息是不是！」、「第 5 次了！警察都認得這篇了，你還不認得！」。第 6 次分享起先生成吐槽，再發警報；固定由程式加上「第 N 次了！」，N 使用阿拉伯數字，模型只提供後面的原句，吐槽不包在連結內。
 
 Gemini 吐槽為單段繁體中文約 20～100 字（不含程式附加次數），可按次數玩梗、諧音，
 自然使用當下暱稱；輸入只有分享次數與最多 32 字的顯示名稱，沒有聊天內容、貼文、ID 或網址。
@@ -226,7 +226,7 @@ DB 保存完整事件歷史；記憶體只放文章識別與必要 ID。每次�
 ### 出警事件與名稱快照
 
 `social_share_events` 保存符合條件的分享；`social_patrol_events` 另外保存實際觸發的
-出警事件，Threads／Instagram／Facebook／X 共用。首次分享、停用期間、未命中重複及
+出警事件，Threads／Instagram／Facebook／X／YouTube 共用。首次分享、停用期間、未命中重複及
 獨立測試發送不產生出警事件。新表由既有社群 repository 初始化自動建立，支援 SQLite／PostgreSQL。
 
 每筆出警保留觸發者的 `user_id`、`username`、`global_name`、`display_name`，以及
@@ -266,3 +266,13 @@ X 使用獨立的出警 listener，共用 `/社群出警設定` 的開關與天�
 偵測到有效 X 連結時，沿用共用社群活動格式記錄一行 INFO，包含安全處理過的分享者／頻道名稱及正規化網址（移除 query／fragment）。首次與重複分享都會記錄；停用出警仍保留這行偵測 log，但不寫入分享歷史或出警。bot／webhook、DM 與非貼文網址不記錄。
 
 這條路徑不建立或轉發預覽，不刪除、編輯或壓制原留言的 embed，不偵測其他 bot／webhook 的訊息，也不追蹤編輯事件。如果其他 bot 刪除了原留言，跳轉可能失效，本 bot 不介入尋找其替代預覽。原訊息若另含 Threads／Facebook／Instagram 連結，既有三平台行為仍由原預覽流程決定，X listener 不介入。
+
+### YouTube 僅偵測重複分享
+
+YouTube 與 X 使用相同的純出警流程：不發送預覽、不抓取影片或查 API，不刪改原留言，也不壓制 Discord 原生 embed。共用 `/社群出警設定` 的總開關、天數與跨頻道清單，不依賴三平台預覽開關，不需要新的 API Key、Cookie 或環境變數。
+
+以影片 ID 為大小寫敏感的判重 key，DB 平台為 `youtube`，網址統一存為 `https://youtu.be/{影片ID}`。支援 `youtu.be/{影片ID}`、`youtube.com/watch?v={影片ID}`、`/shorts/{影片ID}`、`/live/{影片ID}`、`/embed/{影片ID}`，主站可使用 `www`、`m`、`music` 子網域；`si`、`t`、`start`、`list`、`index`、UTM 與 fragment 不影響身分。同影片不同時間戳視為同篇；播放清單含有效 `v` 時只認該影片，純清單、頻道、搜尋、clip、redirect 與第三方網址不登記或展開。
+
+虛構格式範例：`https://youtu.be/DemoVid0001?si=example` 與 `https://www.youtube.com/watch?v=DemoVid0001&t=42` 都保存 key `DemoVid0001`、網址 `https://youtu.be/DemoVid0001`；不代表範例影片存在。
+
+第一次只記錄，重貼時引用第一次分享的 Discord 原留言；跨頻道僅在已啟用且符合清單時共用次數。每則訊息只登記第一個有效 YouTube 影片連結，與同訊息的 X 連結可各自登記一次。重送同一來源不增加計數，bot／webhook、DM 與訊息編輯不處理。偵測到時記錄一行正規化 YouTube INFO log，停用出警時仍記 log，但不寫歷史。出警事件與送達狀態沿用共用表；重啟依設定天數恢復，不回掃舊訊息。

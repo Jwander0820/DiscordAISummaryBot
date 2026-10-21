@@ -4,11 +4,14 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 from .facebook_fetch import facebook_post_identity
 from .x_links import x_post_identity
+from .youtube_links import youtube_post_identity
 
 
 def post_identity(platform: str, url: str):
     if platform == "x":
         return x_post_identity(url)
+    if platform == "youtube":
+        return youtube_post_identity(url)
     try:
         parsed = urlparse(url)
         if parsed.scheme not in {"https", "http"} or parsed.username or parsed.password or parsed.port not in {None, 80, 443}:

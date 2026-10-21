@@ -6,7 +6,7 @@
 | --- | --- |
 | [專案 README](../README.md) | 功能與本機快速啟動 |
 | [環境變數](configuration.md) | 必填／選填、程式預設、範本選擇、設定生效方式 |
-| [社群預覽](social-preview.md) | 三平台預覽、X／Twitter 出警、防雷、Cookie、持久保存與診斷 |
+| [社群預覽](social-preview.md) | 三平台預覽、X／Twitter 與 YouTube 出警、防雷、Cookie、持久保存與診斷 |
 | [開發與工具](development.md) | 架構、指令限制、測試、歷史備份與一次性分享回補 |
 | [GitHub 部署](../tools/deploy/README.md) | main 自動部署、修改 env、Cookie／log 持久性與回退 |
 
