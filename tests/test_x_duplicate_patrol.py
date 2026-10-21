@@ -13,6 +13,7 @@ from discord_bot.cogs import social_duplicate_cog, social_preview_cog
 from discord_bot.features.social_preview import duplicate_patrol as patrol
 from discord_bot.features.social_preview.duplicate_service import SocialDuplicateService
 from discord_bot.db.social_duplicate_repository import SocialDuplicateRepository
+from discord_bot.features.social_preview.patrol_records import PatrolDelivery
 
 load_tests = isolated_discord_suite(__name__)
 
@@ -38,7 +39,7 @@ class XPatrolTests(unittest.IsolatedAsyncioTestCase):
         patcher = patch.object(patrol, "social_duplicate_service", self.service)
         patcher.start()
         self.addCleanup(patcher.stop)
-        self.announce_patch = patch.object(patrol, "_announce", AsyncMock())
+        self.announce_patch = patch.object(patrol, "_announce", AsyncMock(return_value=PatrolDelivery("webhook", "900")))
         self.announce = self.announce_patch.start()
         self.addCleanup(self.announce_patch.stop)
         self.cog = social_duplicate_cog.SocialDuplicateCog(None)

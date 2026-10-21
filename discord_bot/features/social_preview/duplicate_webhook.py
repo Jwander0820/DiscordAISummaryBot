@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 
 import discord
+from .patrol_records import PatrolDelivery, delivered
 
 logger = logging.getLogger("discord_digest_bot")
 PATROL_NAME = "不看訊息警察"
@@ -41,7 +42,7 @@ def build_patrol_view(content: str, jump_url: str, *, share_count=2) -> discord.
     return view
 
 
-async def send_patrol_webhook(message, previous, *, content: str, mentions, share_count=2) -> bool:
+async def send_patrol_webhook(message, previous, *, content: str, mentions, share_count=2) -> PatrolDelivery | bool:
     """Use a dedicated bot-owned webhook; let the caller provide bot fallback."""
     channel = message.channel
     thread = channel if isinstance(channel, discord.Thread) else None
@@ -69,8 +70,8 @@ async def send_patrol_webhook(message, previous, *, content: str, mentions, shar
                       view=build_patrol_view(content, jump_url, share_count=share_count))
         if thread is not None:
             kwargs["thread"] = thread
-        await hook.send(**kwargs)
-        return True
+        result = await hook.send(**kwargs)
+        return delivered("webhook", result)
     except Exception as exc:
         # Do not log the webhook object, token, URL, payload or raw API error.
         logger.warning("Social duplicate webhook unavailable: error_type=%s", type(exc).__name__)

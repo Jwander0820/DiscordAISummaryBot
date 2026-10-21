@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 from ...db.health import database_health
 from ...db.social_duplicate_repository import ShareEvent, SocialDuplicateRepository, report_failure
+from ...db.social_patrol_repository import SocialPatrolRepository
 
 logger = logging.getLogger("discord_digest_bot")
 
@@ -22,6 +23,7 @@ class DuplicateMatch:
 class SocialDuplicateService:
     def __init__(self, repository=None):
         self.repository = repository or SocialDuplicateRepository()
+        self.patrol_repository = SocialPatrolRepository(self.repository)
         self.ready = False
         self.settings = {}
         self.cache = {}

@@ -15,7 +15,8 @@ NOTIFICATION_TIMEOUT_SECONDS = 5
 
 def format_database_event(event: DatabaseEvent) -> str:
     labels = {"summaries": "summaries", "deepfaker_events": "deepfaker_events",
-              "guild_social_preview_settings": "guild 社群設定", "social_share_events": "社群分享歷史／出警設定"}
+              "guild_social_preview_settings": "guild 社群設定", "social_share_events": "社群分享歷史／出警設定",
+              "social_patrol_events": "社群出警事件紀錄"}
     repository = labels.get(event.repository, "DB")
     backend = event.backend if event.backend in {"sqlite", "postgres"} else "unknown"
     operation = {"initialize": "初始化／重連", "read": "讀取", "write": "寫入"}.get(event.operation, "操作")

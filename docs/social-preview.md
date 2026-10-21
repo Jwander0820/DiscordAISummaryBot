@@ -202,6 +202,34 @@ DB 保存完整事件歷史；記憶體只放文章識別與必要 ID。每次�
 
 判重 key 為 `(guild_id, channel_id, platform, post_key)`，不同伺服器、頻道或平台分開計算，Threads 與 X 即使文章 key 相同也不碰撞。這是程序內索引；同一 bot 不應同時啟動多個實例期待即時共享計數。關閉出警不記錄新分享，重開只載入 DB，不回掃停用期間的 Discord 歷史。
 
+### 出警事件與名稱快照
+
+`social_share_events` 保存符合條件的分享；`social_patrol_events` 另外保存實際觸發的
+出警事件，Threads／Instagram／Facebook／X 共用。首次分享、停用期間、未命中重複及
+獨立測試發送不產生出警事件。新表由既有社群 repository 初始化自動建立，支援 SQLite／PostgreSQL。
+
+每筆出警保留觸發者的 `user_id`、`username`、`global_name`、`display_name`，以及
+伺服器／頻道 ID 和名稱快照。名字取自事件當下，不當識別鍵；取得不到為 NULL，
+不回查歷史暱稱、不用現在名字回填舊事件。亦保留社群、貼文 key、正規化網址、
+當次 Discord 原訊息與預覽 ID、首次分享者／原訊息 ID、跳轉目標 ID 及當時 `share_count`。
+`share_count` 包含首次分享，第 2 次分享才是首次出警。
+
+`occurred_at` 是判定出警時間，`source_message_created_at` 是原 Discord 訊息建立時間，
+`completed_at` 是發送處理完成時間，均以 UTC epoch 秒保存。不要以分享表中的處理時間
+冒充出警送達時間。以下狀態區分判定與實際送達：
+
+| `delivery_status` | 意義 |
+| --- | --- |
+| `pending` | 已記錄判定、尚未完成；也可能是程序中止或結果更新失敗 |
+| `sent` | Discord 發送呼叫成功，另存 `patrol_message_id` 與發送方式 |
+| `failed` | 發送最終失敗；`error_type` 只存類別，不含原始錯誤或 token |
+| `unknown` | 逾時／取消，可能已送達，不能當成確定失敗 |
+
+發送方式為 `webhook`、`bot_reply` 或 `bot_notice`。出警紀錄寫入失敗不阻止本次原有警報，
+會留下安全警告及 DB health 通知；失敗資料不自動重播。統計出警判定可計全部事件，
+統計已確認送達只計 `sent`，`pending`／`unknown` 應另列。既有歷史分享不會回填成出警事件。
+現行 PostgreSQL → SQLite 備份工具尚未包含此新表，不能把舊備份當成完整出警統計來源。
+
 ### X／Twitter 僅偵測重複分享
 
 X 預覽由其他 bot 處理。本 bot 只讀取人類原留言中的 `x.com`／`twitter.com` status 連結，以貼文 ID 判重；網域別名、帳號差異、`?s=46` 等 query、fragment 與 `/photo/1`／`/video/1` 尾碼均不影響身份。不對 X 發請求，不確認貼文存在／公開，不展開 `t.co` 或第三方 preview 網址。

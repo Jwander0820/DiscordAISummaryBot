@@ -143,6 +143,33 @@ CREATE TABLE IF NOT EXISTS deepfaker_events (
 );
 """
 
+SOCIAL_PATROL_EVENT_COLUMNS = (
+    "event_id", "guild_id", "guild_name", "channel_id", "channel_name", "user_id",
+    "username", "global_name", "display_name", "platform", "post_key", "canonical_url",
+    "source_message_id", "source_message_created_at", "current_preview_message_id",
+    "first_source_message_id", "first_user_id", "reference_message_id", "share_count",
+    "occurred_at", "delivery_status", "delivery_method", "patrol_message_id", "completed_at", "error_type",
+)
+
+CREATE_SOCIAL_PATROL_TABLES_SQL = (
+    """CREATE TABLE IF NOT EXISTS social_patrol_events (
+        event_id TEXT PRIMARY KEY,
+        guild_id TEXT NOT NULL, guild_name TEXT, channel_id TEXT NOT NULL, channel_name TEXT,
+        user_id TEXT NOT NULL, username TEXT, global_name TEXT, display_name TEXT,
+        platform TEXT NOT NULL, post_key TEXT NOT NULL, canonical_url TEXT NOT NULL,
+        source_message_id TEXT NOT NULL, source_message_created_at DOUBLE PRECISION,
+        current_preview_message_id TEXT NOT NULL, first_source_message_id TEXT NOT NULL,
+        first_user_id TEXT NOT NULL, reference_message_id TEXT NOT NULL,
+        share_count INTEGER NOT NULL CHECK (share_count >= 2), occurred_at DOUBLE PRECISION NOT NULL,
+        delivery_status TEXT NOT NULL CHECK (delivery_status IN ('pending', 'sent', 'failed', 'unknown')),
+        delivery_method TEXT CHECK (delivery_method IN ('webhook', 'bot_reply', 'bot_notice')),
+        patrol_message_id TEXT, completed_at DOUBLE PRECISION, error_type TEXT,
+        UNIQUE (guild_id, channel_id, platform, source_message_id)
+    );""",
+    "CREATE INDEX IF NOT EXISTS idx_social_patrol_guild_time ON social_patrol_events (guild_id, occurred_at);",
+    "CREATE INDEX IF NOT EXISTS idx_social_patrol_user_time ON social_patrol_events (guild_id, user_id, occurred_at);",
+)
+
 CREATE_SOCIAL_DUPLICATE_TABLES_SQL = (
     """CREATE TABLE IF NOT EXISTS guild_social_duplicate_settings (
         guild_id TEXT PRIMARY KEY, enabled INTEGER NOT NULL,
@@ -158,7 +185,7 @@ CREATE_SOCIAL_DUPLICATE_TABLES_SQL = (
     );""",
     "CREATE INDEX IF NOT EXISTS idx_social_share_events_time ON social_share_events (occurred_at);",
     "CREATE INDEX IF NOT EXISTS idx_social_share_events_guild_time ON social_share_events (guild_id, occurred_at);",
-)
+) + CREATE_SOCIAL_PATROL_TABLES_SQL
 
 CREATE_DEEPFAKER_EVENT_INDEXES_SQL = (
     "CREATE INDEX IF NOT EXISTS idx_deepfaker_events_guild_time "

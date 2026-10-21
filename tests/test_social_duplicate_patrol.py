@@ -10,9 +10,14 @@ from discord_bot.cogs import social_duplicate_cog as cog_module
 from discord_bot.features.social_preview import duplicate_patrol as patrol
 from discord_bot.features.social_preview import facebook_preview, instagram_preview, threads_preview
 from discord_bot.features.social_preview.duplicate_service import DuplicateMatch
+from discord_bot.features.social_preview.patrol_records import PatrolDelivery
 from discord_bot.db.social_duplicate_repository import ShareEvent
 
 load_tests = isolated_discord_suite(__name__)
+
+
+def fake_audit():
+    return SimpleNamespace(insert_event=Mock(return_value=True), finish_event=Mock(return_value=True), backend="sqlite")
 
 
 def previous():
@@ -60,7 +65,7 @@ class DuplicatePatrolTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_registers_resolved_identity_first_page_and_duplicate_reply(self):
         source = message()
-        service = SimpleNamespace(register=AsyncMock(return_value=DuplicateMatch(previous(), 2)))
+        service = SimpleNamespace(register=AsyncMock(return_value=DuplicateMatch(previous(), 2)), patrol_repository=fake_audit())
         with patch.object(patrol, "social_duplicate_service", service):
             await patrol.record_delivered_preview(
                 source, platform="threads", url="https://www.threads.com/@demo/post/Demo001?xmt=test",
@@ -90,7 +95,7 @@ class DuplicatePatrolTests(unittest.IsolatedAsyncioTestCase):
     async def test_notice_failure_does_not_escape_or_change_successful_event(self):
         source = message()
         source.channel.send.side_effect = RuntimeError("synthetic failure")
-        service = SimpleNamespace(register=AsyncMock(return_value=DuplicateMatch(previous(), 2)))
+        service = SimpleNamespace(register=AsyncMock(return_value=DuplicateMatch(previous(), 2)), patrol_repository=fake_audit())
         with patch.object(patrol, "social_duplicate_service", service):
             await patrol.record_delivered_preview(source, platform="threads",
                 url="https://www.threads.com/@demo/post/Demo001", sent_messages=[SimpleNamespace(id=1200)])
@@ -98,9 +103,9 @@ class DuplicatePatrolTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_passes_atomic_share_count_to_webhook_announcement(self):
         source = message()
-        service = SimpleNamespace(register=AsyncMock(return_value=DuplicateMatch(previous(), 3)))
+        service = SimpleNamespace(register=AsyncMock(return_value=DuplicateMatch(previous(), 3)), patrol_repository=fake_audit())
         with patch.object(patrol, "social_duplicate_service", service), \
-                patch.object(patrol, "_announce", AsyncMock()) as announce:
+                patch.object(patrol, "_announce", AsyncMock(return_value=PatrolDelivery("webhook", "900"))) as announce:
             await patrol.record_delivered_preview(source, platform="threads",
                 url="https://www.threads.com/@demo/post/Demo001", sent_messages=[SimpleNamespace(id=1200)])
         announce.assert_awaited_once_with(source, previous(), share_count=3)

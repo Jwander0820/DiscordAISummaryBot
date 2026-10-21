@@ -6,14 +6,15 @@ import discord
 from tests.support import isolated_discord_suite
 from discord_bot.features.social_preview import duplicate_patrol as patrol
 from discord_bot.features.social_preview import duplicate_webhook as relay
-from tests.test_social_duplicate_patrol import message, previous
+from tests.test_social_duplicate_patrol import fake_audit, message, previous
 
 load_tests = isolated_discord_suite(__name__)
 
 
 def webhook(owner=42, *, name=relay.PATROL_WEBHOOK_NAME):
     return SimpleNamespace(name=name, type=discord.WebhookType.incoming,
-                           user=SimpleNamespace(id=owner) if owner is not None else None, send=AsyncMock())
+                           user=SimpleNamespace(id=owner) if owner is not None else None,
+                           send=AsyncMock(return_value=SimpleNamespace(id=900)))
 
 
 class FakeChannel:
@@ -21,7 +22,7 @@ class FakeChannel:
         self.id = 10
         self.webhooks = AsyncMock(return_value=[])
         self.create_webhook = AsyncMock(return_value=webhook())
-        self.send = AsyncMock()
+        self.send = AsyncMock(return_value=SimpleNamespace(id=901))
         self.manage_webhooks = True
 
     def permissions_for(self, me):
@@ -47,7 +48,8 @@ class DuplicateWebhookTests(unittest.IsolatedAsyncioTestCase):
             self.addCleanup(patcher.stop)
 
     async def test_first_patrol_real_sdk_payload(self):
-        await patrol._announce(self.source, previous())
+        delivery = await patrol._announce(self.source, previous())
+        self.assertEqual((delivery.method, delivery.message_id), ("webhook", "900"))
         creation = self.channel.create_webhook.await_args.kwargs
         self.assertEqual(creation["name"], relay.PATROL_WEBHOOK_NAME)
         self.assertNotIn("avatar", creation)
@@ -109,7 +111,8 @@ class DuplicateWebhookTests(unittest.IsolatedAsyncioTestCase):
         )
         for platform, url in cases:
             with self.subTest(platform=platform):
-                service = SimpleNamespace(register=AsyncMock(return_value=DuplicateMatch(previous(), 2)))
+                service = SimpleNamespace(register=AsyncMock(return_value=DuplicateMatch(previous(), 2)),
+                                          patrol_repository=fake_audit())
                 hook = webhook()
                 self.channel.webhooks.return_value = [hook]
                 with patch.object(patrol, "social_duplicate_service", service):
@@ -159,7 +162,8 @@ class DuplicateWebhookTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_missing_permissions_preserves_bot_reply_fallback(self):
         self.channel.manage_webhooks = False
-        await patrol._announce(self.source, previous())
+        delivery = await patrol._announce(self.source, previous())
+        self.assertEqual((delivery.method, delivery.message_id), ("bot_reply", "901"))
         self.channel.webhooks.assert_not_awaited()
         self.assertEqual(self.channel.send.await_args.kwargs["reference"].message_id, 1100)
 
