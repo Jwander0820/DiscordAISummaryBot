@@ -58,7 +58,7 @@ class DuplicateWebhookTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent.kwargs["username"], "不看訊息警察")
         self.assertEqual(sent.args[0],
             "🚨 逼逼！<@42>！你已經被不看訊息警察逮捕了，逼波逼波逼波。\n"
-            "[查看原始預覽](https://discord.com/channels/1/10/1100)")
+            "⬆️ [查看原始連結](https://discord.com/channels/1/10/1100)")
         self.assertTrue(sent.kwargs["wait"])
         self.assertTrue(sent.kwargs["suppress_embeds"])
         self.assertNotIn("reference", sent.kwargs)
@@ -98,6 +98,26 @@ class DuplicateWebhookTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(creation["avatar"], relay.REPEAT_AVATAR_PATH.read_bytes())
         self.assertNotEqual(creation["avatar"], relay.PATROL_AVATAR_PATH.read_bytes())
         self.assertEqual(self.channel.create_webhook.return_value.send.await_args.kwargs["username"], "不看訊息警察")
+
+    async def test_count_comments_follow_link_with_numeric_count_and_fixed_later_taunt(self):
+        police = webhook(name=relay.REPEAT_WEBHOOK_NAME)
+        self.channel.webhooks.return_value = [police]
+        expected_comments = {
+            3: "第 3 次了！三回啊三回！",
+            4: "第 4 次了！你是只看自己傳的訊息是不是！",
+            5: "第 5 次了！警察都認得這篇了，你還不認得！",
+            6: "第 6 次了……好，你開心就好。",
+            10: "第 10 次了……好，你開心就好。",
+            12: "第 12 次了……好，你開心就好。",
+            100: "第 100 次了……好，你開心就好。",
+        }
+        for count, expected in expected_comments.items():
+            with self.subTest(count=count):
+                await patrol._announce(self.source, previous(), share_count=count)
+                content = police.send.await_args.args[0]
+                self.assertEqual(content.split("\n")[1],
+                    "⬆️ [查看原始連結](https://discord.com/channels/1/10/1100) " + expected)
+                self.assertEqual(content.count("<@42>"), 1)
 
     async def test_two_stable_webhooks_do_not_change_each_other_or_other_post_avatars(self):
         dog = webhook()

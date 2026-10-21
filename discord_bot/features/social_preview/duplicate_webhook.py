@@ -14,6 +14,19 @@ PATROL_AVATAR_PATH = Path(__file__).resolve().parents[2] / "assets" / "social_pr
 REPEAT_WEBHOOK_NAME = "digest-duplicate-patrol-repeat"
 REPEAT_AVATAR_PATH = PATROL_AVATAR_PATH.with_name("message_police.jpg")
 REPEAT_AVATAR_FROM_SHARE_COUNT = 3
+COUNT_TAUNTS = {
+    3: "三回啊三回！",
+    4: "你是只看自己傳的訊息是不是！",
+    5: "警察都認得這篇了，你還不認得！",
+}
+
+
+def _count_comment(share_count: int) -> str:
+    if share_count < 3:
+        return ""
+    if share_count in COUNT_TAUNTS:
+        return f" 第 {share_count} 次了！{COUNT_TAUNTS[share_count]}"
+    return f" 第 {share_count} 次了……好，你開心就好。"
 
 
 @lru_cache(maxsize=2)
@@ -48,7 +61,7 @@ async def send_patrol_webhook(message, previous, *, content: str, mentions, shar
         kwargs = dict(username=PATROL_NAME, allowed_mentions=mentions, wait=True, suppress_embeds=True)
         if thread is not None:
             kwargs["thread"] = thread
-        await hook.send(content + f"\n[查看原始預覽]({jump_url})", **kwargs)
+        await hook.send(content + f"\n⬆️ [查看原始連結]({jump_url})" + _count_comment(share_count), **kwargs)
         return True
     except Exception as exc:
         # Do not log the webhook object, token, URL, payload or raw API error.
