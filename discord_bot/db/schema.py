@@ -143,6 +143,23 @@ CREATE TABLE IF NOT EXISTS deepfaker_events (
 );
 """
 
+CREATE_SOCIAL_DUPLICATE_TABLES_SQL = (
+    """CREATE TABLE IF NOT EXISTS guild_social_duplicate_settings (
+        guild_id TEXT PRIMARY KEY, enabled INTEGER NOT NULL,
+        window_days INTEGER NOT NULL CHECK (window_days > 0),
+        updated_by TEXT NOT NULL, updated_at DOUBLE PRECISION NOT NULL
+    );""",
+    """CREATE TABLE IF NOT EXISTS social_share_events (
+        guild_id TEXT NOT NULL, channel_id TEXT NOT NULL, platform TEXT NOT NULL,
+        source_message_id TEXT NOT NULL, user_id TEXT NOT NULL,
+        post_key TEXT NOT NULL, canonical_url TEXT NOT NULL,
+        preview_message_id TEXT NOT NULL, occurred_at DOUBLE PRECISION NOT NULL,
+        PRIMARY KEY (guild_id, channel_id, platform, source_message_id)
+    );""",
+    "CREATE INDEX IF NOT EXISTS idx_social_share_events_time ON social_share_events (occurred_at);",
+    "CREATE INDEX IF NOT EXISTS idx_social_share_events_guild_time ON social_share_events (guild_id, occurred_at);",
+)
+
 CREATE_DEEPFAKER_EVENT_INDEXES_SQL = (
     "CREATE INDEX IF NOT EXISTS idx_deepfaker_events_guild_time "
     "ON deepfaker_events (guild_id, occurred_at);",

@@ -8,6 +8,7 @@ EXTENSIONS = (
     "discord_bot.cogs.fun_cog",
     "discord_bot.cogs.social_preview_cog",
     "discord_bot.cogs.social_preview_settings_cog",
+    "discord_bot.cogs.social_duplicate_cog",
 )
 
 

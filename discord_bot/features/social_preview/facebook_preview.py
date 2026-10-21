@@ -16,6 +16,7 @@ from .download import (
 )
 from .media_gallery import prepare_gallery
 from .sender import cleanup_source_message, log_preview_link, send_preview_group
+from .duplicate_patrol import record_delivered_preview
 from .text import extract_message_commentary
 from .failure_notifications import failure_reason, notify_preview_failure, public_failure_message, reply_preview_failure
 from .facebook_fetch import (
@@ -504,7 +505,9 @@ async def _send_facebook_preview(
         files=preview.files,
         media_urls=preview.media_urls,
     )
-    await send_preview_group(message, views)
+    sent_messages = await send_preview_group(message, views)
+    await record_delivered_preview(message, platform="facebook", url=preview.embed.url or original_url,
+                                   sent_messages=sent_messages, preview_error=preview.preview_error)
 
 
 async def handle_facebook_in_message(message: discord.Message, *, bot_client=None) -> bool:
@@ -534,7 +537,7 @@ async def handle_facebook_in_message(message: discord.Message, *, bot_client=Non
         )
         embed = discord.Embed(title="Facebook", description=FACEBOOK_INVALID_POST_MESSAGE, url=url)
         embed.set_author(name="Facebook")
-        preview = FacebookPreview(embed=embed, files=[])
+        preview = FacebookPreview(embed=embed, files=[], preview_error="prepare_failed")
 
     phase = "send"
     try:

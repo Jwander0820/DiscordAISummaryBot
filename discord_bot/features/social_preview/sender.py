@@ -168,7 +168,7 @@ async def send_preview_as_author(
     return await channel.send(**send_kwargs)
 
 
-async def send_preview_group(message: discord.Message, views: Sequence) -> None:
+async def send_preview_group(message: discord.Message, views: Sequence) -> list:
     """Send every V2 page, link their delete buttons, and roll back partial groups."""
     sent_messages = []
     try:
@@ -193,6 +193,8 @@ async def send_preview_group(message: discord.Message, views: Sequence) -> None:
             except (NotFound, HTTPException):
                 logger.warning("無法清理未完整送出的社群 V2 預覽", exc_info=True)
         raise
+    else:
+        return sent_messages
     finally:
         for view in views:
             for file in view.files:

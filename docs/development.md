@@ -6,7 +6,7 @@
 
 Bot 使用 Message Content Intent，應用程式也須開啟；邀請時包含 `bot` 與 `applications.commands`。依功能配置檢視頻道、讀取訊息歷史、傳送訊息、嵌入連結與附加檔案權限。Webhook 代發需管理 Webhook；清理使用者原始連結需管理訊息。缺少 Webhook 權限時社群預覽可由 bot 備援發送。
 
-`/社群預覽設定` 要求管理伺服器權限。不要把 `WORLDLINE_ADMIN_IDS` 當成授權名單，它只影響世界線事件機率。
+`/社群預覽設定`、`/社群出警設定` 要求管理伺服器權限。出警開關／天數與快取恢復見[社群預覽指南](social-preview.md#同頻道重複分享出警)，`/社群出警狀態` 可確認是否就緒。不要把 `WORLDLINE_ADMIN_IDS` 當成授權名單，它只影響世界線事件機率。
 
 ## 指令與訊息範圍
 

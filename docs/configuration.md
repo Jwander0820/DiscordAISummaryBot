@@ -35,7 +35,7 @@ Gemini 模型順序在 `discord_bot/integrations/gemini_client.py` 的 `SUMMARY_
 | `DATABASE_URL` | 無 | 留空；PostgreSQL 模式與備份工具必填，不把真實連線字串填回範本 |
 | `LOCAL_BACKUP_SQLITE_PATH` | `postgres_summaries_backup.db` | 備份工具輸出，不是 bot 的主資料庫 |
 
-資料庫包含 `summaries`、`deepfaker_events` 與 `guild_social_preview_settings`。SQLite 放在容器內預設路徑不保證跨重建保留；正式環境使用持久 PostgreSQL，或將 SQLite 檔案置於持久 volume。
+資料庫包含 `summaries`、`deepfaker_events`、`guild_social_preview_settings`、`social_share_events` 與 `guild_social_duplicate_settings`。SQLite 放在容器內預設路徑不保證跨重建保留；正式環境使用持久 PostgreSQL，或將 SQLite 檔案置於持久 volume。
 
 三個 repository 連線失效後會冷卻 30 秒，在下一次實際 DB 需求時重新初始化；正常連線持續重用，不固定輪詢。歷史寫入失敗會先 rollback；連線仍可用時讓下一次寫入繼續使用。失敗／跳過的紀錄不自動補寫，commit 結果不確定時也不立即重送，避免重複資料。DB 故障與恢復通知見下節。
 
@@ -49,6 +49,8 @@ Gemini 模型順序在 `discord_bot/integrations/gemini_client.py` 的 `SUMMARY_
 | `FACEBOOK_PREVIEW_ENABLED` | `0` | `0`；Facebook 全域預設 |
 | `INSTAGRAM_PREVIEW_ENABLED` | `0` | `0`；Instagram 全域預設 |
 | `SOCIAL_PREVIEW_DELETE_TIMEOUT_SECONDS` | `0` | `0`；正數為互動刪除按鈕逾時秒數，非正數為同一程序內不自動逾時 |
+| `SOCIAL_DUPLICATE_ENABLED` | `1` | `1`；同頻道重複分享出警的全域預設，guild 可覆蓋 |
+| `SOCIAL_DUPLICATE_WINDOW_DAYS` | `7` | `7`；啟動載入最近 N 天，正整數，無效值退回七天 |
 | `THREADS_COOKIE` | 空白 | Threads 獨立登入備援，可選 |
 | `FACEBOOK_COOKIE` | 空白 | Facebook 獨立登入備援，可選 |
 | `INSTAGRAM_COOKIE` | 空白 | Instagram 獨立登入備援，可選 |
@@ -56,6 +58,12 @@ Gemini 模型順序在 `discord_bot/integrations/gemini_client.py` 的 `SUMMARY_
 | `SOCIAL_PREVIEW_COOKIE_STORE_DIR` | 專案 `secrets/social-preview-cookies` | 留空沿用預設；容器需指定持久掛載中的目錄 |
 
 Guild 管理者可用 `/社群預覽設定` 即時覆蓋全域預設，包括在 env 關閉時開啟；`/社群預覽狀態` 可查看生效來源。設定存 DB，查詢失敗會明確回報。
+
+`/社群出警設定` 可單獨調整開關、天數或恢復環境預設，需管理伺服器權限；`/社群出警狀態` 查看設定與快取是否就緒。只處理已啟用平台且成功送達完整預覽的分享；同頻道重複時以專用 webhook「不看訊息警察」發送，附上原預覽跳轉連結，只標記本次分享者。固定頭像隨程式打包，無需填入圖片網址；名稱、頭像與台詞沒有 env 設定，目前不附 GIF。無法使用 webhook 時由 bot 原生回覆備援。只到登入牆、未展開 share 或失敗卡不記錄／出警，自己重貼也算重複。
+
+分享歷史永久留在 DB，不保存正文或媒體。啟動時按各 guild 最近 N 天重建記憶體索引；期間只增量記錄，不逐次檢查期限、不排程清理。重啟前即使略超過 N 天仍可出警；長期不重啟時記憶體及判重範圍會增加。改設定會即時重建該 guild 快取。關閉時不記錄新分享，既有 DB 歷史保留；重開不回掃 Discord 歷史。
+
+出警 DB 工作在 worker 執行，連線重用；啟動恢復失敗／寫入故障時暫停出警並每 30 秒重試重建，正常時不輪詢。此恢復流程不依賴容器重啟排程。失聯期間未保存的事件不自動補寫；出警失敗不影響預覽送達與原訊息清理。分享歷史與出警設定不在現有兩表同步工具範圍內，需另做全庫備份。
 
 防雷和前四項混合媒體不另設 env 開關。手動 `||連結||` 遮全部正文與媒體；Threads 原生防雷依取得的文字片段／單一媒體標記顯示。互動刪除按鈕未跨 bot 重啟恢復，`0` 不代表永久有效。Cookie 取得與保存規則見[社群預覽指南](social-preview.md)。
 

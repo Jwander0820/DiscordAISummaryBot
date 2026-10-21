@@ -17,6 +17,7 @@ from .media_gallery import prepare_gallery, select_media
 from .instagram_fetch import fetch_instagram_post, instagram_shortcode, normalize_instagram_url
 from .instagram_logging import elapsed_ms, log_event, new_trace_id
 from .sender import cleanup_source_message, log_preview_link, send_preview_group
+from .duplicate_patrol import record_delivered_preview
 from .text import extract_message_commentary
 from .failure_notifications import (
     PLATFORM_DIAGNOSTICS, failure_reason, notify_preview_failure, public_failure_message, reply_preview_failure,
@@ -147,7 +148,9 @@ async def handle_instagram_in_message(message, *, bot_client=None):
             image_urls=preview.image_urls, files=preview.files, media_urls=preview.media_urls,
         )
         phase, phase_started = "send", perf_counter()
-        await send_preview_group(message, views)
+        sent_messages = await send_preview_group(message, views)
+        await record_delivered_preview(message, platform="instagram", url=preview.embed.url or url,
+                                       sent_messages=sent_messages, preview_error=preview.preview_error)
         log_event("preview_delivery", trace_id=preview.trace_id, shortcode=instagram_shortcode(url),
                   source=preview.fetch_source, result="sent", outcome=preview.outcome, phase=phase,
                   page_count=len(views), elapsed_ms=elapsed_ms(phase_started))
