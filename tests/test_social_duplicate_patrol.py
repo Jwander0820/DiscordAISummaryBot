@@ -108,7 +108,7 @@ class DuplicatePatrolTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(patrol, "_announce", AsyncMock(return_value=PatrolDelivery("webhook", "900"))) as announce:
             await patrol.record_delivered_preview(source, platform="threads",
                 url="https://www.threads.com/@demo/post/Demo001", sent_messages=[SimpleNamespace(id=1200)])
-        announce.assert_awaited_once_with(source, previous(), share_count=3)
+        announce.assert_awaited_once_with(source, previous(), share_count=3, taunt_text="第 3 次了！三回啊三回！")
 
 
 class DuplicateCogTests(unittest.IsolatedAsyncioTestCase):

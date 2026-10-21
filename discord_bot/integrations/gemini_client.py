@@ -155,12 +155,12 @@ def _normalize_contents(contents: Any) -> Any:
 def _normalize_generation_config(generation_config: Optional[Any]) -> Optional[Any]:
     if generation_config is None:
         return None
-
-    temperature = None
     if isinstance(generation_config, dict):
-        temperature = generation_config.get("temperature")
-    else:
-        temperature = getattr(generation_config, "temperature", None)
+        if genai_types is not None and hasattr(genai_types, "GenerateContentConfig"):
+            return genai_types.GenerateContentConfig(**generation_config)
+        return dict(generation_config)
+
+    temperature = getattr(generation_config, "temperature", None)
 
     if temperature is None:
         return generation_config

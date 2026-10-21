@@ -172,3 +172,12 @@ class DuplicateWebhookTests(unittest.IsolatedAsyncioTestCase):
         await patrol._announce(self.source, previous())
         self.channel.send.assert_awaited_once()
         self.assertIn("reference", self.channel.send.await_args.kwargs)
+
+    async def test_selected_taunt_is_identical_in_v2_and_bot_fallback(self):
+        taunt = "第 8 次了！這篇都快被你分享成每日簽到任務了。"
+        await patrol._announce(self.source, previous(), share_count=8, taunt_text=taunt)
+        view = self.channel.create_webhook.return_value.send.await_args.kwargs["view"]
+        self.assertTrue(view.to_components()[0]["components"][0]["components"][2]["content"].endswith(taunt))
+        self.channel.manage_webhooks = False
+        await patrol._announce(self.source, previous(), share_count=8, taunt_text=taunt)
+        self.assertTrue(self.channel.send.await_args.args[0].endswith(taunt))

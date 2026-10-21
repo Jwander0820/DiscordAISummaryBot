@@ -23,13 +23,15 @@ class SocialPatrolRepository:
             tuple(record[key] for key in SOCIAL_PATROL_EVENT_COLUMNS), write=True) == 1
 
     def finish_event(self, event_id: str, *, status: str, method=None, message_id=None,
-                     completed_at: float, error_type=None) -> bool:
+                     completed_at: float, error_type=None, taunt_text=None, taunt_source=None) -> bool:
         if status not in {"sent", "failed", "unknown"}:
             raise ValueError("Invalid patrol outcome")
         if method not in {None, "webhook", "bot_reply", "bot_notice"}:
             raise ValueError("Invalid patrol delivery method")
+        if taunt_source not in {None, "none", "fixed", "gemini", "fallback"}:
+            raise ValueError("Invalid patrol taunt source")
         return self.storage._execute(
             "UPDATE social_patrol_events SET delivery_status = ?, delivery_method = ?, "
-            "patrol_message_id = ?, completed_at = ?, error_type = ? "
+            "patrol_message_id = ?, completed_at = ?, error_type = ?, taunt_text = ?, taunt_source = ? "
             "WHERE event_id = ? AND delivery_status = 'pending'",
-            (status, method, message_id, completed_at, error_type, event_id), write=True) == 1
+            (status, method, message_id, completed_at, error_type, taunt_text, taunt_source, event_id), write=True) == 1

@@ -66,7 +66,7 @@ class XPatrolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((previous.platform, previous.post_key, previous.canonical_url), ("x", STATUS_ID, URL))
         self.assertEqual(previous.source_message_id, "100")
         self.assertEqual(previous.preview_message_id, "100")
-        self.announce.assert_awaited_once_with(duplicate, previous, share_count=2)
+        self.announce.assert_awaited_once_with(duplicate, previous, share_count=2, taunt_text="")
         self.assert_original_untouched(first, duplicate)
 
     async def test_activity_logs_each_share_once_with_normalized_url_and_safe_names(self):

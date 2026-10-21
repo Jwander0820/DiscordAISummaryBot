@@ -149,6 +149,7 @@ SOCIAL_PATROL_EVENT_COLUMNS = (
     "source_message_id", "source_message_created_at", "current_preview_message_id",
     "first_source_message_id", "first_user_id", "reference_message_id", "share_count",
     "occurred_at", "delivery_status", "delivery_method", "patrol_message_id", "completed_at", "error_type",
+    "taunt_text", "taunt_source",
 )
 
 CREATE_SOCIAL_PATROL_TABLES_SQL = (
@@ -164,6 +165,7 @@ CREATE_SOCIAL_PATROL_TABLES_SQL = (
         delivery_status TEXT NOT NULL CHECK (delivery_status IN ('pending', 'sent', 'failed', 'unknown')),
         delivery_method TEXT CHECK (delivery_method IN ('webhook', 'bot_reply', 'bot_notice')),
         patrol_message_id TEXT, completed_at DOUBLE PRECISION, error_type TEXT,
+        taunt_text TEXT, taunt_source TEXT,
         UNIQUE (guild_id, channel_id, platform, source_message_id)
     );""",
     "CREATE INDEX IF NOT EXISTS idx_social_patrol_guild_time ON social_patrol_events (guild_id, occurred_at);",

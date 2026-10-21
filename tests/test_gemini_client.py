@@ -103,6 +103,14 @@ class GeminiClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("User:\nuser prompt", call_kwargs["contents"])
         self.assertEqual(call_kwargs["config"].kwargs, {"temperature": 0.7})
 
+    async def test_adapter_preserves_system_prompt_and_output_limit(self):
+        with patch.dict(os.environ, {"GOOGLE_GENAI_API_KEY": "test-key"}, clear=False):
+            module = importlib.import_module("discord_bot.integrations.gemini_client")
+        config = {"system_instruction": "Only output the requested sentence", "max_output_tokens": 512}
+        await module.role_model.generate_content_async("prompt", generation_config=config)
+        sent = FakeClient.instances[0].aio.models.generate_content.await_args.kwargs
+        self.assertEqual(sent["config"].kwargs, config)
+
     async def test_adapter_falls_back_in_order_when_model_is_busy(self):
         with patch.dict(os.environ, {"GOOGLE_GENAI_API_KEY": "test-key"}, clear=False):
             module = importlib.import_module("discord_bot.integrations.gemini_client")

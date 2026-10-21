@@ -14,17 +14,21 @@ from .duplicate_identity import post_identity
 from .duplicate_service import social_duplicate_service
 from .duplicate_webhook import send_patrol_webhook
 from .patrol_records import build_patrol_event, delivered
+from .patrol_taunts import choose_taunt
 
 logger = logging.getLogger("discord_digest_bot")
 
 
-async def _announce(message, previous, *, share_count=2):
+async def _announce(message, previous, *, share_count=2, taunt_text=None):
     mentions = discord.AllowedMentions(everyone=False, users=[discord.Object(id=message.author.id)],
                                        roles=False, replied_user=False)
     content = f"🚨 逼逼！<@{message.author.id}>！你已經被不看訊息警察逮捕了，逼波逼波逼波。"
-    delivery = await send_patrol_webhook(message, previous, content=content, mentions=mentions, share_count=share_count)
+    delivery = await send_patrol_webhook(message, previous, content=content, mentions=mentions,
+                                        share_count=share_count, taunt_text=taunt_text)
     if delivery:
         return delivery
+    if taunt_text:
+        content += "\n" + taunt_text
     reference = discord.MessageReference(message_id=int(previous.preview_message_id),
                                          channel_id=int(previous.channel_id), guild_id=int(previous.guild_id))
     try:
@@ -61,7 +65,10 @@ async def _announce_recorded(message, event, match):
     saved = await _write_patrol("insert_event", record)
     outcome = {"status": "unknown", "method": None, "message_id": None, "error_type": None}
     try:
-        delivery = await asyncio.wait_for(_announce(message, match.previous, share_count=match.share_count), timeout=5)
+        taunt = await choose_taunt(match.share_count, record["display_name"])
+        outcome.update(taunt_text=taunt.text, taunt_source=taunt.source)
+        delivery = await asyncio.wait_for(_announce(message, match.previous, share_count=match.share_count,
+                                                    taunt_text=taunt.text), timeout=5)
         outcome.update(status="sent", method=delivery.method, message_id=delivery.message_id)
     except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
         outcome["error_type"] = type(exc).__name__

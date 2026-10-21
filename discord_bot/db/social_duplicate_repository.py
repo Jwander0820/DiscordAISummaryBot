@@ -65,6 +65,15 @@ class SocialDuplicateRepository:
                 try:
                     for sql in CREATE_SOCIAL_DUPLICATE_TABLES_SQL:
                         cursor.execute(sql)
+                    if self.backend == "postgres":
+                        for name in ("taunt_text", "taunt_source"):
+                            cursor.execute(f"ALTER TABLE social_patrol_events ADD COLUMN IF NOT EXISTS {name} TEXT")
+                    else:
+                        cursor.execute("PRAGMA table_info(social_patrol_events)")
+                        columns = {row[1] for row in cursor.fetchall()}
+                        for name in ("taunt_text", "taunt_source"):
+                            if name not in columns:
+                                cursor.execute(f"ALTER TABLE social_patrol_events ADD COLUMN {name} TEXT")
                 finally:
                     cursor.close()
         except Exception:

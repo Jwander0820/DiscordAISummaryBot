@@ -24,6 +24,11 @@
 
 Gemini 模型順序在 `discord_bot/integrations/gemini_client.py` 的 `SUMMARY_MODEL_NAMES`／`ROLE_MODEL_NAMES` 定義，沒有模型 env 開關。只有服務忙線／不可用才切換備援；429 限流不切模型。
 
+重複分享出警在同篇第 6 次分享起沿用 `ROLE_MODEL_NAMES` 的 cloud Gemini 產生吐槽，
+使用相同 `GOOGLE_GENAI_API_KEY`，不受 `ROLE_MODE` 控制。無金鑰／SDK、逾時或生成不合格式
+時使用本機隨機備援句，不需要為基本出警另外設定 Gemini。生成最多 6 秒，隨後獨立給發送
+5 秒；第 2～5 次分享不呼叫 Gemini。只送分享次數與當下暱稱，不送聊天內容、ID 或貼文。
+
 `DISABLE_DISCORD_BOT`、`DISCORD_GUILD_ID` 是舊範例殘留，目前程式不讀取。停止 bot 請停止程序／容器；slash commands 目前全域同步。
 
 ## 資料庫與備份

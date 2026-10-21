@@ -2,6 +2,9 @@
 import asyncio
 from datetime import datetime, timezone
 import os
+from pathlib import Path
+import sqlite3
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
@@ -117,6 +120,26 @@ class RepositoryTests(unittest.TestCase):
         self.assertTrue(all("?" not in sql and "O'Brien" not in sql for sql in sqls))
         self.assertEqual(connection.commit.call_count, 2)
         driver.connect.assert_called_once()
+        self.assertEqual(sum("ADD COLUMN IF NOT EXISTS taunt_" in sql for sql in sqls), 2)
+
+    def test_legacy_sqlite_migration_is_idempotent_and_preserves_null_history(self):
+        from discord_bot.db.schema import CREATE_SOCIAL_PATROL_TABLES_SQL
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "legacy.db")
+            old = {k: v for k, v in pending().items() if k not in {"taunt_text", "taunt_source"}}
+            with sqlite3.connect(path) as conn:
+                conn.execute(CREATE_SOCIAL_PATROL_TABLES_SQL[0].replace("taunt_text TEXT, taunt_source TEXT,", ""))
+                conn.execute(f"INSERT INTO social_patrol_events ({', '.join(old)}) VALUES ({', '.join('?' for _ in old)})", tuple(old.values()))
+            conn.close()
+            self.storage.close()
+            with patch.dict(os.environ, {"SQLITE_PATH": path}):
+                self.assertEqual(self.storage._execute("SELECT display_name, taunt_text, taunt_source FROM social_patrol_events"),
+                                 [("當時暱稱", None, None)])
+                self.storage.close()
+                self.assertEqual(self.storage._execute("SELECT COUNT(*) FROM social_patrol_events"), [(1,)])
+                columns = [r[1] for r in self.storage._execute("PRAGMA table_info(social_patrol_events)")]
+                self.assertEqual(columns.count("taunt_text"), 1)
+                self.storage.close()
 
 
 class AuditFlowTests(unittest.IsolatedAsyncioTestCase):
@@ -200,3 +223,22 @@ class AuditFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_bot_fallback_delivery_can_be_counted_separately(self):
         await self.invoke(AsyncMock(return_value=PatrolDelivery("bot_reply", "901")))
         self.assertEqual((await self.rows())[0][1:4], ("sent", "bot_reply", "901"))
+
+    async def test_generation_finishes_before_send_and_actual_taunt_is_saved(self):
+        from discord_bot.features.social_preview.patrol_taunts import PatrolTaunt
+        order = []
+        async def generate(count, name):
+            order.append("generate")
+            await asyncio.sleep(0)
+            self.assertEqual(name, "當時暱稱")
+            return PatrolTaunt("第 8 次了！範例生成吐槽。", "gemini")
+        async def send(*args, **kwargs):
+            self.assertEqual(order, ["generate"])
+            self.assertEqual(kwargs["taunt_text"], "第 8 次了！範例生成吐槽。")
+            order.append("send")
+            return PatrolDelivery("webhook", "900")
+        with patch.object(patrol, "choose_taunt", side_effect=generate), patch.object(patrol, "_announce", side_effect=send):
+            await patrol._announce_recorded(source(), share(), DuplicateMatch(share(100), 8))
+        self.assertEqual(order, ["generate", "send"])
+        rows = await asyncio.to_thread(self.storage._execute, "SELECT taunt_text, taunt_source FROM social_patrol_events")
+        self.assertEqual(rows, [("第 8 次了！範例生成吐槽。", "gemini")])
