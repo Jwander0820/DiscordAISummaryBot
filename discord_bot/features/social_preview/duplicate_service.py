@@ -5,11 +5,18 @@ import asyncio
 import logging
 import os
 import time
+from dataclasses import dataclass
 
 from ...db.health import database_health
 from ...db.social_duplicate_repository import ShareEvent, SocialDuplicateRepository, report_failure
 
 logger = logging.getLogger("discord_digest_bot")
+
+
+@dataclass(frozen=True, slots=True)
+class DuplicateMatch:
+    previous: ShareEvent
+    share_count: int
 
 
 class SocialDuplicateService:
@@ -18,6 +25,7 @@ class SocialDuplicateService:
         self.ready = False
         self.settings = {}
         self.cache = {}
+        self.counts = {}
         self._lock = asyncio.Lock()
         self.default_enabled = True
         self.default_days = 7
@@ -51,12 +59,16 @@ class SocialDuplicateService:
             report_failure(self.repository, exc, "read")
             return False
         cache = {}
+        counts = {}
         for event in events:
             cache.setdefault(event.key, event)
+            counts[event.key] = counts.get(event.key, 0) + 1
         if guild_id is not None:
             cache = {**{key: value for key, value in self.cache.items() if key[0] != guild_id},
                      **{key: value for key, value in cache.items() if key[0] == guild_id}}
-        self.settings, self.cache = settings, cache
+            counts = {**{key: value for key, value in self.counts.items() if key[0] != guild_id},
+                      **{key: value for key, value in counts.items() if key[0] == guild_id}}
+        self.settings, self.cache, self.counts = settings, cache, counts
         self.ready = True
         database_health.succeeded("social_share_events", self.repository.backend, "read")
         logger.info("Social duplicate cache ready: entries=%s", len(cache))
@@ -107,9 +119,10 @@ class SocialDuplicateService:
             if not inserted:
                 return None
             self.cache.setdefault(event.key, event)
+            self.counts[event.key] = self.counts.get(event.key, 0) + 1
             # Re-delivery of the same source must never accuse itself.
             if previous and previous.source_message_id != event.source_message_id:
-                return previous
+                return DuplicateMatch(previous, self.counts[event.key])
             return None
 
     async def close(self):

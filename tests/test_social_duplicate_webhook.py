@@ -12,8 +12,8 @@ from tests.test_social_duplicate_patrol import message, previous
 load_tests = isolated_discord_suite(__name__)
 
 
-def webhook(owner=42):
-    return SimpleNamespace(name=relay.PATROL_WEBHOOK_NAME, type=discord.WebhookType.incoming,
+def webhook(owner=42, *, name=relay.PATROL_WEBHOOK_NAME):
+    return SimpleNamespace(name=name, type=discord.WebhookType.incoming,
                            user=SimpleNamespace(id=owner) if owner is not None else None, send=AsyncMock())
 
 
@@ -91,6 +91,35 @@ class DuplicateWebhookTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(kwargs["thread"], thread)
         thread.send.assert_not_awaited()
 
+    async def test_third_and_later_shares_create_police_with_second_asset(self):
+        await patrol._announce(self.source, previous(), share_count=3)
+        creation = self.channel.create_webhook.await_args.kwargs
+        self.assertEqual(creation["name"], relay.REPEAT_WEBHOOK_NAME)
+        self.assertEqual(creation["avatar"], relay.REPEAT_AVATAR_PATH.read_bytes())
+        self.assertNotEqual(creation["avatar"], relay.PATROL_AVATAR_PATH.read_bytes())
+        self.assertEqual(self.channel.create_webhook.return_value.send.await_args.kwargs["username"], "不看訊息警察")
+
+    async def test_two_stable_webhooks_do_not_change_each_other_or_other_post_avatars(self):
+        dog = webhook()
+        police = webhook(name=relay.REPEAT_WEBHOOK_NAME)
+        self.channel.webhooks.return_value = [dog, police]
+        # A popular link escalates. Another link's first duplicate must still be dog.
+        await patrol._announce(self.source, previous(), share_count=3)
+        await patrol._announce(self.source, previous(), share_count=2)
+        await patrol._announce(self.source, previous(), share_count=4)
+        self.assertEqual(police.send.await_count, 2)
+        dog.send.assert_awaited_once()
+        self.channel.create_webhook.assert_not_awaited()
+
+    async def test_existing_dog_webhook_is_not_used_as_repeat_police(self):
+        dog = webhook()
+        another_bot_police = webhook(owner=99, name=relay.REPEAT_WEBHOOK_NAME)
+        self.channel.webhooks.return_value = [dog, another_bot_police]
+        await patrol._announce(self.source, previous(), share_count=3)
+        self.assertEqual(self.channel.create_webhook.await_args.kwargs["name"], relay.REPEAT_WEBHOOK_NAME)
+        dog.send.assert_not_awaited()
+        another_bot_police.send.assert_not_awaited()
+
     async def test_missing_permissions_falls_back_to_original_bot_reply(self):
         self.channel.manage_webhooks = False
         await patrol._announce(self.source, previous())
@@ -117,9 +146,9 @@ class AvatarSdkTests(unittest.IsolatedAsyncioTestCase):
         state = SimpleNamespace(http=SimpleNamespace(create_webhook=AsyncMock(return_value={
             "id": "100", "type": 1, "name": relay.PATROL_WEBHOOK_NAME})))
         channel = SimpleNamespace(id=10, _state=state)
-        with patch.object(discord.Webhook, "from_state", return_value=object()):
-            await TextChannel.create_webhook(channel, name=relay.PATROL_WEBHOOK_NAME,
-                                              avatar=relay.PATROL_AVATAR_PATH.read_bytes())
-        avatar = state.http.create_webhook.await_args.kwargs["avatar"]
-        self.assertTrue(avatar.startswith("data:image/jpeg;base64,"))
-        self.assertEqual(base64.b64decode(avatar.split(",", 1)[1]), relay.PATROL_AVATAR_PATH.read_bytes())
+        for path in (relay.PATROL_AVATAR_PATH, relay.REPEAT_AVATAR_PATH):
+            with self.subTest(asset=path.name), patch.object(discord.Webhook, "from_state", return_value=object()):
+                await TextChannel.create_webhook(channel, name=relay.PATROL_WEBHOOK_NAME, avatar=path.read_bytes())
+            avatar = state.http.create_webhook.await_args.kwargs["avatar"]
+            self.assertTrue(avatar.startswith("data:image/jpeg;base64,"))
+            self.assertEqual(base64.b64decode(avatar.split(",", 1)[1]), path.read_bytes())

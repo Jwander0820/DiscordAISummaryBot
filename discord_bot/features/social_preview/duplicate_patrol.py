@@ -15,11 +15,11 @@ from .duplicate_webhook import send_patrol_webhook
 logger = logging.getLogger("discord_digest_bot")
 
 
-async def _announce(message, previous):
+async def _announce(message, previous, *, share_count=2):
     mentions = discord.AllowedMentions(everyone=False, users=[discord.Object(id=message.author.id)],
                                        roles=False, replied_user=False)
     content = f"🚨 逼逼！<@{message.author.id}>！你已經被不看訊息警察逮捕了，逼波逼波逼波。"
-    if await send_patrol_webhook(message, previous, content=content, mentions=mentions):
+    if await send_patrol_webhook(message, previous, content=content, mentions=mentions, share_count=share_count):
         return
     reference = discord.MessageReference(message_id=int(previous.preview_message_id),
                                          channel_id=int(previous.channel_id), guild_id=int(previous.guild_id))
@@ -44,9 +44,9 @@ async def record_delivered_preview(message, *, platform, url, sent_messages, pre
         key, canonical = identity
         event = ShareEvent(str(message.guild.id), str(message.channel.id), platform, str(message.id),
                            str(message.author.id), key, canonical, str(sent_messages[0].id), time.time())
-        previous = await social_duplicate_service.register(event)
-        if previous:
-            await asyncio.wait_for(_announce(message, previous), timeout=5)
+        match = await social_duplicate_service.register(event)
+        if match:
+            await asyncio.wait_for(_announce(message, match.previous, share_count=match.share_count), timeout=5)
     except Exception as exc:
         # No URL, user text, credentials or raw API exception in diagnostic logs.
         logger.warning("Social duplicate patrol failed: error_type=%s", type(exc).__name__)

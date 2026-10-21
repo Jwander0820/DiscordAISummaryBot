@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 
 from discord_bot.db.social_duplicate_repository import ShareEvent, SocialDuplicateRepository
 from discord_bot.features.social_preview.duplicate_identity import post_identity
-from discord_bot.features.social_preview.duplicate_service import SocialDuplicateService
+from discord_bot.features.social_preview.duplicate_service import DuplicateMatch, SocialDuplicateService
 
 
 def event(source="100", **overrides):
@@ -70,7 +70,7 @@ class DuplicateServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.service.effective("1"), (True, 7))
         first = event()
         self.assertIsNone(await self.service.register(first))
-        self.assertEqual(await self.service.register(event("101")), first)
+        self.assertEqual(await self.service.register(event("101")), DuplicateMatch(first, 2))
         self.assertIsNone(await self.service.register(event("102", channel_id="11")))
         self.assertIsNone(await self.service.register(event("103", guild_id="2")))
         self.assertIsNone(await self.service.register(event("104", platform="instagram")))
@@ -79,7 +79,9 @@ class DuplicateServiceTests(unittest.IsolatedAsyncioTestCase):
         results = await asyncio.gather(*(self.service.register(event(str(100 + i))) for i in range(12)))
         self.assertEqual(sum(result is None for result in results), 1)
         self.assertEqual(len(self.service.cache), 1)
+        self.assertEqual([result.share_count for result in results if result is not None], list(range(2, 13)))
         self.assertIsNone(await self.service.register(event("100")))
+        self.assertEqual(self.service.counts[event().key], 12)
         count = await asyncio.to_thread(self.repository._execute, "SELECT COUNT(*) FROM social_share_events")
         self.assertEqual(count[0][0], 12)
 
@@ -102,7 +104,7 @@ class DuplicateServiceTests(unittest.IsolatedAsyncioTestCase):
         old = event(occurred_at=time.time() - 100 * 86400)
         await self.service.register(old)
         with patch.object(self.repository, "snapshot", side_effect=AssertionError("No read on share")):
-            self.assertEqual(await self.service.register(event("101")), old)
+            self.assertEqual(await self.service.register(event("101")), DuplicateMatch(old, 2))
 
     async def test_disable_env_override_and_restore_defaults(self):
         os.environ["SOCIAL_DUPLICATE_ENABLED"] = "0"
@@ -164,7 +166,37 @@ class DuplicateServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await self.service.register(event("102")))
         await self.service.rebuild()
         self.assertTrue(self.service.ready)
-        self.assertEqual(await self.service.register(event("103")), first)
+        self.assertEqual(await self.service.register(event("103")), DuplicateMatch(first, 2))
+
+    async def test_share_counts_are_per_post_channel_guild_and_survive_restart(self):
+        first = event()
+        await self.service.register(first)
+        second = await self.service.register(event("101"))
+        third = await self.service.register(event("102"))
+        self.assertEqual((second.share_count, third.share_count), (2, 3))
+        self.assertEqual(second.share_count, 2)  # A match is a snapshot, not a live counter.
+        for different in (event("103", post_key="Another001"), event("104", channel_id="11"),
+                          event("105", guild_id="2"), event("106", platform="instagram")):
+            self.assertIsNone(await self.service.register(different))
+            self.assertEqual(self.service.counts[different.key], 1)
+        await self.service.close()
+        await self.service.rebuild()
+        fourth = await self.service.register(event("107"))
+        self.assertEqual(fourth, DuplicateMatch(first, 4))
+
+    async def test_rebuild_counts_only_loaded_window_and_keeps_other_guild_counts(self):
+        old = event("100", occurred_at=time.time() - 10 * 86400)
+        recent = event("101", occurred_at=time.time() - 86400)
+        for record in (old, recent, event("102", guild_id="2")):
+            await self.service.register(record)
+        await self.service.register(event("103", guild_id="2"))
+        self.assertEqual(self.service.counts[old.key], 2)
+        await self.service.configure("1", days=2, updated_by="42")
+        self.assertEqual(self.service.counts[old.key], 1)
+        self.assertEqual(self.service.counts[event(guild_id="2").key], 2)
+        await self.service.configure("1", days=19, updated_by="42")
+        self.assertEqual(self.service.counts[old.key], 2)
+        self.assertEqual(await self.service.register(event("104")), DuplicateMatch(old, 3))
 
     async def test_failed_load_or_settings_write_never_reports_success(self):
         with patch.object(self.repository, "snapshot", side_effect=OSError("synthetic failure")):

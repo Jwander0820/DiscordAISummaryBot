@@ -73,6 +73,7 @@ render.yaml
 *.png
 *.jpg
 !discord_bot/assets/social_preview/alarm_dog.jpg
+!discord_bot/assets/social_preview/message_police.jpg
 *.db
 *.json
 

@@ -187,4 +187,6 @@ rg '某筆紀錄的trace_id' bot.log
 
 固定頭像為 [alarm_dog.jpg](../discord_bot/assets/social_preview/alarm_dog.jpg)，隨 Docker 的 `discord_bot` 目錄打包；首次建立專用 webhook 時直接讀取檔案上傳，不依賴圖片主機或 GitHub raw URL。名稱、頭像與出警台詞固定在程式中，沒有對應 env；目前不附加 GIF。更新 bot 自己的頭像不會影響專用 webhook。專用 webhook 頭像建立後保存在 Discord，單純替換本機圖片不會自動更新已存在的 webhook。
 
+同連結在同頻道總共第 2 次出現用狗頭像，第 3 次起改用 [message_police.jpg](../discord_bot/assets/social_preview/message_police.jpg)。不同連結各自計數，不因另一篇已升級就改掉自己的頭像。兩種頭像使用各自的專用 webhook，顯示名稱都維持「不看訊息警察」，不反覆修改同一個 webhook 的頭像。計數隨快取從 DB 的載入期間恢復，運作中增量累計；重送相同來源事件不重複計數。調整天數／重啟時，只計重建範圍內的分享，不計整個 DB 的永久累積次數。
+
 DB 保存完整事件歷史；記憶體只放文章識別與必要 ID。每次啟動從 DB 載入最近 N 天，期間增量更新，不逐次計算到期、不定時清理。修改設定時重建該 guild 快取；長期不重啟時判重範圍與快取隨資料增加。DB 故障會暫停出警並重試恢復，既有預覽照常運作。

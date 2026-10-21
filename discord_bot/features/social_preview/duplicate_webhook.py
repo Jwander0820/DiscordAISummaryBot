@@ -11,14 +11,17 @@ logger = logging.getLogger("discord_digest_bot")
 PATROL_NAME = "不看訊息警察"
 PATROL_WEBHOOK_NAME = "digest-duplicate-patrol"
 PATROL_AVATAR_PATH = Path(__file__).resolve().parents[2] / "assets" / "social_preview" / "alarm_dog.jpg"
+REPEAT_WEBHOOK_NAME = "digest-duplicate-patrol-repeat"
+REPEAT_AVATAR_PATH = PATROL_AVATAR_PATH.with_name("message_police.jpg")
+REPEAT_AVATAR_FROM_SHARE_COUNT = 3
 
 
-@lru_cache(maxsize=1)
-def _avatar_bytes() -> bytes:
-    return PATROL_AVATAR_PATH.read_bytes()
+@lru_cache(maxsize=2)
+def _avatar_bytes(path=PATROL_AVATAR_PATH) -> bytes:
+    return path.read_bytes()
 
 
-async def send_patrol_webhook(message, previous, *, content: str, mentions) -> bool:
+async def send_patrol_webhook(message, previous, *, content: str, mentions, share_count=2) -> bool:
     """Use a dedicated bot-owned webhook; let the caller provide bot fallback."""
     channel = message.channel
     thread = channel if isinstance(channel, discord.Thread) else None
@@ -29,13 +32,16 @@ async def send_patrol_webhook(message, previous, *, content: str, mentions) -> b
     me = getattr(guild, "me", None)
     if me is None or not parent.permissions_for(me).manage_webhooks:
         return False
+    repeated = share_count >= REPEAT_AVATAR_FROM_SHARE_COUNT
+    webhook_name = REPEAT_WEBHOOK_NAME if repeated else PATROL_WEBHOOK_NAME
+    avatar_path = REPEAT_AVATAR_PATH if repeated else PATROL_AVATAR_PATH
     try:
         hooks = await parent.webhooks()
         hook = next((item for item in hooks
-                     if item.name == PATROL_WEBHOOK_NAME and item.type is discord.WebhookType.incoming
+                     if item.name == webhook_name and item.type is discord.WebhookType.incoming
                      and item.user is not None and item.user.id == me.id), None)
         if hook is None:
-            hook = await parent.create_webhook(name=PATROL_WEBHOOK_NAME, avatar=_avatar_bytes(),
+            hook = await parent.create_webhook(name=webhook_name, avatar=_avatar_bytes(avatar_path),
                                                 reason="Social duplicate patrol identity")
         # Incoming webhooks cannot create native replies. Keep the old preview reachable.
         jump_url = f"https://discord.com/channels/{previous.guild_id}/{previous.channel_id}/{previous.preview_message_id}"
