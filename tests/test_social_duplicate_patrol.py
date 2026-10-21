@@ -135,6 +135,7 @@ class DuplicateCogTests(unittest.IsolatedAsyncioTestCase):
     async def test_success_and_status_report_effective_setting_source(self):
         cog = cog_module.SocialDuplicateCog(None)
         service = SimpleNamespace(configure=AsyncMock(return_value=True), ready=True,
+                                  cross_effective=lambda guild: (False, frozenset()), cross_channels=lambda guild: frozenset(),
                                   effective=Mock(return_value=(True, 11)), settings={"1": (True, 11)})
         request = interaction()
         with patch.object(cog_module, "social_duplicate_service", service):

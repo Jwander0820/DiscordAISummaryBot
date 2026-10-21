@@ -48,6 +48,8 @@ Gemini 模型順序在 `discord_bot/integrations/gemini_client.py` 的 `SUMMARY_
 
 ## 社群預覽與出警
 
+跨頻道不新增環境變數，預設停用。管理員用 `/社群出警設定` 的管理按鈕選取一份一般文字頻道清單並儲存；至少兩個有效頻道才生效，討論串不列入。清單內共用次數、引用首次分享，清單外維持同頻道。總出警開關與天數沿用既有設定；跨頻道開關／清單存在 `guild_social_cross_channel_settings`，正式環境同樣需要持久 DB。
+
 | 變數 | 省略時 | 範本與用途 |
 | --- | --- | --- |
 | `THREADS_PREVIEW_ENABLED` | `0` | `0`；Threads 全域預設 |

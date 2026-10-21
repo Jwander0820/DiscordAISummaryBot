@@ -149,7 +149,7 @@ SOCIAL_PATROL_EVENT_COLUMNS = (
     "source_message_id", "source_message_created_at", "current_preview_message_id",
     "first_source_message_id", "first_user_id", "reference_message_id", "share_count",
     "occurred_at", "delivery_status", "delivery_method", "patrol_message_id", "completed_at", "error_type",
-    "taunt_text", "taunt_source",
+    "taunt_text", "taunt_source", "reference_channel_id",
 )
 
 CREATE_SOCIAL_PATROL_TABLES_SQL = (
@@ -165,7 +165,7 @@ CREATE_SOCIAL_PATROL_TABLES_SQL = (
         delivery_status TEXT NOT NULL CHECK (delivery_status IN ('pending', 'sent', 'failed', 'unknown')),
         delivery_method TEXT CHECK (delivery_method IN ('webhook', 'bot_reply', 'bot_notice')),
         patrol_message_id TEXT, completed_at DOUBLE PRECISION, error_type TEXT,
-        taunt_text TEXT, taunt_source TEXT,
+        taunt_text TEXT, taunt_source TEXT, reference_channel_id TEXT,
         UNIQUE (guild_id, channel_id, platform, source_message_id)
     );""",
     "CREATE INDEX IF NOT EXISTS idx_social_patrol_guild_time ON social_patrol_events (guild_id, occurred_at);",
@@ -173,6 +173,11 @@ CREATE_SOCIAL_PATROL_TABLES_SQL = (
 )
 
 CREATE_SOCIAL_DUPLICATE_TABLES_SQL = (
+    """CREATE TABLE IF NOT EXISTS guild_social_cross_channel_settings (
+        guild_id TEXT PRIMARY KEY, enabled INTEGER NOT NULL,
+        channel_ids_json TEXT NOT NULL,
+        updated_by TEXT NOT NULL, updated_at DOUBLE PRECISION NOT NULL
+    );""",
     """CREATE TABLE IF NOT EXISTS guild_social_duplicate_settings (
         guild_id TEXT PRIMARY KEY, enabled INTEGER NOT NULL,
         window_days INTEGER NOT NULL CHECK (window_days > 0),

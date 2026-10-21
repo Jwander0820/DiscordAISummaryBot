@@ -1,4 +1,4 @@
-"""Same-channel patrol: persistent events and a rebuildable in-memory index."""
+"""Share patrol with explicit cross-channel scopes and rebuildable history."""
 from __future__ import annotations
 
 import asyncio
@@ -26,6 +26,9 @@ class SocialDuplicateService:
         self.patrol_repository = SocialPatrolRepository(self.repository)
         self.ready = False
         self.settings = {}
+        self.cross_settings = {}
+        # Discord cog supplies current text-channel IDs; no Discord dependency here.
+        self.text_channel_ids = None
         self.cache = {}
         self.counts = {}
         self._lock = asyncio.Lock()
@@ -50,6 +53,17 @@ class SocialDuplicateService:
     def effective(self, guild_id):
         return self.settings.get(str(guild_id), (self.default_enabled, self.default_days))
 
+    def cross_effective(self, guild_id):
+        return self.cross_settings.get(str(guild_id), (False, frozenset()))
+
+    def cross_channels(self, guild_id):
+        enabled, channels = self.cross_effective(guild_id)
+        if not enabled:
+            return frozenset()
+        valid = frozenset(self.text_channel_ids(str(guild_id))) if self.text_channel_ids else frozenset()
+        channels = channels & valid
+        return channels if len(channels) >= 2 else frozenset()
+
     async def _load(self, guild_id=None):
         self.ready = False
         self._read_defaults()
@@ -57,6 +71,7 @@ class SocialDuplicateService:
             settings, events = await asyncio.to_thread(
                 self.repository.snapshot, enabled=self.default_enabled, days=self.default_days,
                 now=time.time(), guild_id=guild_id)
+            cross_settings = await asyncio.to_thread(self.repository.cross_channel_settings)
         except Exception as exc:
             report_failure(self.repository, exc, "read")
             return False
@@ -71,6 +86,7 @@ class SocialDuplicateService:
             counts = {**{key: value for key, value in self.counts.items() if key[0] != guild_id},
                       **{key: value for key, value in counts.items() if key[0] == guild_id}}
         self.settings, self.cache, self.counts = settings, cache, counts
+        self.cross_settings = cross_settings
         self.ready = True
         database_health.succeeded("social_share_events", self.repository.backend, "read")
         logger.info("Social duplicate cache ready: entries=%s", len(cache))
@@ -107,11 +123,37 @@ class SocialDuplicateService:
                 return False
             return await self._load(str(guild_id))
 
+    async def configure_cross_channel(self, guild_id, *, enabled, channel_ids, updated_by, expected=None):
+        guild_id = str(guild_id)
+        channels = frozenset(str(channel) for channel in channel_ids)
+        if not isinstance(enabled, bool) or any(not channel.isdecimal() for channel in channels):
+            raise ValueError("跨頻道設定格式不正確。")
+        async with self._lock:
+            if not self.ready and not await self._load():
+                return False
+            if expected is not None and expected != self.cross_effective(guild_id):
+                raise ValueError("設定已被其他操作更新，請重新開啟面板。")
+            valid = set(self.text_channel_ids(guild_id)) if self.text_channel_ids else set()
+            if not channels <= valid:
+                raise ValueError("清單包含已刪除或非一般文字頻道，請移除後儲存。")
+            try:
+                await asyncio.to_thread(self.repository.configure_cross_channel, guild_id,
+                                       enabled=enabled, channel_ids=channels, updated_by=str(updated_by))
+            except Exception as exc:
+                self.ready = False
+                report_failure(self.repository, exc, "write")
+                return False
+            return await self._load(guild_id)
+
     async def register(self, event: ShareEvent):
         async with self._lock:
             if not self.ready or not self.effective(event.guild_id)[0]:
                 return None
-            previous = self.cache.get(event.key)
+            channels = self.cross_channels(event.guild_id)
+            keys = [(event.guild_id, channel, event.platform, event.post_key) for channel in channels] \
+                if event.channel_id in channels else [event.key]
+            candidates = [self.cache[key] for key in keys if key in self.cache]
+            previous = min(candidates, key=lambda item: (item.occurred_at, int(item.source_message_id))) if candidates else None
             try:
                 inserted = await asyncio.to_thread(self.repository.insert, event)
             except Exception as exc:
@@ -124,7 +166,7 @@ class SocialDuplicateService:
             self.counts[event.key] = self.counts.get(event.key, 0) + 1
             # Re-delivery of the same source must never accuse itself.
             if previous and previous.source_message_id != event.source_message_id:
-                return DuplicateMatch(previous, self.counts[event.key])
+                return DuplicateMatch(previous, sum(self.counts.get(key, 0) for key in keys))
             return None
 
     async def close(self):

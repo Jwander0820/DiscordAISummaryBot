@@ -247,11 +247,14 @@ class DuplicatePostgresTests(unittest.TestCase):
                 patch.dict("sys.modules", {"psycopg2": driver}):
             self.assertTrue(repository.insert(event()))
             repository.configure("1", (True, 11), updated_by="42")
+            repository.configure_cross_channel("1", enabled=True, channel_ids={"10", "11"}, updated_by="42")
+            cursor.fetchall.return_value = [("1", 1, '["10", "11"]')]
+            self.assertEqual(repository.cross_channel_settings(), {"1": (True, frozenset({"10", "11"}))})
             driver.connect.assert_called_once_with("postgresql://test.invalid/test", connect_timeout=5)
             self.assertEqual(repository.placeholder, "%s")
             for call in cursor.execute.call_args_list:
                 self.assertNotIn("?", call.args[0])
-            self.assertEqual(connection.commit.call_count, 2)
+            self.assertEqual(connection.commit.call_count, 4)
             repository.close()
 
     def test_failed_initialization_cools_down_and_recovers(self):

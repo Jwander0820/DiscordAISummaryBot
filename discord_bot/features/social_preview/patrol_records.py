@@ -40,6 +40,7 @@ def build_patrol_event(message, event, match) -> dict:
         "current_preview_message_id": event.preview_message_id,
         "first_source_message_id": previous.source_message_id, "first_user_id": previous.user_id,
         "reference_message_id": previous.preview_message_id, "share_count": match.share_count,
+        "reference_channel_id": previous.channel_id,
         "occurred_at": time.time(), "delivery_status": "pending", "delivery_method": None,
         "patrol_message_id": None, "completed_at": None, "error_type": None,
         "taunt_text": None, "taunt_source": None,

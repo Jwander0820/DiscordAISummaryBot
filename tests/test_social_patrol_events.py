@@ -126,9 +126,9 @@ class RepositoryTests(unittest.TestCase):
         from discord_bot.db.schema import CREATE_SOCIAL_PATROL_TABLES_SQL
         with tempfile.TemporaryDirectory() as tmp:
             path = str(Path(tmp) / "legacy.db")
-            old = {k: v for k, v in pending().items() if k not in {"taunt_text", "taunt_source"}}
+            old = {k: v for k, v in pending().items() if k not in {"taunt_text", "taunt_source", "reference_channel_id"}}
             with sqlite3.connect(path) as conn:
-                conn.execute(CREATE_SOCIAL_PATROL_TABLES_SQL[0].replace("taunt_text TEXT, taunt_source TEXT,", ""))
+                conn.execute(CREATE_SOCIAL_PATROL_TABLES_SQL[0].replace("taunt_text TEXT, taunt_source TEXT, reference_channel_id TEXT,", ""))
                 conn.execute(f"INSERT INTO social_patrol_events ({', '.join(old)}) VALUES ({', '.join('?' for _ in old)})", tuple(old.values()))
             conn.close()
             self.storage.close()
@@ -139,6 +139,8 @@ class RepositoryTests(unittest.TestCase):
                 self.assertEqual(self.storage._execute("SELECT COUNT(*) FROM social_patrol_events"), [(1,)])
                 columns = [r[1] for r in self.storage._execute("PRAGMA table_info(social_patrol_events)")]
                 self.assertEqual(columns.count("taunt_text"), 1)
+                self.assertEqual(columns.count("reference_channel_id"), 1)
+                self.assertEqual(self.storage._execute("SELECT reference_channel_id FROM social_patrol_events"), [(None,)])
                 self.storage.close()
 
 

@@ -1,6 +1,7 @@
 """Persistent share history; cache recovery never deletes historical events."""
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sqlite3
@@ -66,12 +67,12 @@ class SocialDuplicateRepository:
                     for sql in CREATE_SOCIAL_DUPLICATE_TABLES_SQL:
                         cursor.execute(sql)
                     if self.backend == "postgres":
-                        for name in ("taunt_text", "taunt_source"):
+                        for name in ("taunt_text", "taunt_source", "reference_channel_id"):
                             cursor.execute(f"ALTER TABLE social_patrol_events ADD COLUMN IF NOT EXISTS {name} TEXT")
                     else:
                         cursor.execute("PRAGMA table_info(social_patrol_events)")
                         columns = {row[1] for row in cursor.fetchall()}
-                        for name in ("taunt_text", "taunt_source"):
+                        for name in ("taunt_text", "taunt_source", "reference_channel_id"):
                             if name not in columns:
                                 cursor.execute(f"ALTER TABLE social_patrol_events ADD COLUMN {name} TEXT")
                 finally:
@@ -130,6 +131,20 @@ class SocialDuplicateRepository:
             "ON CONFLICT (guild_id, channel_id, platform, source_message_id) DO NOTHING",
             (event.guild_id, event.channel_id, event.platform, event.source_message_id, event.user_id,
              event.post_key, event.canonical_url, event.preview_message_id, event.occurred_at), write=True) == 1
+
+    def cross_channel_settings(self):
+        return {guild: (bool(enabled), frozenset(json.loads(channels)))
+                for guild, enabled, channels in self._execute(
+                    "SELECT guild_id, enabled, channel_ids_json FROM guild_social_cross_channel_settings")}
+
+    def configure_cross_channel(self, guild_id, *, enabled, channel_ids, updated_by):
+        self._execute(
+            "INSERT INTO guild_social_cross_channel_settings "
+            "(guild_id, enabled, channel_ids_json, updated_by, updated_at) VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT (guild_id) DO UPDATE SET enabled = excluded.enabled, "
+            "channel_ids_json = excluded.channel_ids_json, updated_by = excluded.updated_by, "
+            "updated_at = excluded.updated_at",
+            (guild_id, int(enabled), json.dumps(sorted(channel_ids)), updated_by, time.time()), write=True)
 
     def configure(self, guild_id: str, setting, *, updated_by: str):
         if setting is None:

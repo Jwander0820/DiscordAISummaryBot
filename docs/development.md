@@ -75,6 +75,7 @@ Parser 或預覽變更時先跑對應回歸，例如：
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest tests.test_social_duplicate_service tests.test_social_duplicate_patrol tests.test_social_duplicate_webhook tests.test_x_duplicate_links tests.test_x_duplicate_patrol
+.\.venv\Scripts\python.exe -m unittest tests.test_cross_channel_patrol tests.test_cross_channel_patrol_view
 ```
 
 部署腳本測試需要 Bash，透過 fake Docker 執行，不操作實際 Docker daemon。Windows 若誤選 WSL Bash，改用已安裝的 Git for Windows Bash；以此工作區的安裝路徑為例，僅在本次終端調整：

@@ -23,12 +23,18 @@ async def _announce(message, previous, *, share_count=2, taunt_text=None):
     mentions = discord.AllowedMentions(everyone=False, users=[discord.Object(id=message.author.id)],
                                        roles=False, replied_user=False)
     content = f"🚨 逼逼！<@{message.author.id}>！你已經被不看訊息警察逮捕了，逼波逼波逼波。"
+    if str(message.channel.id) != previous.channel_id:
+        content += f"\n這篇之前在 <#{previous.channel_id}> 分享過。"
     delivery = await send_patrol_webhook(message, previous, content=content, mentions=mentions,
                                         share_count=share_count, taunt_text=taunt_text)
     if delivery:
         return delivery
     if taunt_text:
         content += "\n" + taunt_text
+    if str(message.channel.id) != previous.channel_id:
+        jump_url = f"https://discord.com/channels/{previous.guild_id}/{previous.channel_id}/{previous.preview_message_id}"
+        result = await message.channel.send(content + f"\n⬆️ [查看原始連結]({jump_url})", allowed_mentions=mentions)
+        return delivered("bot_notice", result)
     reference = discord.MessageReference(message_id=int(previous.preview_message_id),
                                          channel_id=int(previous.channel_id), guild_id=int(previous.guild_id))
     try:
