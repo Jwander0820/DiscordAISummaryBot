@@ -1,4 +1,3 @@
-import base64
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -42,133 +41,130 @@ class DuplicateWebhookTests(unittest.IsolatedAsyncioTestCase):
         self.source = message()
         self.source.channel = self.channel
         self.source.guild.me = SimpleNamespace(id=42)
-        relay._avatar_bytes.cache_clear()
         for name, value in (("TextChannel", FakeChannel), ("Thread", FakeThread)):
             patcher = patch.object(relay.discord, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
 
-    async def test_fixed_name_avatar_and_jump_link_only_ping_current_sharer(self):
+    async def test_first_patrol_real_sdk_payload(self):
         await patrol._announce(self.source, previous())
-        self.channel.create_webhook.assert_awaited_once()
         creation = self.channel.create_webhook.await_args.kwargs
-        self.assertEqual(creation["avatar"], relay.PATROL_AVATAR_PATH.read_bytes())
-        self.assertTrue(creation["avatar"].startswith(b"\xff\xd8\xff"))
+        self.assertEqual(creation["name"], relay.PATROL_WEBHOOK_NAME)
+        self.assertNotIn("avatar", creation)
         sent = self.channel.create_webhook.return_value.send.await_args
-        self.assertEqual(sent.kwargs["username"], "不看訊息警察")
-        self.assertEqual(sent.args[0],
-            "🚨 逼逼！<@42>！你已經被不看訊息警察逮捕了，逼波逼波逼波。\n"
-            "⬆️ [查看原始連結](https://discord.com/channels/1/10/1100)")
+        self.assertEqual(sent.args, ())
+        self.assertEqual(sent.kwargs["avatar_url"], relay.PATROL_AVATAR_URL)
         self.assertTrue(sent.kwargs["wait"])
-        self.assertTrue(sent.kwargs["suppress_embeds"])
-        self.assertNotIn("reference", sent.kwargs)
-        self.assertNotIn("avatar_url", sent.kwargs)  # Uses the bundled avatar uploaded at creation.
+        self.assertNotIn("suppress_embeds", sent.kwargs)
         from discord.http import handle_message_parameters
-        with handle_message_parameters(content=sent.args[0], username=sent.kwargs["username"],
+        with handle_message_parameters(view=sent.kwargs["view"], username=sent.kwargs["username"],
+                                       avatar_url=sent.kwargs["avatar_url"],
                                        allowed_mentions=sent.kwargs["allowed_mentions"]) as params:
-            self.assertEqual(params.payload["username"], "不看訊息警察")
-            self.assertEqual(params.payload["allowed_mentions"], {"parse": [], "users": [42]})
+            payload = params.payload
+            self.assertEqual(payload["username"], "不看訊息警察")
+            self.assertTrue(payload["flags"] & 32768)
+            self.assertEqual(payload["allowed_mentions"], {"parse": [], "users": [42]})
+            self.assertNotIn("content", payload)
+            self.assertNotIn("embeds", payload)
+            card = payload["components"][0]
+            self.assertEqual(card["type"], 17)
+            self.assertEqual(card["accent_color"], 0xFF6600)
+            self.assertEqual(len(card["components"]), 1)
+            section = card["components"][0]
+            self.assertEqual(section["type"], 9)
+            self.assertEqual(section["accessory"]["media"]["url"], relay.PATROL_GIF_URL)
+            self.assertEqual(section["components"][0]["content"], "**不看訊息警察**")
+            self.assertEqual(section["components"][1]["content"],
+                             "🚨 逼逼！<@42>！你已經被不看訊息警察逮捕了，逼波逼波逼波。")
+            self.assertEqual(section["components"][2]["content"],
+                             "⬆️ [查看原始連結](https://discord.com/channels/1/10/1100)")
         self.channel.send.assert_not_awaited()
 
     async def test_only_reuses_bot_owned_incoming_patrol_webhook(self):
-        other_bot = webhook(99)
-        no_owner = webhook(None)
-        preview = webhook()
-        preview.name = "digest-preview-relay"
+        others = [webhook(99), webhook(None), webhook(name="digest-preview-relay")]
         owned = webhook()
-        self.channel.webhooks.return_value = [other_bot, no_owner, preview, owned]
+        self.channel.webhooks.return_value = others + [owned]
         await patrol._announce(self.source, previous())
         owned.send.assert_awaited_once()
+        self.assertEqual(owned.send.await_args.kwargs["avatar_url"], relay.PATROL_AVATAR_URL)
         self.channel.create_webhook.assert_not_awaited()
-        for other in (other_bot, no_owner, preview):
+        for other in others:
             other.send.assert_not_awaited()
 
-    async def test_thread_uses_parent_webhook_but_sends_to_current_thread(self):
+    async def test_thread_routes_through_parent(self):
         thread = FakeThread(self.channel)
         self.source.channel = thread
         await patrol._announce(self.source, previous())
-        kwargs = self.channel.create_webhook.return_value.send.await_args.kwargs
-        self.assertIs(kwargs["thread"], thread)
+        self.assertIs(self.channel.create_webhook.return_value.send.await_args.kwargs["thread"], thread)
         thread.send.assert_not_awaited()
 
-    async def test_third_and_later_shares_create_police_with_second_asset(self):
-        await patrol._announce(self.source, previous(), share_count=3)
-        creation = self.channel.create_webhook.await_args.kwargs
-        self.assertEqual(creation["name"], relay.REPEAT_WEBHOOK_NAME)
-        self.assertEqual(creation["avatar"], relay.REPEAT_AVATAR_PATH.read_bytes())
-        self.assertNotEqual(creation["avatar"], relay.PATROL_AVATAR_PATH.read_bytes())
-        self.assertEqual(self.channel.create_webhook.return_value.send.await_args.kwargs["username"], "不看訊息警察")
+    async def test_all_four_social_platforms_reach_the_same_v2_webhook(self):
+        from discord_bot.features.social_preview.duplicate_service import DuplicateMatch
 
-    async def test_count_comments_follow_link_with_numeric_count_and_fixed_later_taunt(self):
-        police = webhook(name=relay.REPEAT_WEBHOOK_NAME)
-        self.channel.webhooks.return_value = [police]
-        expected_comments = {
-            3: "第 3 次了！三回啊三回！",
-            4: "第 4 次了！你是只看自己傳的訊息是不是！",
-            5: "第 5 次了！警察都認得這篇了，你還不認得！",
-            6: "第 6 次了……好，你開心就好。",
-            10: "第 10 次了……好，你開心就好。",
-            12: "第 12 次了……好，你開心就好。",
-            100: "第 100 次了……好，你開心就好。",
-        }
-        for count, expected in expected_comments.items():
-            with self.subTest(count=count):
-                await patrol._announce(self.source, previous(), share_count=count)
-                content = police.send.await_args.args[0]
-                self.assertEqual(content.split("\n")[1],
-                    "⬆️ [查看原始連結](https://discord.com/channels/1/10/1100) " + expected)
-                self.assertEqual(content.count("<@42>"), 1)
+        cases = (
+            ("threads", "https://www.threads.com/@demo/post/Demo001"),
+            ("instagram", "https://www.instagram.com/p/Demo001/"),
+            ("facebook", "https://www.facebook.com/demo/posts/123"),
+            ("x", "https://x.com/demo/status/123"),
+        )
+        for platform, url in cases:
+            with self.subTest(platform=platform):
+                service = SimpleNamespace(register=AsyncMock(return_value=DuplicateMatch(previous(), 2)))
+                hook = webhook()
+                self.channel.webhooks.return_value = [hook]
+                with patch.object(patrol, "social_duplicate_service", service):
+                    if platform == "x":
+                        await patrol.record_original_share(self.source, platform=platform, url=url)
+                    else:
+                        await patrol.record_delivered_preview(self.source, platform=platform, url=url,
+                                                               sent_messages=[SimpleNamespace(id=1200)])
+                self.assertEqual(service.register.await_args.args[0].platform, platform)
+                hook.send.assert_awaited_once()
+                sent = hook.send.await_args.kwargs
+                self.assertEqual(sent["avatar_url"], relay.PATROL_AVATAR_URL)
+                card = sent["view"].to_components()[0]
+                self.assertEqual(card["type"], 17)
+                self.assertEqual(card["components"][0]["accessory"]["media"]["url"], relay.PATROL_GIF_URL)
+                self.assertEqual(sent["allowed_mentions"].to_dict(), {"parse": [], "users": [42]})
+                self.channel.send.assert_not_awaited()
 
-    async def test_two_stable_webhooks_do_not_change_each_other_or_other_post_avatars(self):
-        dog = webhook()
-        police = webhook(name=relay.REPEAT_WEBHOOK_NAME)
+    async def test_counts_preserve_per_post_avatar_and_gif(self):
+        dog, police = webhook(), webhook(name=relay.REPEAT_WEBHOOK_NAME)
         self.channel.webhooks.return_value = [dog, police]
-        # A popular link escalates. Another link's first duplicate must still be dog.
-        await patrol._announce(self.source, previous(), share_count=3)
+        expected = {3: "第 3 次了！三回啊三回！", 4: "第 4 次了！你是只看自己傳的訊息是不是！",
+                    5: "第 5 次了！警察都認得這篇了，你還不認得！", 6: "第 6 次了……好，你開心就好。",
+                    100: "第 100 次了……好，你開心就好。"}
+        for count, suffix in expected.items():
+            await patrol._announce(self.source, previous(), share_count=count)
+            sent = police.send.await_args.kwargs
+            section = sent["view"].to_components()[0]["components"][0]
+            self.assertEqual(section["components"][2]["content"],
+                             "⬆️ [查看原始連結](https://discord.com/channels/1/10/1100) " + suffix)
+            self.assertEqual(section["accessory"]["media"]["url"], relay.PATROL_GIF_URL)
+            self.assertEqual(sent["avatar_url"], relay.REPEAT_AVATAR_URL)
         await patrol._announce(self.source, previous(), share_count=2)
-        await patrol._announce(self.source, previous(), share_count=4)
-        self.assertEqual(police.send.await_count, 2)
         dog.send.assert_awaited_once()
+        self.assertEqual(dog.send.await_args.kwargs["avatar_url"], relay.PATROL_AVATAR_URL)
         self.channel.create_webhook.assert_not_awaited()
 
-    async def test_existing_dog_webhook_is_not_used_as_repeat_police(self):
-        dog = webhook()
-        another_bot_police = webhook(owner=99, name=relay.REPEAT_WEBHOOK_NAME)
-        self.channel.webhooks.return_value = [dog, another_bot_police]
+    async def test_existing_dog_is_not_reused_for_police(self):
+        dog, other = webhook(), webhook(owner=99, name=relay.REPEAT_WEBHOOK_NAME)
+        self.channel.webhooks.return_value = [dog, other]
         await patrol._announce(self.source, previous(), share_count=3)
         self.assertEqual(self.channel.create_webhook.await_args.kwargs["name"], relay.REPEAT_WEBHOOK_NAME)
+        self.assertEqual(self.channel.create_webhook.return_value.send.await_args.kwargs["avatar_url"],
+                         relay.REPEAT_AVATAR_URL)
         dog.send.assert_not_awaited()
-        another_bot_police.send.assert_not_awaited()
+        other.send.assert_not_awaited()
 
-    async def test_missing_permissions_falls_back_to_original_bot_reply(self):
+    async def test_missing_permissions_preserves_bot_reply_fallback(self):
         self.channel.manage_webhooks = False
         await patrol._announce(self.source, previous())
         self.channel.webhooks.assert_not_awaited()
-        self.channel.create_webhook.assert_not_awaited()
         self.assertEqual(self.channel.send.await_args.kwargs["reference"].message_id, 1100)
 
-    async def test_webhook_send_failure_falls_back_without_affecting_preview(self):
+    async def test_failed_webhook_preserves_bot_reply_fallback(self):
         self.channel.create_webhook.return_value.send.side_effect = RuntimeError("synthetic failure")
         await patrol._announce(self.source, previous())
         self.channel.send.assert_awaited_once()
         self.assertIn("reference", self.channel.send.await_args.kwargs)
-
-    async def test_missing_bundled_avatar_falls_back_without_creating_webhook(self):
-        with patch.object(relay, "_avatar_bytes", side_effect=FileNotFoundError("synthetic path")):
-            await patrol._announce(self.source, previous())
-        self.channel.create_webhook.assert_not_awaited()
-        self.channel.send.assert_awaited_once()
-
-
-class AvatarSdkTests(unittest.IsolatedAsyncioTestCase):
-    async def test_real_sdk_encodes_bundled_jpeg_for_create_webhook(self):
-        from discord.channel import TextChannel
-        state = SimpleNamespace(http=SimpleNamespace(create_webhook=AsyncMock(return_value={
-            "id": "100", "type": 1, "name": relay.PATROL_WEBHOOK_NAME})))
-        channel = SimpleNamespace(id=10, _state=state)
-        for path in (relay.PATROL_AVATAR_PATH, relay.REPEAT_AVATAR_PATH):
-            with self.subTest(asset=path.name), patch.object(discord.Webhook, "from_state", return_value=object()):
-                await TextChannel.create_webhook(channel, name=relay.PATROL_WEBHOOK_NAME, avatar=path.read_bytes())
-            avatar = state.http.create_webhook.await_args.kwargs["avatar"]
-            self.assertTrue(avatar.startswith("data:image/jpeg;base64,"))
-            self.assertEqual(base64.b64decode(avatar.split(",", 1)[1]), path.read_bytes())

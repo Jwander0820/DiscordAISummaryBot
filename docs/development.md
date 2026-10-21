@@ -85,6 +85,108 @@ $env:PATH='C:\Software\Git\bin;C:\Software\Git\usr\bin;' + $env:PATH
 
 其他安裝位置需替換路徑。以最終 `OK`／`FAILED` 判讀測試；DB unavailable 測試刻意產生 traceback，缺少 Discord／aiohttp 可能造成 skip。不要把 skip 當成已驗證。離線測試不等於實際社群抓取或 Discord 播放驗收。
 
+## 獨立 GIF／卡片測試
+
+`tools/send_preview_test.py` 只用 Discord REST API，不匯入 `discord_bot`、不啟動
+`bot.py`／Gateway，不載入 cogs、DB 或通知。可與已運作的 bot 分開執行。
+
+| `--layout` | 外觀 | GIF 與版面 |
+| --- | --- | --- |
+| `thumbnail`（預設） | 傳統 Embed 右側小縮圖 | 最接近「文字左、圖片右」的緊湊卡片 |
+| `image` | 傳統 Embed 下方大圖 | 支援 GIF，通常較佔高度 |
+| `v2-thumbnail` | Container 裡的 Section + Thumbnail | 小 GIF 與文字並排，可擴充元件配置 |
+| `v2-gallery` | Container 裡的 Media Gallery | 適合媒體展示，通常較佔版面 |
+| `all` | 各送一則，共四則 | 方便在同一頻道比較 |
+| `v2-section` | 無 Container 外框的 Section + Thumbnail | 文字與小 GIF 並排，沒有色條 |
+| `author-icon` | Embed 作者列小圖示 | 更小，動畫表現需在客戶端確認 |
+| `footer-icon` | Embed 頁尾小圖示 | 更小，動畫表現需在客戶端確認 |
+| `v2-spoiler` | V2 並排縮圖加防雷 | 點擊揭露 GIF，文字仍可見 |
+| `extras` | 上述額外四種各送一則 | 不重複 `all` 的基本四種 |
+
+傳統 Embed 的 `author.icon_url`／`footer.icon_url` 是小圖示欄位，不適合當
+主要 GIF 展示區；其動畫表現不作本工具的驗收保證。直接貼 GIF 或分享網址也可能
+產生大張自動預覽，但排版由 Discord 決定。`rich` 是可自行組裝的 embed；
+`gifv`／`video` 等自動預覽種類不能靠填 `type` 當作自訂卡片模板。
+
+GIF 應提供可直接回傳媒體的 HTTPS URL，例如 `https://media.example.com/demo.gif`
+（虛構範例，需替換），不要填 `https://giphy.com` 首頁或一般分享頁；
+不是所有 GIF 網址都以 `.gif` 結尾，仍以實際回傳媒體為準。也可直接使用本機 GIF。
+Discord 決定縮圖的顯示尺寸，設定 embed 的 `width`／`height` 無法強制縮小；
+V2 Thumbnail 也沒有像素尺寸欄位。動畫仍受客戶端自動播放／輔助使用設定影響。
+V2 訊息不混用傳統 `content`／`embeds`，文字必須用 Text Display。
+
+在根目錄 PowerShell 執行（GIF 路徑／直連請自行替換）：
+
+```powershell
+$env:PYTHONUTF8='1'
+# 只看四種 JSON，不讀 .env、不連線、不發送
+.\.venv\Scripts\python.exe tools/send_preview_test.py --gif-file 'C:\Pictures\demo.gif' --layout all
+
+# 實際送一則小縮圖，讀取已設定的通知頻道
+.\.venv\Scripts\python.exe tools/send_preview_test.py --gif-file 'C:\Pictures\demo.gif' --layout thumbnail --send
+
+# 實際送四則比較；可改用自己的媒體直連
+.\.venv\Scripts\python.exe tools/send_preview_test.py --gif-url 'https://media.example.com/demo.gif' --layout all --send
+
+# 自訂文字與連結（PowerShell 換行用 `n）
+.\.venv\Scripts\python.exe tools/send_preview_test.py --gif-file 'C:\Pictures\demo.gif' --layout v2-thumbnail --title '有新人' --text "如題`n歡迎加入" --link 'https://example.com' --send
+```
+
+工具只使用 `DISCORD_BOT_TOKEN`、`DISCORD_NOTIFY_FORWARD_CHANNEL_ID`、
+`DISCORD_NOTIFY_FORWARD_GUILD_ID`。各欄位依序從程序環境、根目錄 `.env`、
+`discord_bot/.env` 取值；明確空字串視為停用／設定錯誤，不向後備援。
+發送前取得頻道並核對 guild，兩個 ID 都必填。沒有硬編碼私人 ID 或 token，
+不印設定、原始 API 錯誤或 HTTP traceback；dry run 會印出你提供的內文和 GIF URL，
+請勿將包含私密內容或簽名網址的輸出分享出去。
+
+需要 bot 的檢視頻道、傳送訊息、嵌入連結權限；本機 GIF 另需附加檔案權限。
+本機檔案以固定名稱 `preview.gif` 上傳（工具上限 10 MiB，Discord 仍可能有更低限制）。
+所有測試訊息禁用 mentions。成功會印訊息連結；遇錯立即停止，四則可能只送出部分。
+不自動重送 POST，網路逾時後應先查看頻道避免重複發送。測試訊息可自行在 Discord 刪除。
+
+使用 bot token 發送的名稱／頭像是現有 bot 身分。範例 JSON 的最外層 `username`／
+`avatar_url` 是 webhook 發送選項，本工具不建立 webhook，也不修改 bot 身分；
+`author.name` 則只是卡片內的作者欄位。
+
+參考：[Discord Embed 與 Create Message](https://docs.discord.com/developers/resources/message)、
+[Components V2／Thumbnail／Media Gallery](https://docs.discord.com/developers/components/reference)、
+[Webhook 發送欄位](https://docs.discord.com/developers/resources/webhook)。
+離線測試驗證 payload、設定優先序與發送邊界，實際動畫與版面需在 Discord 驗收。
+
+### Webhook 警報版型獨立示範
+
+`tools/send_patrol_preview_test.py` 可模擬「不看訊息警察」，各發一則 V2 有框並排縮圖與
+傳統 Embed 縮圖。僅從通知設定取得頻道／guild，核對後重用或建立 bot 擁有的
+`digest-patrol-layout-test` 測試 Webhook，不修改正式警報或使用其 Webhook。
+範例與原始連結均標示模擬，不讀寫社群分享歷史或 DB。
+
+```powershell
+.\.venv\Scripts\python.exe tools/send_patrol_preview_test.py --gif-url 'https://media.example.com/demo.gif' --avatar-gif --send
+```
+
+省略 `--send` 只離線預覽。`--avatar-gif` 另外將 GIF URL 填到每則的 `avatar_url`，
+測試頭像；API 接受不等於客戶端會播放動畫。卡片 GIF 與頭像是不同欄位。
+`--layout v2 --no-heading` 可只送 V2 且移除卡片內重複標題，外層 Webhook 名稱仍保留。
+`--layout author-icon` 可只送 Embed 作者列小 GIF 版，不附右側縮圖。
+使用 `--avatar-url 'https://media.example.com/avatar.png'` 指定固定 PNG 頭像，
+與卡片 GIF 分開；此選項和歷史測試用的 `--avatar-gif` 互斥。
+`--channel-id` 僅覆寫此次發送目標，不修改 `.env` 檔案內容；仍核對設定的 guild。
+跨伺服器測試須另帶 `--guild-id` 明確覆寫此次核對的 guild；同樣不寫入 `.env`。
+卡片內的模擬原始連結預設為 `https://example.com`，不使用頻道資訊；
+只有明確帶入 `--reference-url` 才改用指定網址。
+主要測試目的地可放在 `tools/.patrol-preview.local.json`（Git ignore）中，使用
+`channel_id` 與 `guild_id` 字串欄位。優先順序為 CLI、本機 JSON、既有通知環境設定；
+本機 JSON 不含憑證，不納入 Git，也不修改 `.env`。
+`--final-style --layout v2` 送出無測試註記的最終外觀，仍不觸發判重或寫 DB。
+`--share-counts 2 3 4 5 6 --layout v2` 可各送一則指定次數的模擬警報，
+沿用目前正式文案，並在測試註記標示次數；不改正式計數或 DB。
+預設只允許標記 bot 自己，供驗證 mention 解析；`--mention-user` 可指定使用者 ID，
+指定真人時禁用通知。
+V2 Text Display 可以解析與通知 mentions，正式使用時應只允許明確對象；
+傳統 Embed 中的 mention 與通知行為不等同 V2 文字元件。
+Webhook V2 使用 `wait=true&with_components=true` 與 `flags=32768`，
+不用 `SUPPRESS_EMBEDS` 隱藏卡片。送達回應只輸出去識別化布林檢查與訊息連結。
+
 ## 歷史紀錄備份
 
 `tools/sync_postgres_summaries_to_sqlite.py` 預設同步 PostgreSQL 的 `summaries` 與 `deepfaker_events` 到本機 SQLite。需要 `DATABASE_URL`，輸出由 `LOCAL_BACKUP_SQLITE_PATH` 或 `--output` 決定。這個工具會連線資料庫；先用 dry run 確認範圍：
