@@ -2,7 +2,7 @@
 
 > 文件不記錄個人帳號或主機位址；`<owner>` 為占位符。實際映像來源由 `.github/workflows/deploy.yml` 與部署腳本的固定設定決定，執行前須核對，修改文件範例不會變更部署來源。
 
-此設定對應本專案的既有 VPS Docker Compose。Portainer 僅查看容器，不接管 Stack。首次安裝、GitHub Secrets、GHCR 登入完成後，使用者推送 main 才觸發部署。
+此設定對應本專案的既有 VPS Docker Compose。Portainer 僅查看容器，不接管 Stack。首次安裝、GitHub Secrets、GHCR 登入完成後，推送 main 會觸發部署，也可在 main 手動執行 workflow。本文描述部署流程，不代表已驗證目前 VPS 的掛載、log 保留或運作狀態。
 
 ## 1. 從 Windows 上傳部署工具
 
@@ -198,6 +198,27 @@ bot_compose config --quiet
 - 未掛載持久儲存時，容器重建會失去更新後的 Cookie，改以環境初始值重新建立。
 - 修改掛載需編輯主機 Compose，再沿用上述驗證、重建流程；日常 GitHub image 部署不會替你修改 Compose 或 env。
 - Bot 設定見[環境變數指南](../../docs/configuration.md)，Cookie 行為見[社群預覽指南](../../docs/social-preview.md)。
+
+## Log 保留與容器更新
+
+應用程式有兩條 log 路徑：console 交給 Docker logging driver，另由 Python `FileHandler` 以附加方式寫入工作目錄的 `bot.log`。目前 image 的工作目錄是 `/app`，所以未被掛載或其他啟動設定改變時，檔案位於 `/app/bot.log`；程式沒有內建檔案輪替，也沒有 log 路徑 env。
+
+- 同一容器重新啟動會繼續使用原檔案；更新 image 而替換容器時，未持久掛載的檔案不會帶到新容器。
+- `bot.log` 若掛載至主機檔案或 persistent volume，容器替換後可以保留，實際歷史長度仍受主機清理／輪替影響。只掛載 PostgreSQL 或 Cookie 目錄不代表 log 也持久保存。
+- Docker console log 的保留由 logging driver、輪替設定與容器生命週期決定，不能因新容器沿用名稱就假設能查到舊容器歷史。Docker 的輪替設定不會自動輪替 Python 另寫的 `bot.log`。
+
+先在 VPS 唯讀確認目前容器的工作目錄、掛載及 logging 設定；以下命令不輸出環境變數值：
+
+```bash
+sudo docker inspect --format '{{.Config.WorkingDir}}' discord-summary-bot-bot-1
+sudo docker inspect --format '{{range .Mounts}}{{println .Type .Source "->" .Destination}}{{end}}' discord-summary-bot-bot-1
+sudo docker inspect --format '{{json .HostConfig.LogConfig}}' discord-summary-bot-bot-1
+sudo docker logs --since 24h --timestamps --tail 2000 discord-summary-bot-bot-1
+```
+
+最後一條只查看目前容器最近 24 小時、最多 2,000 行；無輸出不證明沒有更早的檔案紀錄，達到行數上限也不代表已收集完整一天。從實際掛載結果找到主機 log 後，再檢查檔案是否存在、大小、日期範圍及輪替檔，不把特定主機路徑當成 image 保證。若需跨更新保存，應先備份並確認持久掛載；不要為了讀 log 重建或移除舊容器。新掛載也無法自動恢復已遺失的歷史。
+
+Log 可能包含私人分享網址、名稱與錯誤資訊，不外貼完整內容、不提交 Git。一般社群活動行不含完整事件 ID，也不證明預覽送達；若用於 DB 回補，依[回補指南](../../docs/development.md#一次性社群分享歷史回補)交叉核對。檔案存在、Docker healthy 或舊維運紀錄，都不能代替本次對 log 內容與範圍的確認。
 
 ## 官方參考
 

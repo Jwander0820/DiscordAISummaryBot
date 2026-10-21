@@ -1,6 +1,8 @@
-# 社群連結預覽
+# 社群連結預覽與重複分享出警
 
 Threads、Facebook、Instagram 共用 Components V2 卡片、Webhook 代發與刪除流程。所有設定名稱及預設值見[環境變數指南](configuration.md)，完整範本見 [`.env.example`](../.env.example)。
+
+X／Twitter 僅提供[重複分享偵測](#xtwitter-僅偵測重複分享)，不接管其他 bot 的預覽。出警有獨立開關，見[同頻道重複分享出警](#同頻道重複分享出警)。
 
 ## 伺服器開關
 
@@ -127,7 +129,7 @@ Cookie 只傳給 HTTPS `www.instagram.com` 的目標媒體 API，不跟隨轉址
 
 ### 社群預覽 log
 
-正常處理時，Threads、Facebook、Instagram 各記錄一行 INFO，沿用 console 與 `bot.log`。以下為虛構格式範例，名稱與大括號內的帳號／貼文代碼均為占位符，不對應真實訊息或可使用的貼文網址：
+進入預覽處理時，Threads、Facebook、Instagram 各記錄一行 INFO；X 在偵測到有效 status 連結時記錄。沿用 console 與 `bot.log`。以下為虛構格式範例，名稱與大括號內的帳號／貼文代碼均為占位符，不對應真實訊息或可使用的貼文網址：
 
 ```text
 範例使用者 在 範例頻道 貼了 Threads url https://www.threads.com/@{example_author}/post/{example_post_id}
@@ -135,6 +137,8 @@ Cookie 只傳給 HTTPS `www.instagram.com` 的目標媒體 API，不跟隨轉址
 範例使用者 在 範例頻道 貼了 Instagram url https://www.instagram.com/p/{example_shortcode}/
 範例使用者 在 範例頻道 貼了 X url https://x.com/{example_author}/status/{example_status_id}
 ```
+
+每行由 logging 加上時間、等級與 logger 名稱。這是連結偵測紀錄，不是預覽送達或 DB 寫入證明；三平台在抓取前記錄，可能仍是 Facebook share 網址。一般活動行只有顯示名稱與頻道名稱，不含 guild／channel／user ID、來源或預覽訊息 ID，不能直接還原 `social_share_events`。回補流程見[開發指南](development.md#一次性社群分享歷史回補)，檔案持久性見[部署指南](../tools/deploy/README.md#log-保留與容器更新)。
 
 Instagram 成功階段、完整成功摘要與 V2 發送成功的詳細診斷均為 DEBUG，預設不輸出；Cookie 例行保存成功也為 DEBUG。HTTP 失敗、驗證挑戰、KK 接手、Reel 仍無影片、媒體下載略過或錯誤卡片才輸出 WARNING，組裝／發送失敗輸出 ERROR。匿名內容不足但 Cookie 正常補回是預期備援；前四項限制省略後續媒體也不算異常。
 
@@ -184,19 +188,23 @@ rg '某筆紀錄的trace_id' bot.log
 
 預設開啟，載入最近七天分享；管理者用 `/社群出警設定` 修改開關及正整數天數，用 `/社群出警狀態` 查看是否就緒。guild 設定優先於 `SOCIAL_DUPLICATE_ENABLED` / `SOCIAL_DUPLICATE_WINDOW_DAYS`。
 
-只對已啟用預覽的平台、已確認的文章與完整送達的預覽記錄。不同 share 網址必須解析成同篇文章才會命中。重複時照常送預覽，另以固定名稱「不看訊息警察」的專用 webhook 標記本次分享者，附上同頻道最早的快取預覽跳轉連結，不重貼原正文。Webhook 不支援原生回覆；缺少管理 Webhook 權限或發送失敗時，改由 bot 原生回覆舊預覽，舊訊息已刪除時改一般提示。並發分享以先完成送達與登記者作為原始預覽。
+Threads／Facebook／Instagram 只對已啟用預覽的平台、已確認的文章與完整送達的預覽記錄。不同 share 網址必須解析成同篇文章才會命中。重複時照常送預覽，另以固定名稱「不看訊息警察」的專用 webhook 標記本次分享者，附上同頻道最早的快取預覽跳轉連結，不重貼原正文。Webhook 不支援原生回覆；缺少管理 Webhook 權限或發送失敗時，改由 bot 原生回覆舊預覽，舊訊息已刪除時改一般提示。並發分享以先完成送達與登記者作為原始預覽。X／Twitter 的獨立偵測方式見下節。
 
 固定頭像為 [alarm_dog.jpg](../discord_bot/assets/social_preview/alarm_dog.jpg)，隨 Docker 的 `discord_bot` 目錄打包；首次建立專用 webhook 時直接讀取檔案上傳，不依賴圖片主機或 GitHub raw URL。名稱、頭像與出警台詞固定在程式中，沒有對應 env；目前不附加 GIF。更新 bot 自己的頭像不會影響專用 webhook。專用 webhook 頭像建立後保存在 Discord，單純替換本機圖片不會自動更新已存在的 webhook。
 
 同連結在同頻道總共第 2 次出現用狗頭像，第 3 次起改用 [message_police.jpg](../discord_bot/assets/social_preview/message_police.jpg)。不同連結各自計數，不因另一篇已升級就改掉自己的頭像。兩種頭像使用各自的專用 webhook，顯示名稱都維持「不看訊息警察」，不反覆修改同一個 webhook 的頭像。計數隨快取從 DB 的載入期間恢復，運作中增量累計；重送相同來源事件不重複計數。調整天數／重啟時，只計重建範圍內的分享，不計整個 DB 的永久累積次數。
 
-出警連結行顯示為 `⬆️ 查看原始連結`，只有文字可點擊，跳轉到先前的 Discord 預覽。第 2 次不加尾句；第 3～5 次在連結後分別加上「第 3 次了！三回啊三回！」、「第 4 次了！你是只看自己傳的訊息是不是！」、「第 5 次了！警察都認得這篇了，你還不認得！」；第 6 次起固定為「第 N 次了……好，你開心就好。」，N 使用阿拉伯數字。吐槽不包在連結內。
+出警連結行顯示為 `⬆️ 查看原始連結`，只有文字可點擊，跳轉到先前的 Discord 分享訊息（三平台為預覽，X 為原留言）。第 2 次不加尾句；第 3～5 次在連結後分別加上「第 3 次了！三回啊三回！」、「第 4 次了！你是只看自己傳的訊息是不是！」、「第 5 次了！警察都認得這篇了，你還不認得！」；第 6 次起固定為「第 N 次了……好，你開心就好。」，N 使用阿拉伯數字。吐槽不包在連結內。
 
 DB 保存完整事件歷史；記憶體只放文章識別與必要 ID。每次啟動從 DB 載入最近 N 天，期間增量更新，不逐次計算到期、不定時清理。修改設定時重建該 guild 快取；長期不重啟時判重範圍與快取隨資料增加。DB 故障會暫停出警並重試恢復，既有預覽照常運作。
+
+判重 key 為 `(guild_id, channel_id, platform, post_key)`，不同伺服器、頻道或平台分開計算，Threads 與 X 即使文章 key 相同也不碰撞。這是程序內索引；同一 bot 不應同時啟動多個實例期待即時共享計數。關閉出警不記錄新分享，重開只載入 DB，不回掃停用期間的 Discord 歷史。
 
 ### X／Twitter 僅偵測重複分享
 
 X 預覽由其他 bot 處理。本 bot 只讀取人類原留言中的 `x.com`／`twitter.com` status 連結，以貼文 ID 判重；網域別名、帳號差異、`?s=46` 等 query、fragment 與 `/photo/1`／`/video/1` 尾碼均不影響身份。不對 X 發請求，不確認貼文存在／公開，不展開 `t.co` 或第三方 preview 網址。
+
+支援兩網域的 `www`／`mobile` 子網域，以及 `/{帳號}/status/{ID}`、`/i/status/{ID}`、`/i/web/status/{ID}` 路徑；`x.com` 和 `twitter.com` 的相同 status ID 視為同篇。僅帳號首頁或其他非 status 網址不登記。
 
 X 使用獨立的出警 listener，共用 `/社群出警設定` 的開關與天數，以及狗／警察頭像、次數台詞、DB 歷史和啟動恢復；與三平台預覽開關無關。第一次只記錄，同頻道重貼才出警；跳轉目標為第一次分享的 Discord 原留言。每則訊息只記錄第一個有效 X status 連結，重送同一個來源事件或同訊息重複同篇不增加計數。
 

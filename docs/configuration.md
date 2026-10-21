@@ -37,11 +37,11 @@ Gemini 模型順序在 `discord_bot/integrations/gemini_client.py` 的 `SUMMARY_
 
 資料庫包含 `summaries`、`deepfaker_events`、`guild_social_preview_settings`、`social_share_events` 與 `guild_social_duplicate_settings`。SQLite 放在容器內預設路徑不保證跨重建保留；正式環境使用持久 PostgreSQL，或將 SQLite 檔案置於持久 volume。
 
-三個 repository 連線失效後會冷卻 30 秒，在下一次實際 DB 需求時重新初始化；正常連線持續重用，不固定輪詢。歷史寫入失敗會先 rollback；連線仍可用時讓下一次寫入繼續使用。失敗／跳過的紀錄不自動補寫，commit 結果不確定時也不立即重送，避免重複資料。DB 故障與恢復通知見下節。
+摘要、DeepFaker 與社群預覽設定 repository 連線失效後會冷卻 30 秒，在下一次實際 DB 需求時重新初始化；正常連線持續重用，不固定輪詢。摘要／DeepFaker 歷史寫入失敗會先 rollback；連線仍可用時讓下一次寫入繼續使用。出警 repository 發生 SQL 錯誤時關閉連線，由出警服務重建快取恢復，見下方說明。失敗／跳過的紀錄不自動補寫，commit 結果不確定時也不立即重送，避免重複資料。DB 故障與恢復通知見下節。
 
-同步工具預設只備份兩個歷史表 `summaries`、`deepfaker_events`，不包含 guild 設定，也不能取代 PostgreSQL 全庫備份。命令與模式見[開發與工具指南](development.md#歷史紀錄備份)。
+同步工具預設只備份兩個歷史表 `summaries`、`deepfaker_events`，不包含 `social_share_events` 或兩張 guild 設定表，也不能取代 PostgreSQL 全庫備份。命令與模式見[開發與工具指南](development.md#歷史紀錄備份)。
 
-## 社群預覽
+## 社群預覽與出警
 
 | 變數 | 省略時 | 範本與用途 |
 | --- | --- | --- |
