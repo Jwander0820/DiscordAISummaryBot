@@ -1,4 +1,4 @@
-"""Optional post-delivery patrol. Failures must never undo a successful preview."""
+"""Optional share patrol; never modify originals or undo delivered previews."""
 from __future__ import annotations
 
 import asyncio
@@ -26,24 +26,36 @@ async def _announce(message, previous, *, share_count=2):
     try:
         await message.channel.send(content, reference=reference, allowed_mentions=mentions, mention_author=False)
     except discord.NotFound:
-        await message.channel.send(content + "（先前的預覽已不存在。）", allowed_mentions=mentions)
+        await message.channel.send(content + "（先前的訊息已不存在。）", allowed_mentions=mentions)
     except discord.HTTPException as exc:
         # UNKNOWN_MESSAGE_REFERENCE is not always returned as a 404.
         if getattr(exc, "code", None) != 10008 and getattr(exc, "code", None) != 50035:
             raise
-        await message.channel.send(content + "（目前無法回覆先前的預覽。）", allowed_mentions=mentions)
+        await message.channel.send(content + "（目前無法回覆先前的訊息。）", allowed_mentions=mentions)
 
 
 async def record_delivered_preview(message, *, platform, url, sent_messages, preview_error=None):
     if preview_error or not getattr(message, "guild", None) or not sent_messages:
         return
-    identity = post_identity(platform, url)
-    if not identity:
+    await _record_share(message, platform=platform, url=url, reference_message=sent_messages[0])
+
+
+async def record_original_share(message, *, platform, url):
+    """Record a human's original message without preview, deletion, edit or suppression."""
+    if (not getattr(message, "guild", None) or message.author.bot
+            or getattr(message, "webhook_id", None) is not None):
         return
+    await _record_share(message, platform=platform, url=url, reference_message=message)
+
+
+async def _record_share(message, *, platform, url, reference_message):
     try:
+        identity = post_identity(platform, url)
+        if not identity:
+            return
         key, canonical = identity
         event = ShareEvent(str(message.guild.id), str(message.channel.id), platform, str(message.id),
-                           str(message.author.id), key, canonical, str(sent_messages[0].id), time.time())
+                           str(message.author.id), key, canonical, str(reference_message.id), time.time())
         match = await social_duplicate_service.register(event)
         if match:
             await asyncio.wait_for(_announce(message, match.previous, share_count=match.share_count), timeout=5)

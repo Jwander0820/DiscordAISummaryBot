@@ -133,6 +133,7 @@ Cookie 只傳給 HTTPS `www.instagram.com` 的目標媒體 API，不跟隨轉址
 範例使用者 在 範例頻道 貼了 Threads url https://www.threads.com/@{example_author}/post/{example_post_id}
 範例使用者 在 範例頻道 貼了 Facebook url https://www.facebook.com/share/p/{example_share_id}/
 範例使用者 在 範例頻道 貼了 Instagram url https://www.instagram.com/p/{example_shortcode}/
+範例使用者 在 範例頻道 貼了 X url https://x.com/{example_author}/status/{example_status_id}
 ```
 
 Instagram 成功階段、完整成功摘要與 V2 發送成功的詳細診斷均為 DEBUG，預設不輸出；Cookie 例行保存成功也為 DEBUG。HTTP 失敗、驗證挑戰、KK 接手、Reel 仍無影片、媒體下載略過或錯誤卡片才輸出 WARNING，組裝／發送失敗輸出 ERROR。匿名內容不足但 Cookie 正常補回是預期備援；前四項限制省略後續媒體也不算異常。
@@ -151,7 +152,7 @@ Instagram 成功階段、完整成功摘要與 V2 發送成功的詳細診斷均
 
 ```powershell
 rg 'instagram_diagnostic' bot.log
-rg '貼了 (Threads|Facebook|Instagram) url' bot.log
+rg '貼了 (Threads|Facebook|Instagram|X) url' bot.log
 rg '某筆紀錄的trace_id' bot.log
 ```
 
@@ -192,3 +193,13 @@ rg '某筆紀錄的trace_id' bot.log
 出警連結行顯示為 `⬆️ 查看原始連結`，只有文字可點擊，跳轉到先前的 Discord 預覽。第 2 次不加尾句；第 3～5 次在連結後分別加上「第 3 次了！三回啊三回！」、「第 4 次了！你是只看自己傳的訊息是不是！」、「第 5 次了！警察都認得這篇了，你還不認得！」；第 6 次起固定為「第 N 次了……好，你開心就好。」，N 使用阿拉伯數字。吐槽不包在連結內。
 
 DB 保存完整事件歷史；記憶體只放文章識別與必要 ID。每次啟動從 DB 載入最近 N 天，期間增量更新，不逐次計算到期、不定時清理。修改設定時重建該 guild 快取；長期不重啟時判重範圍與快取隨資料增加。DB 故障會暫停出警並重試恢復，既有預覽照常運作。
+
+### X／Twitter 僅偵測重複分享
+
+X 預覽由其他 bot 處理。本 bot 只讀取人類原留言中的 `x.com`／`twitter.com` status 連結，以貼文 ID 判重；網域別名、帳號差異、`?s=46` 等 query、fragment 與 `/photo/1`／`/video/1` 尾碼均不影響身份。不對 X 發請求，不確認貼文存在／公開，不展開 `t.co` 或第三方 preview 網址。
+
+X 使用獨立的出警 listener，共用 `/社群出警設定` 的開關與天數，以及狗／警察頭像、次數台詞、DB 歷史和啟動恢復；與三平台預覽開關無關。第一次只記錄，同頻道重貼才出警；跳轉目標為第一次分享的 Discord 原留言。每則訊息只記錄第一個有效 X status 連結，重送同一個來源事件或同訊息重複同篇不增加計數。
+
+偵測到有效 X 連結時，沿用共用社群活動格式記錄一行 INFO，包含安全處理過的分享者／頻道名稱及正規化網址（移除 query／fragment）。首次與重複分享都會記錄；停用出警仍保留這行偵測 log，但不寫入分享歷史或出警。bot／webhook、DM 與非貼文網址不記錄。
+
+這條路徑不建立或轉發預覽，不刪除、編輯或壓制原留言的 embed，不偵測其他 bot／webhook 的訊息，也不追蹤編輯事件。如果其他 bot 刪除了原留言，跳轉可能失效，本 bot 不介入尋找其替代預覽。原訊息若另含 Threads／Facebook／Instagram 連結，既有三平台行為仍由原預覽流程決定，X listener 不介入。

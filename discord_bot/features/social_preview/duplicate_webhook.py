@@ -56,7 +56,7 @@ async def send_patrol_webhook(message, previous, *, content: str, mentions, shar
         if hook is None:
             hook = await parent.create_webhook(name=webhook_name, avatar=_avatar_bytes(avatar_path),
                                                 reason="Social duplicate patrol identity")
-        # Incoming webhooks cannot create native replies. Keep the old preview reachable.
+        # Incoming webhooks cannot create native replies. Link the original share reference.
         jump_url = f"https://discord.com/channels/{previous.guild_id}/{previous.channel_id}/{previous.preview_message_id}"
         kwargs = dict(username=PATROL_NAME, allowed_mentions=mentions, wait=True, suppress_embeds=True)
         if thread is not None:

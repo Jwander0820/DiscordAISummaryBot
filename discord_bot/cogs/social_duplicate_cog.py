@@ -9,6 +9,9 @@ from discord import app_commands
 from discord.ext import commands
 
 from ..features.social_preview.duplicate_service import social_duplicate_service
+from ..features.social_preview.duplicate_patrol import record_original_share
+from ..features.social_preview.x_links import extract_first_x_url
+from ..features.social_preview.sender import log_preview_link
 
 
 class SocialDuplicateCog(commands.Cog):
@@ -27,6 +30,16 @@ class SocialDuplicateCog(commands.Cog):
                 await self._recovery_task
             self._recovery_task = None
         await social_duplicate_service.close()
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        if (message.author.bot or getattr(message, "webhook_id", None) is not None
+                or message.guild is None):
+            return
+        url = extract_first_x_url(message.content or "")
+        if url is not None:
+            log_preview_link(message, platform="X", url=url)
+            await record_original_share(message, platform="x", url=url)
 
     @app_commands.command(name="社群出警設定", description="設定同頻道社群重複分享出警的開關與天數")
     @app_commands.default_permissions(manage_guild=True)

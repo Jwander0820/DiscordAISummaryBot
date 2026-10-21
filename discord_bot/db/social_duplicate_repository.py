@@ -23,7 +23,7 @@ class ShareEvent:
     user_id: str
     post_key: str
     canonical_url: str
-    preview_message_id: str
+    preview_message_id: str  # Reference target: delivered preview, or original message for X.
     occurred_at: float
 
     @property
