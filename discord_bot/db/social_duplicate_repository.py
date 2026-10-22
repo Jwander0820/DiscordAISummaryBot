@@ -24,7 +24,7 @@ class ShareEvent:
     user_id: str
     post_key: str
     canonical_url: str
-    preview_message_id: str  # Reference target: delivered preview, or original message for X.
+    preview_message_id: str  # Reference target: delivered preview, or original message for X/YouTube.
     occurred_at: float
 
     @property
@@ -142,6 +142,21 @@ class SocialDuplicateRepository:
             "DELETE FROM social_share_events WHERE guild_id = ? AND channel_id = ? "
             "AND platform IN ('threads', 'instagram', 'facebook') "
             f"AND preview_message_id IN ({placeholders}) "
+            "RETURNING guild_id, channel_id, platform, source_message_id, user_id, "
+            "post_key, canonical_url, preview_message_id, occurred_at",
+            (guild_id, channel_id, *message_ids))
+        return [ShareEvent(*row) for row in rows]
+
+    def delete_original_messages(self, guild_id, channel_id, message_ids):
+        """Raw deletion events apply only to the platforms retaining original messages."""
+        message_ids = tuple(str(message_id) for message_id in message_ids)
+        if not message_ids:
+            return []
+        placeholders = ", ".join("?" for _ in message_ids)
+        rows = self._execute(
+            "DELETE FROM social_share_events WHERE guild_id = ? AND channel_id = ? "
+            "AND platform IN ('x', 'youtube') "
+            f"AND source_message_id IN ({placeholders}) "
             "RETURNING guild_id, channel_id, platform, source_message_id, user_id, "
             "post_key, canonical_url, preview_message_id, occurred_at",
             (guild_id, channel_id, *message_ids))

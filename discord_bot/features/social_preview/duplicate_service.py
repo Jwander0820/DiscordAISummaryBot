@@ -170,11 +170,20 @@ class SocialDuplicateService:
             return None
 
     async def forget_previews(self, guild_id, channel_id, message_ids):
-        """Synchronize explicit button deletions without expiring unrelated runtime keys."""
+        """Synchronize explicit preview button deletions."""
+        return await self._forget_messages(self.repository.delete_previews, guild_id, channel_id, message_ids)
+
+    async def forget_original_messages(self, guild_id, channel_id, message_ids):
+        """Synchronize raw deletions of X/YouTube original messages."""
+        return await self._forget_messages(
+            self.repository.delete_original_messages, guild_id, channel_id, message_ids, log_originals=True)
+
+    async def _forget_messages(self, delete, guild_id, channel_id, message_ids, *, log_originals=False):
+        """Only refresh affected keys, keeping unrelated runtime windows intact."""
         async with self._lock:
             try:
                 deleted = await asyncio.to_thread(
-                    self.repository.delete_previews, str(guild_id), str(channel_id), message_ids)
+                    delete, str(guild_id), str(channel_id), message_ids)
                 updates = {}
                 for key in {event.key for event in deleted}:
                     first = self.cache.get(key)
@@ -195,6 +204,14 @@ class SocialDuplicateService:
                     self.cache.pop(key, None)
                     self.counts.pop(key, None)
             database_health.succeeded("social_share_events", self.repository.backend, "write")
+            if log_originals:
+                for event in deleted:
+                    label = {"x": "X", "youtube": "YouTube"}[event.platform]
+                    fields = [str(value).replace("\r", " ").replace("\n", " ") for value in (
+                        event.guild_id, event.channel_id, event.source_message_id, event.canonical_url)]
+                    logger.info(
+                        "%s 連結已刪除，分享紀錄與快取已更新：guild_id=%s channel_id=%s message_id=%s url=%s",
+                        label, *fields)
             return True
 
     async def close(self):

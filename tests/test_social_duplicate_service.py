@@ -346,12 +346,21 @@ class DuplicatePostgresTests(unittest.TestCase):
             self.assertIn("preview_message_id IN (%s, %s)", sql)
             self.assertIn("RETURNING", sql)
             self.assertEqual(params, ("1", "10", "1100", "1101"))
+            self.assertEqual(len(repository.delete_original_messages("1", "10", ["100", "101"])), 1)
+            sql, params = cursor.execute.call_args.args
+            self.assertIn("source_message_id IN (%s, %s)", sql)
+            self.assertIn("platform IN ('x', 'youtube')", sql)
+            self.assertNotIn("preview_message_id IN", sql)
+            self.assertEqual(params, ("1", "10", "100", "101"))
+            with patch.object(repository, "_execute") as execute:
+                self.assertEqual(repository.delete_original_messages("1", "10", []), [])
+                execute.assert_not_called()
             self.assertEqual(len(repository.remaining_shares(event().key, since=0)), 1)
             driver.connect.assert_called_once_with("postgresql://test.invalid/test", connect_timeout=5)
             self.assertEqual(repository.placeholder, "%s")
             for call in cursor.execute.call_args_list:
                 self.assertNotIn("?", call.args[0])
-            self.assertEqual(connection.commit.call_count, 6)
+            self.assertEqual(connection.commit.call_count, 7)
             repository.close()
 
     def test_failed_initialization_cools_down_and_recovers(self):

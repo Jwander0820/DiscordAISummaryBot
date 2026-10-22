@@ -19,6 +19,7 @@ class SocialDuplicateCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self._recovery_task = None
+        self._pending_originals = {}
 
     async def cog_load(self):
         from .cross_channel_patrol_view import text_channel_ids
@@ -39,12 +40,46 @@ class SocialDuplicateCog(commands.Cog):
         if (message.author.bot or getattr(message, "webhook_id", None) is not None
                 or message.guild is None):
             return
+        shares = []
         for platform, label, extract in (("x", "X", extract_first_x_url),
                                           ("youtube", "YouTube", extract_first_youtube_url)):
             url = extract(message.content or "")
             if url is not None:
+                shares.append((platform, label, url))
+        if not shares:
+            return
+        key = message.guild.id, message.channel.id, message.id
+        done = asyncio.Event()
+        pending = self._pending_originals.setdefault(key, set())
+        pending.add(done)
+        try:
+            for platform, label, url in shares:
                 log_preview_link(message, platform=label, url=url)
                 await record_original_share(message, platform=platform, url=url)
+        finally:
+            done.set()
+            pending.discard(done)
+            if not pending:
+                self._pending_originals.pop(key, None)
+
+    @commands.Cog.listener()
+    async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent):
+        await self._forget_originals(payload.guild_id, payload.channel_id, (payload.message_id,))
+
+    @commands.Cog.listener()
+    async def on_raw_bulk_message_delete(self, payload: discord.RawBulkMessageDeleteEvent):
+        await self._forget_originals(payload.guild_id, payload.channel_id, payload.message_ids)
+
+    async def _forget_originals(self, guild_id, channel_id, message_ids):
+        if guild_id is None or not message_ids:
+            return
+        # A mixed X/YouTube share may still be waiting for its first patrol
+        # announcement. Finish both registrations before removing their rows.
+        pending = [done for message_id in message_ids
+                   for done in self._pending_originals.get((guild_id, channel_id, message_id), ())]
+        if pending:
+            await asyncio.gather(*(done.wait() for done in pending))
+        await social_duplicate_service.forget_original_messages(guild_id, channel_id, message_ids)
 
     @app_commands.command(name="社群出警設定", description="設定社群重複分享出警的開關、天數與跨頻道範圍")
     @app_commands.default_permissions(manage_guild=True)
