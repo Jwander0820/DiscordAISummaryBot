@@ -106,6 +106,95 @@ class DuplicateServiceTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.repository, "snapshot", side_effect=AssertionError("No read on share")):
             self.assertEqual(await self.service.register(event("101")), DuplicateMatch(old, 2))
 
+    async def test_button_removal_promotes_remaining_share_and_updates_count(self):
+        first, second, third = event(), event("101"), event("102")
+        for share in (first, second, third):
+            await self.service.register(share)
+        self.assertTrue(await self.service.forget_previews("1", "10", [first.preview_message_id]))
+        self.assertEqual(self.service.cache[first.key], second)
+        self.assertEqual(self.service.counts[first.key], 2)
+        self.assertTrue(await self.service.forget_previews("1", "10", [third.preview_message_id]))
+        self.assertEqual(self.service.cache[first.key], second)
+        self.assertEqual(self.service.counts[first.key], 1)
+        self.assertEqual(await self.service.register(event("103")), DuplicateMatch(second, 2))
+        self.assertTrue(await self.service.rebuild())
+        self.assertEqual(self.service.cache[first.key], second)
+        self.assertEqual(self.service.counts[first.key], 2)
+
+    async def test_button_removal_is_scoped_and_does_not_remove_original_only_platforms(self):
+        first = event()
+        others = [event("101", post_key="Other001"), event("102", channel_id="11"),
+                  event("103", guild_id="2"), event("104", platform="instagram"),
+                  event("105", platform="x"), event("106", platform="youtube")]
+        # Exercise scope guards even with colliding preview IDs in synthetic data.
+        others = [replace(share, preview_message_id=first.preview_message_id) for share in others]
+        for share in (first, *others):
+            await self.service.register(share)
+        self.assertTrue(await self.service.forget_previews("1", "10", ["not-present"]))
+        self.assertEqual(len(self.service.cache), 7)
+        self.assertTrue(await self.service.forget_previews("1", "10", [first.preview_message_id]))
+        for share in (others[1], others[2], others[4], others[5]):
+            self.assertEqual(self.service.cache[share.key], share)
+        self.assertNotIn(first.key, self.service.cache)
+        self.assertNotIn(first.key, self.service.counts)
+        self.assertTrue(await self.service.forget_previews("1", "10", [first.preview_message_id]))
+
+    async def test_removal_keeps_runtime_window_and_unrelated_cache(self):
+        now = time.time()
+        unloaded = event("99", occurred_at=now - 100 * 86400)
+        await asyncio.to_thread(self.repository.insert, unloaded)
+        first = event("100", occurred_at=now - 6 * 86400)
+        second = event("101", occurred_at=now - 5 * 86400)
+        unrelated = event("102", post_key="Other001", occurred_at=now - 90 * 86400)
+        for share in (first, second, unrelated):
+            await self.service.register(share)
+        with patch("discord_bot.features.social_preview.duplicate_service.time.time", return_value=now + 20 * 86400):
+            self.assertTrue(await self.service.forget_previews("1", "10", [first.preview_message_id]))
+        self.assertEqual(self.service.cache[first.key], second)
+        self.assertEqual(self.service.counts[first.key], 1)
+        self.assertEqual(self.service.cache[unrelated.key], unrelated)
+        self.assertEqual(self.service.counts[unrelated.key], 1)
+
+    async def test_removal_while_disabled_is_persistent_and_updates_cross_channel_match(self):
+        first, other_channel = event(), event("101", channel_id="11")
+        for share in (first, other_channel):
+            await self.service.register(share)
+        self.service.text_channel_ids = lambda guild: {"10", "11"}
+        self.assertTrue(await self.service.configure_cross_channel(
+            "1", enabled=True, channel_ids={"10", "11"}, updated_by="42"))
+        self.assertTrue(await self.service.forget_previews("1", "10", [first.preview_message_id]))
+        self.assertEqual(await self.service.register(event("102")), DuplicateMatch(other_channel, 2))
+        self.assertTrue(await self.service.configure("1", state="disabled", updated_by="42"))
+        self.assertTrue(await self.service.forget_previews("1", "11", [other_channel.preview_message_id]))
+        self.assertTrue(await self.service.configure("1", state="enabled", updated_by="42"))
+        self.assertEqual(self.service.cache[first.key].source_message_id, "102")
+        self.assertNotIn(other_channel.key, self.service.cache)
+
+    async def test_removal_database_failures_degrade_without_false_success(self):
+        first = event()
+        await self.service.register(first)
+        with patch.object(self.repository, "delete_previews", side_effect=OSError("synthetic failure")):
+            self.assertFalse(await self.service.forget_previews("1", "10", [first.preview_message_id]))
+        self.assertFalse(self.service.ready)
+        self.assertEqual(self.service.cache[first.key], first)
+        self.assertTrue(await self.service.rebuild())
+        with patch.object(self.repository, "remaining_shares", side_effect=OSError("synthetic failure")):
+            self.assertFalse(await self.service.forget_previews("1", "10", [first.preview_message_id]))
+        self.assertFalse(self.service.ready)
+        self.assertTrue(await self.service.rebuild())
+        self.assertNotIn(first.key, self.service.cache)
+        self.assertNotIn(first.key, self.service.counts)
+
+    async def test_registration_and_removal_share_the_service_lock(self):
+        first, second = event(), event("101")
+        await self.service.register(first)
+        await asyncio.gather(
+            self.service.forget_previews("1", "10", [first.preview_message_id]),
+            self.service.register(second))
+        self.assertEqual(self.service.cache[first.key], second)
+        self.assertEqual(self.service.counts[first.key], 1)
+        self.assertEqual(await self.service.register(event("102")), DuplicateMatch(second, 2))
+
     async def test_disable_env_override_and_restore_defaults(self):
         os.environ["SOCIAL_DUPLICATE_ENABLED"] = "0"
         await self.service.rebuild()
@@ -250,11 +339,19 @@ class DuplicatePostgresTests(unittest.TestCase):
             repository.configure_cross_channel("1", enabled=True, channel_ids={"10", "11"}, updated_by="42")
             cursor.fetchall.return_value = [("1", 1, '["10", "11"]')]
             self.assertEqual(repository.cross_channel_settings(), {"1": (True, frozenset({"10", "11"}))})
+            cursor.fetchall.return_value = [tuple(getattr(event(), field) for field in ShareEvent.__dataclass_fields__)]
+            removed = repository.delete_previews("1", "10", ["1100", "1101"])
+            self.assertEqual(len(removed), 1)
+            sql, params = cursor.execute.call_args.args
+            self.assertIn("preview_message_id IN (%s, %s)", sql)
+            self.assertIn("RETURNING", sql)
+            self.assertEqual(params, ("1", "10", "1100", "1101"))
+            self.assertEqual(len(repository.remaining_shares(event().key, since=0)), 1)
             driver.connect.assert_called_once_with("postgresql://test.invalid/test", connect_timeout=5)
             self.assertEqual(repository.placeholder, "%s")
             for call in cursor.execute.call_args_list:
                 self.assertNotIn("?", call.args[0])
-            self.assertEqual(connection.commit.call_count, 4)
+            self.assertEqual(connection.commit.call_count, 6)
             repository.close()
 
     def test_failed_initialization_cools_down_and_recovers(self):

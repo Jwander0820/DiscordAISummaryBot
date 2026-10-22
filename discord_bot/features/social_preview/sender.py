@@ -221,13 +221,22 @@ async def delete_preview_messages(
         logger.info("社群預覽刪除失敗：訊息不存在或無法刪除 %s 想刪除 %s 內的預覽", deleter, channel)
         return
 
+    deleted_ids = [interaction.message.id] if getattr(interaction.message, "id", None) is not None else []
     if channel:
         for message_id in list(related_message_ids):
             try:
                 related = await channel.fetch_message(message_id)
                 await related.delete()
+                deleted_ids.append(message_id)
             except (NotFound, HTTPException, AttributeError):
                 continue
+    guild = getattr(interaction, "guild", None)
+    if guild is not None and channel is not None and deleted_ids:
+        from . import duplicate_service
+
+        if not await duplicate_service.social_duplicate_service.forget_previews(guild.id, channel.id, deleted_ids):
+            await interaction.followup.send(
+                "預覽已刪除，但分享紀錄清理失敗；重新貼上仍可能觸發出警。", ephemeral=True)
     logger.info("社群預覽已刪除 %s 刪除了 %s 內的預覽", deleter, channel)
 
 

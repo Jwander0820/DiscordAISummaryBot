@@ -1,5 +1,9 @@
 import importlib.util
+import os
+from pathlib import Path
 import sys
+import tempfile
+import time
 import types
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -53,6 +57,42 @@ def make_source(content):
 
 
 class SocialPreviewViewTests(unittest.IsolatedAsyncioTestCase):
+    async def test_button_delete_then_repost_does_not_trigger_patrol(self):
+        from discord_bot.db.social_duplicate_repository import ShareEvent, SocialDuplicateRepository
+        from discord_bot.features.social_preview import duplicate_service
+
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
+            "DB_TYPE": "sqlite", "SQLITE_PATH": str(Path(directory) / "shares.db"),
+            "SOCIAL_DUPLICATE_ENABLED": "1", "SOCIAL_DUPLICATE_WINDOW_DAYS": "7",
+        }):
+            service = duplicate_service.SocialDuplicateService(SocialDuplicateRepository())
+            try:
+                self.assertTrue(await service.rebuild())
+                first = ShareEvent("1", "10", "threads", "100", "42", "Video001", POST_URL, "1100", time.time())
+                await service.register(first)
+                view, = make_views()
+                channel = types.SimpleNamespace(id=10)
+                interaction = types.SimpleNamespace(
+                    guild=types.SimpleNamespace(id=1),
+                    response=types.SimpleNamespace(send_message=AsyncMock()),
+                    followup=types.SimpleNamespace(send=AsyncMock()),
+                    message=types.SimpleNamespace(id=1100, delete=AsyncMock(), channel=channel),
+                    user=types.SimpleNamespace(global_name="tester"),
+                )
+                button = next(item for item in view.walk_children()
+                              if isinstance(item, discord.ui.Button) and item.url is None)
+                with patch.object(duplicate_service, "social_duplicate_service", service):
+                    await button.callback(interaction)
+                repost = ShareEvent("1", "10", "threads", "101", "42", "Video001", POST_URL, "1101", time.time())
+                self.assertIsNone(await service.register(repost))
+                self.assertEqual(service.counts[first.key], 1)
+                rows = service.repository._execute("SELECT source_message_id FROM social_share_events")
+                self.assertEqual(rows, [("101",)])
+                self.assertTrue(await service.rebuild())
+                self.assertEqual(service.cache[first.key], repost)
+            finally:
+                await service.close()
+
     def test_real_sdk_payload_has_one_external_video_and_no_legacy_fields_or_uploads(self):
         view, = make_views()
         with handle_message_parameters(view=view, allowed_mentions=discord.AllowedMentions.none()) as params:
@@ -306,6 +346,62 @@ class SocialPreviewViewTests(unittest.IsolatedAsyncioTestCase):
             user=types.SimpleNamespace(global_name="tester"),
         )
         await view._delete(interaction)
+
+    async def test_continuation_button_clears_only_confirmed_deleted_share_reference(self):
+        from discord_bot.features.social_preview import duplicate_service, sender
+
+        for failed_id in (None, 1100, 1102):
+            with self.subTest(failed_id=failed_id):
+                view, = make_views()
+                view.related_message_ids = [1100, 1102]
+                forbidden = discord.Forbidden(types.SimpleNamespace(status=403, reason="Forbidden"), "denied")
+                main = types.SimpleNamespace(delete=AsyncMock(side_effect=forbidden if failed_id == 1100 else None))
+                tail = types.SimpleNamespace(delete=AsyncMock(side_effect=forbidden if failed_id == 1102 else None))
+                channel = types.SimpleNamespace(id=10, fetch_message=AsyncMock(side_effect=[main, tail]))
+                interaction = types.SimpleNamespace(
+                    guild=types.SimpleNamespace(id=1),
+                    response=types.SimpleNamespace(send_message=AsyncMock()),
+                    message=types.SimpleNamespace(id=1101, channel=channel, delete=AsyncMock()),
+                    user=types.SimpleNamespace(global_name="tester"),
+                )
+                service = types.SimpleNamespace(forget_previews=AsyncMock(return_value=True))
+                with patch.object(duplicate_service, "social_duplicate_service", service):
+                    await view._delete(interaction)
+                expected = [1101] + [item for item in (1100, 1102) if item != failed_id]
+                service.forget_previews.assert_awaited_once_with(1, 10, expected)
+                # Automatic source cleanup must never clear the share index.
+                service.forget_previews.reset_mock()
+                with patch.object(duplicate_service, "social_duplicate_service", service):
+                    await sender.cleanup_source_message(
+                        types.SimpleNamespace(delete=AsyncMock()), platform="Threads", url=POST_URL)
+                service.forget_previews.assert_not_awaited()
+
+    async def test_failed_button_delete_keeps_share_and_database_failure_is_reported(self):
+        from discord_bot.features.social_preview import duplicate_service
+
+        for deletion_failed in (True, False):
+            with self.subTest(deletion_failed=deletion_failed):
+                view, = make_views()
+                forbidden = discord.Forbidden(types.SimpleNamespace(status=403, reason="Forbidden"), "denied")
+                interaction = types.SimpleNamespace(
+                    guild=types.SimpleNamespace(id=1),
+                    response=types.SimpleNamespace(send_message=AsyncMock()),
+                    followup=types.SimpleNamespace(send=AsyncMock()),
+                    message=types.SimpleNamespace(id=1100, channel=types.SimpleNamespace(id=10),
+                        delete=AsyncMock(side_effect=forbidden if deletion_failed else None)),
+                    user=types.SimpleNamespace(global_name="tester"),
+                )
+                service = types.SimpleNamespace(forget_previews=AsyncMock(return_value=False))
+                with patch.object(duplicate_service, "social_duplicate_service", service):
+                    await view._delete(interaction)
+                if deletion_failed:
+                    service.forget_previews.assert_not_awaited()
+                    interaction.followup.send.assert_not_awaited()
+                else:
+                    service.forget_previews.assert_awaited_once_with(1, 10, [1100])
+                    interaction.followup.send.assert_awaited_once()
+                    self.assertIn("分享紀錄清理失敗", interaction.followup.send.await_args.args[0])
+                    self.assertTrue(interaction.followup.send.await_args.kwargs["ephemeral"])
 
     @patch.object(preview_module, "cleanup_source_message", new_callable=AsyncMock)
     @patch("discord_bot.features.social_preview.sender.send_preview_as_author", new_callable=AsyncMock)

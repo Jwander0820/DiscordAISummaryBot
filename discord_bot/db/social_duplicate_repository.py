@@ -132,6 +132,30 @@ class SocialDuplicateRepository:
             (event.guild_id, event.channel_id, event.platform, event.source_message_id, event.user_id,
              event.post_key, event.canonical_url, event.preview_message_id, event.occurred_at), write=True) == 1
 
+    def delete_previews(self, guild_id, channel_id, message_ids):
+        """Remove only preview references confirmed deleted by the preview button."""
+        message_ids = tuple(str(message_id) for message_id in message_ids)
+        if not message_ids:
+            return []
+        placeholders = ", ".join("?" for _ in message_ids)
+        rows = self._execute(
+            "DELETE FROM social_share_events WHERE guild_id = ? AND channel_id = ? "
+            "AND platform IN ('threads', 'instagram', 'facebook') "
+            f"AND preview_message_id IN ({placeholders}) "
+            "RETURNING guild_id, channel_id, platform, source_message_id, user_id, "
+            "post_key, canonical_url, preview_message_id, occurred_at",
+            (guild_id, channel_id, *message_ids))
+        return [ShareEvent(*row) for row in rows]
+
+    def remaining_shares(self, key, *, since):
+        rows = self._execute(
+            "SELECT guild_id, channel_id, platform, source_message_id, user_id, "
+            "post_key, canonical_url, preview_message_id, occurred_at FROM social_share_events "
+            "WHERE guild_id = ? AND channel_id = ? AND platform = ? AND post_key = ? "
+            "AND occurred_at >= ? ORDER BY occurred_at, source_message_id",
+            (*key, since))
+        return [ShareEvent(*row) for row in rows]
+
     def cross_channel_settings(self):
         return {guild: (bool(enabled), frozenset(json.loads(channels)))
                 for guild, enabled, channels in self._execute(

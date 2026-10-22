@@ -169,6 +169,34 @@ class SocialDuplicateService:
                 return DuplicateMatch(previous, sum(self.counts.get(key, 0) for key in keys))
             return None
 
+    async def forget_previews(self, guild_id, channel_id, message_ids):
+        """Synchronize explicit button deletions without expiring unrelated runtime keys."""
+        async with self._lock:
+            try:
+                deleted = await asyncio.to_thread(
+                    self.repository.delete_previews, str(guild_id), str(channel_id), message_ids)
+                updates = {}
+                for key in {event.key for event in deleted}:
+                    first = self.cache.get(key)
+                    if first is not None:
+                        # Keep the window loaded at startup/configuration, including
+                        # shares that have aged beyond it during this process.
+                        updates[key] = await asyncio.to_thread(
+                            self.repository.remaining_shares, key, since=first.occurred_at)
+            except Exception as exc:
+                self.ready = False
+                report_failure(self.repository, exc, "write")
+                return False
+            for key, remaining in updates.items():
+                if remaining:
+                    self.cache[key] = remaining[0]
+                    self.counts[key] = len(remaining)
+                else:
+                    self.cache.pop(key, None)
+                    self.counts.pop(key, None)
+            database_health.succeeded("social_share_events", self.repository.backend, "write")
+            return True
+
     async def close(self):
         async with self._lock:
             self.ready = False
