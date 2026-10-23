@@ -104,6 +104,10 @@ class SocialDuplicateRepository:
                 except Exception:
                     pass
 
+    def execute(self, sql, params=(), *, write=False):
+        """Execute a parameterized statement on this connection."""
+        return self._execute(sql, params, write=write)
+
     def snapshot(self, *, enabled: bool, days: int, now: float, guild_id=None):
         with self._lock:
             settings = {row[0]: (bool(row[1]), int(row[2])) for row in self._execute(

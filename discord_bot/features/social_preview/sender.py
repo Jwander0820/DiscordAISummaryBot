@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import asyncio
 import logging
 from typing import List, Optional, Sequence
 
@@ -168,9 +169,29 @@ async def send_preview_as_author(
     return await channel.send(**send_kwargs)
 
 
-async def send_preview_group(message: discord.Message, views: Sequence) -> list:
+async def _rollback_preview_messages(message, sent_messages, *, on_deleted):
+    """Preserve per-page failure handling and synchronize confirmed deletions."""
+    deleted_ids = []
+    for sent in sent_messages:
+        try:
+            await sent.delete()
+            deleted_ids.append(sent.id)
+        except (NotFound, HTTPException):
+            logger.warning("無法清理未完整送出的社群 V2 預覽", exc_info=True)
+    if on_deleted is not None and deleted_ids and getattr(message, "guild", None) is not None:
+        try:
+            await on_deleted(message.guild.id, message.channel.id, deleted_ids)
+        except Exception as exc:
+            logger.warning("Preview rollback index cleanup failed: error_type=%s", type(exc).__name__)
+
+
+async def send_preview_group(message: discord.Message, views: Sequence, *, on_delivered=None, on_deleted=None) -> list:
     """Send every V2 page, link their delete buttons, and roll back partial groups."""
     sent_messages = []
+    complete = asyncio.Event()
+    for view in views:
+        view.delivery_complete = complete
+        view.on_deleted = on_deleted
     try:
         for view in views:
             kwargs = {"view": view}
@@ -184,18 +205,29 @@ async def send_preview_group(message: discord.Message, views: Sequence) -> list:
                     sent_view.related_message_ids = [
                         item.id for item in sent_messages if item.id != sent_view.message.id
                     ]
-    except Exception:
+        if on_delivered is not None:
+            await on_delivered(sent_messages)
+    except (Exception, asyncio.CancelledError):
         for view in views:
             view.stop()
-        for sent in sent_messages:
+        rollback = asyncio.create_task(_rollback_preview_messages(message, sent_messages, on_deleted=on_deleted))
+        cancelled_during_cleanup = False
+        while True:
             try:
-                await sent.delete()
-            except (NotFound, HTTPException):
-                logger.warning("無法清理未完整送出的社群 V2 預覽", exc_info=True)
+                await asyncio.shield(rollback)
+                break
+            except asyncio.CancelledError:
+                if rollback.cancelled():
+                    raise
+                # Keep awaiting the same cleanup task; do not repeat deletions.
+                cancelled_during_cleanup = True
+        if cancelled_during_cleanup:
+            raise asyncio.CancelledError
         raise
     else:
         return sent_messages
     finally:
+        complete.set()
         for view in views:
             for file in view.files:
                 file.close()
@@ -205,7 +237,7 @@ async def send_preview_group(message: discord.Message, views: Sequence) -> list:
 
 
 async def delete_preview_messages(
-    interaction: discord.Interaction, related_message_ids: Sequence[int]
+    interaction: discord.Interaction, related_message_ids: Sequence[int], *, on_deleted=None
 ) -> None:
     """Delete a social preview and its linked continuation messages."""
     try:
@@ -231,10 +263,8 @@ async def delete_preview_messages(
             except (NotFound, HTTPException, AttributeError):
                 continue
     guild = getattr(interaction, "guild", None)
-    if guild is not None and channel is not None and deleted_ids:
-        from . import duplicate_service
-
-        if not await duplicate_service.social_duplicate_service.forget_previews(guild.id, channel.id, deleted_ids):
+    if on_deleted is not None and guild is not None and channel is not None and deleted_ids:
+        if not await on_deleted(guild.id, channel.id, deleted_ids):
             await interaction.followup.send(
                 "預覽已刪除，但分享紀錄清理失敗；重新貼上仍可能觸發出警。", ephemeral=True)
     logger.info("社群預覽已刪除 %s 刪除了 %s 內的預覽", deleter, channel)

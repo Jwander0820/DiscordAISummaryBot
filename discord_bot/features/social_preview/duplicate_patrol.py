@@ -19,6 +19,16 @@ from .patrol_taunts import choose_taunt
 logger = logging.getLogger("discord_digest_bot")
 
 
+async def send_registered_preview(message, views, *, send, platform, url, preview_error=None):
+    """Bind share lifecycle callbacks at the application boundary."""
+    async def delivered_group(messages):
+        await record_delivered_preview(message, platform=platform, url=url,
+                                       sent_messages=messages, preview_error=preview_error)
+
+    return await send(message, views, on_delivered=delivered_group,
+                      on_deleted=social_duplicate_service.forget_previews)
+
+
 async def _announce(message, previous, *, share_count=2, taunt_text=None):
     mentions = discord.AllowedMentions(everyone=False, users=[discord.Object(id=message.author.id)],
                                        roles=False, replied_user=False)

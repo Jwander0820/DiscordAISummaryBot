@@ -1,4 +1,5 @@
 import importlib.util
+import asyncio
 import os
 from pathlib import Path
 import sys
@@ -57,6 +58,191 @@ def make_source(content):
 
 
 class SocialPreviewViewTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cancel_during_registration_rolls_back_pages_and_share_index(self):
+        from discord_bot.features.social_preview import sender
+        views = make_views(video_url=None)
+        started = asyncio.Event()
+        sent = types.SimpleNamespace(id=1100, delete=AsyncMock())
+        message = types.SimpleNamespace(guild=types.SimpleNamespace(id=1), channel=types.SimpleNamespace(id=10))
+        async def register(messages):
+            started.set()
+            await asyncio.Event().wait()
+        deleted = AsyncMock(return_value=True)
+        with patch.object(sender, "send_preview_as_author", AsyncMock(return_value=sent)):
+            task = asyncio.create_task(sender.send_preview_group(message, views,
+                on_delivered=register, on_deleted=deleted))
+            await asyncio.wait_for(started.wait(), 3)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        sent.delete.assert_awaited_once()
+        deleted.assert_awaited_once_with(1, 10, [1100])
+        self.assertTrue(views[0].delivery_complete.is_set())
+
+    async def test_repeated_cancel_waits_for_rollback_deletions_and_index_cleanup(self):
+        from discord_bot.db.social_duplicate_repository import ShareEvent
+        from discord_bot.features.social_preview import duplicate_service, sender
+
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
+            "DB_TYPE": "sqlite", "SQLITE_PATH": str(Path(directory) / "shares.db"),
+            "SOCIAL_DUPLICATE_ENABLED": "1", "SOCIAL_DUPLICATE_WINDOW_DAYS": "7",
+        }):
+            service = duplicate_service.SocialDuplicateService()
+            views = make_views(text="文" * 9000, video_url=None)
+            registered = asyncio.Event()
+            deleting_tail, release_tail = asyncio.Event(), asyncio.Event()
+            cleaning_index, release_index = asyncio.Event(), asyncio.Event()
+            first = ShareEvent("1", "10", "threads", "100", "42", "Video001", POST_URL, "1100", time.time())
+            message = types.SimpleNamespace(guild=types.SimpleNamespace(id=1), channel=types.SimpleNamespace(id=10))
+            messages = [types.SimpleNamespace(id=1100 + i, delete=AsyncMock()) for i in range(len(views))]
+
+            async def register(sent):
+                await service.register(first)
+                registered.set()
+                await asyncio.Event().wait()
+
+            async def delete_tail():
+                deleting_tail.set()
+                await release_tail.wait()
+
+            async def forget(guild, channel, ids):
+                cleaning_index.set()
+                await release_index.wait()
+                return await service.forget_previews(guild, channel, ids)
+
+            messages[1].delete.side_effect = delete_tail
+            deleted = AsyncMock(side_effect=forget)
+            task = None
+            try:
+                await service.rebuild()
+                with patch.object(sender, "send_preview_as_author", AsyncMock(side_effect=messages)):
+                    task = asyncio.create_task(sender.send_preview_group(message, views,
+                        on_delivered=register, on_deleted=deleted))
+                    await asyncio.wait_for(registered.wait(), 3)
+                    task.cancel()
+                    await asyncio.wait_for(deleting_tail.wait(), 3)
+                    messages[0].delete.assert_awaited_once()
+                    task.cancel()
+                    await asyncio.sleep(0)
+                    self.assertFalse(task.done(), "repeated cancellation interrupted rollback")
+                    self.assertFalse(views[0].delivery_complete.is_set())
+                    deleted.assert_not_awaited()
+                    release_tail.set()
+                    await asyncio.wait_for(cleaning_index.wait(), 3)
+                    task.cancel()
+                    await asyncio.sleep(0)
+                    self.assertFalse(task.done(), "cancellation interrupted index synchronization")
+                    self.assertFalse(views[0].delivery_complete.is_set())
+                    release_index.set()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await task
+                deleted.assert_awaited_once_with(1, 10, [item.id for item in messages])
+                self.assertTrue(all(view.delivery_complete.is_set() and not view.files for view in views))
+                self.assertEqual(service.repository.execute("SELECT COUNT(*) FROM social_share_events"), [(0,)])
+                self.assertNotIn(first.key, service.cache)
+                repost = ShareEvent("1", "10", "threads", "101", "42", "Video001", POST_URL, "1200", time.time())
+                self.assertIsNone(await service.register(repost))
+            finally:
+                release_tail.set()
+                release_index.set()
+                if task is not None:
+                    if not task.done():
+                        task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                await service.close()
+
+    async def test_early_delete_waits_for_all_pages_and_registration(self):
+        from discord_bot.features.social_preview import sender
+        views = make_views(text="文" * 9000, video_url=None)
+        second_started, release = asyncio.Event(), asyncio.Event()
+        messages = [types.SimpleNamespace(id=1100 + i, delete=AsyncMock()) for i in range(len(views))]
+        channel = types.SimpleNamespace(id=10, fetch_message=AsyncMock(
+            side_effect=lambda number: messages[number - 1100]))
+        for item in messages:
+            item.channel = channel
+        order = []
+        async def send(message, **kwargs):
+            index = views.index(kwargs["view"])
+            if index == 1:
+                second_started.set()
+                await release.wait()
+            return messages[index]
+        async def registered(sent):
+            self.assertEqual(sent, messages)
+            order.append("registered")
+        async def deleted(guild, channel, ids):
+            self.assertEqual(order, ["registered"])
+            self.assertEqual(set(ids), {item.id for item in messages})
+            order.append("deleted")
+            return True
+        interaction = types.SimpleNamespace(
+            guild=types.SimpleNamespace(id=1), message=messages[0],
+            user=types.SimpleNamespace(global_name="tester"),
+            response=types.SimpleNamespace(defer=AsyncMock(), send_message=AsyncMock()))
+        with patch.object(sender, "send_preview_as_author", side_effect=send):
+            sending = asyncio.create_task(sender.send_preview_group(None, views,
+                on_delivered=registered, on_deleted=deleted))
+            await asyncio.wait_for(second_started.wait(), 3)
+            deleting = asyncio.create_task(views[0]._delete(interaction))
+            await asyncio.sleep(0)
+            messages[0].delete.assert_not_awaited()
+            interaction.response.defer.assert_awaited_once()
+            release.set()
+            await sending
+            await deleting
+        self.assertEqual(order, ["registered", "deleted"])
+
+    async def test_rollback_keeps_partial_delete_scope_and_original_failure(self):
+        from discord_bot.features.social_preview import sender
+        views = make_views(text="文" * 9000, video_url=None)
+        forbidden = discord.Forbidden(types.SimpleNamespace(status=403, reason="Forbidden"), "denied")
+        messages = [types.SimpleNamespace(id=1100 + i, delete=AsyncMock(
+            side_effect=forbidden if i == 0 else None)) for i in range(len(views))]
+        message = types.SimpleNamespace(guild=types.SimpleNamespace(id=1), channel=types.SimpleNamespace(id=10))
+        original = RuntimeError("synthetic registration failure")
+        # Index errors must not replace the original delivery/registration error.
+        deleted = AsyncMock(side_effect=OSError("synthetic index failure"))
+        with patch.object(sender, "send_preview_as_author", AsyncMock(side_effect=messages)), \
+                self.assertLogs("discord_digest_bot", level="WARNING"):
+            with self.assertRaises(RuntimeError) as raised:
+                await sender.send_preview_group(message, views,
+                    on_delivered=AsyncMock(side_effect=original), on_deleted=deleted)
+        self.assertIs(raised.exception, original)
+        for item in messages:
+            item.delete.assert_awaited_once()
+        deleted.assert_awaited_once_with(1, 10, [item.id for item in messages[1:]])
+        self.assertTrue(all(view.delivery_complete.is_set() and not view.files for view in views))
+
+    async def test_cancellation_during_failure_rollback_is_propagated_after_cleanup(self):
+        from discord_bot.features.social_preview import sender
+        views = make_views(video_url=None)
+        started, release = asyncio.Event(), asyncio.Event()
+        async def remove():
+            started.set()
+            await release.wait()
+        sent = types.SimpleNamespace(id=1100, delete=AsyncMock(side_effect=remove))
+        message = types.SimpleNamespace(guild=types.SimpleNamespace(id=1), channel=types.SimpleNamespace(id=10))
+        deleted = AsyncMock(return_value=True)
+        with patch.object(sender, "send_preview_as_author", AsyncMock(return_value=sent)):
+            task = asyncio.create_task(sender.send_preview_group(message, views,
+                on_delivered=AsyncMock(side_effect=RuntimeError("synthetic failure")), on_deleted=deleted))
+            try:
+                await asyncio.wait_for(started.wait(), 3)
+                task.cancel()
+                await asyncio.sleep(0)
+                self.assertFalse(task.done())
+                self.assertFalse(views[0].delivery_complete.is_set())
+            finally:
+                release.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+        sent.delete.assert_awaited_once()
+        deleted.assert_awaited_once_with(1, 10, [1100])
+        self.assertTrue(views[0].delivery_complete.is_set())
+
     async def test_button_delete_then_repost_does_not_trigger_patrol(self):
         from discord_bot.db.social_duplicate_repository import ShareEvent, SocialDuplicateRepository
         from discord_bot.features.social_preview import duplicate_service
@@ -71,6 +257,7 @@ class SocialPreviewViewTests(unittest.IsolatedAsyncioTestCase):
                 first = ShareEvent("1", "10", "threads", "100", "42", "Video001", POST_URL, "1100", time.time())
                 await service.register(first)
                 view, = make_views()
+                view.on_deleted = service.forget_previews
                 channel = types.SimpleNamespace(id=10)
                 interaction = types.SimpleNamespace(
                     guild=types.SimpleNamespace(id=1),
@@ -365,6 +552,7 @@ class SocialPreviewViewTests(unittest.IsolatedAsyncioTestCase):
                     user=types.SimpleNamespace(global_name="tester"),
                 )
                 service = types.SimpleNamespace(forget_previews=AsyncMock(return_value=True))
+                view.on_deleted = service.forget_previews
                 with patch.object(duplicate_service, "social_duplicate_service", service):
                     await view._delete(interaction)
                 expected = [1101] + [item for item in (1100, 1102) if item != failed_id]
@@ -392,6 +580,7 @@ class SocialPreviewViewTests(unittest.IsolatedAsyncioTestCase):
                     user=types.SimpleNamespace(global_name="tester"),
                 )
                 service = types.SimpleNamespace(forget_previews=AsyncMock(return_value=False))
+                view.on_deleted = service.forget_previews
                 with patch.object(duplicate_service, "social_duplicate_service", service):
                     await view._delete(interaction)
                 if deletion_failed:

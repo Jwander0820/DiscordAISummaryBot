@@ -150,7 +150,7 @@ class AuditFlowTests(unittest.IsolatedAsyncioTestCase):
                                            "SOCIAL_DUPLICATE_ENABLED": "1"})
         self.env.start()
         self.storage = SocialDuplicateRepository(retry_interval_seconds=0)
-        self.service = SocialDuplicateService(self.storage)
+        self.service = SocialDuplicateService(self.storage, patrol_repository=SocialPatrolRepository(self.storage))
         await self.service.rebuild()
         self.service_patch = patch.object(patrol, "social_duplicate_service", self.service)
         self.service_patch.start()

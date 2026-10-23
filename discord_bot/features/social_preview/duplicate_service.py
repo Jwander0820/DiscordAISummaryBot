@@ -21,9 +21,9 @@ class DuplicateMatch:
 
 
 class SocialDuplicateService:
-    def __init__(self, repository=None):
+    def __init__(self, repository=None, *, patrol_repository=None):
         self.repository = repository or SocialDuplicateRepository()
-        self.patrol_repository = SocialPatrolRepository(self.repository)
+        self.patrol_repository = patrol_repository if patrol_repository is not None else SocialPatrolRepository()
         self.ready = False
         self.settings = {}
         self.cross_settings = {}
@@ -34,6 +34,25 @@ class SocialDuplicateService:
         self._lock = asyncio.Lock()
         self.default_enabled = True
         self.default_days = 7
+
+    async def _run_db(self, operation, *args, **kwargs):
+        """Keep the service lock until a cancelled worker has actually stopped."""
+        worker = asyncio.create_task(asyncio.to_thread(operation, *args, **kwargs))
+        try:
+            return await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            self.ready = False
+            while not worker.done():
+                try:
+                    await asyncio.shield(worker)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            # Retrieve a worker failure without replacing the caller's cancellation.
+            if not worker.cancelled():
+                worker.exception()
+            raise
 
     def _read_defaults(self):
         self.default_enabled = os.getenv("SOCIAL_DUPLICATE_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on", "enabled"}
@@ -68,10 +87,10 @@ class SocialDuplicateService:
         self.ready = False
         self._read_defaults()
         try:
-            settings, events = await asyncio.to_thread(
+            settings, events = await self._run_db(
                 self.repository.snapshot, enabled=self.default_enabled, days=self.default_days,
                 now=time.time(), guild_id=guild_id)
-            cross_settings = await asyncio.to_thread(self.repository.cross_channel_settings)
+            cross_settings = await self._run_db(self.repository.cross_channel_settings)
         except Exception as exc:
             report_failure(self.repository, exc, "read")
             return False
@@ -116,7 +135,7 @@ class SocialDuplicateService:
             setting = None if state == "default" else (
                 enabled if state is None else state == "enabled", current_days if days is None else days)
             try:
-                await asyncio.to_thread(self.repository.configure, str(guild_id), setting, updated_by=str(updated_by))
+                await self._run_db(self.repository.configure, str(guild_id), setting, updated_by=str(updated_by))
             except Exception as exc:
                 self.ready = False
                 report_failure(self.repository, exc, "write")
@@ -137,7 +156,7 @@ class SocialDuplicateService:
             if not channels <= valid:
                 raise ValueError("清單包含已刪除或非一般文字頻道，請移除後儲存。")
             try:
-                await asyncio.to_thread(self.repository.configure_cross_channel, guild_id,
+                await self._run_db(self.repository.configure_cross_channel, guild_id,
                                        enabled=enabled, channel_ids=channels, updated_by=str(updated_by))
             except Exception as exc:
                 self.ready = False
@@ -155,7 +174,7 @@ class SocialDuplicateService:
             candidates = [self.cache[key] for key in keys if key in self.cache]
             previous = min(candidates, key=lambda item: (item.occurred_at, int(item.source_message_id))) if candidates else None
             try:
-                inserted = await asyncio.to_thread(self.repository.insert, event)
+                inserted = await self._run_db(self.repository.insert, event)
             except Exception as exc:
                 self.ready = False
                 report_failure(self.repository, exc, "write")
@@ -182,7 +201,7 @@ class SocialDuplicateService:
         """Only refresh affected keys, keeping unrelated runtime windows intact."""
         async with self._lock:
             try:
-                deleted = await asyncio.to_thread(
+                deleted = await self._run_db(
                     delete, str(guild_id), str(channel_id), message_ids)
                 updates = {}
                 for key in {event.key for event in deleted}:
@@ -190,7 +209,7 @@ class SocialDuplicateService:
                     if first is not None:
                         # Keep the window loaded at startup/configuration, including
                         # shares that have aged beyond it during this process.
-                        updates[key] = await asyncio.to_thread(
+                        updates[key] = await self._run_db(
                             self.repository.remaining_shares, key, since=first.occurred_at)
             except Exception as exc:
                 self.ready = False
@@ -217,7 +236,10 @@ class SocialDuplicateService:
     async def close(self):
         async with self._lock:
             self.ready = False
-            await asyncio.to_thread(self.repository.close)
+            try:
+                await self._run_db(self.repository.close)
+            finally:
+                await self._run_db(self.patrol_repository.close)
 
 
 social_duplicate_service = SocialDuplicateService()

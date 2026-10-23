@@ -33,7 +33,7 @@ from .download import (
     download_bytes_limited,
 )
 from .sender import cleanup_source_message, log_preview_link, send_preview_group
-from .duplicate_patrol import record_delivered_preview
+from .duplicate_patrol import send_registered_preview
 from .media_gallery import prepare_gallery
 from .text import TextSpan, extract_message_commentary
 from .failure_notifications import failure_reason, notify_preview_failure, public_failure_message, reply_preview_failure
@@ -234,9 +234,8 @@ async def _send_threads_preview(
         media_spoilers=preview.media_spoilers,
         text_spans=preview.text_spans,
     )
-    sent_messages = await send_preview_group(message, views)
-    await record_delivered_preview(message, platform="threads", url=preview.embed.url or original_url,
-                                   sent_messages=sent_messages, preview_error=preview.preview_error)
+    await send_registered_preview(message, views, send=send_preview_group, platform="threads",
+                                  url=preview.embed.url or original_url, preview_error=preview.preview_error)
 
 
 # --- Discord 事件整合（範例） ---

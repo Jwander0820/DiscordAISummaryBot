@@ -92,6 +92,8 @@ class SocialPreviewView(discord.ui.LayoutView):
         self.files = list(files)
         self.message: Optional[discord.Message] = None
         self.related_message_ids: list[int] = []
+        self.delivery_complete = None
+        self.on_deleted = None
         if media_spoilers is not None and len(media_spoilers) != len(media_urls):
             raise ValueError("Media spoiler flags must match the gallery items")
 
@@ -127,7 +129,10 @@ class SocialPreviewView(discord.ui.LayoutView):
             self.add_item(controls)
 
     async def _delete(self, interaction: discord.Interaction) -> None:
-        await delete_preview_messages(interaction, self.related_message_ids)
+        if self.delivery_complete is not None and not self.delivery_complete.is_set():
+            await interaction.response.defer(ephemeral=True)
+            await self.delivery_complete.wait()
+        await delete_preview_messages(interaction, self.related_message_ids, on_deleted=self.on_deleted)
 
     async def on_timeout(self) -> None:
         for item in self.walk_children():

@@ -186,8 +186,11 @@ class DuplicatePreviewIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 embed.set_author(name="Example")
                 preview = preview_class(embed=embed, files=[])
                 sent = [SimpleNamespace(id=1200)]
-                with patch.object(module, "send_preview_group", AsyncMock(return_value=sent)), \
-                        patch.object(module, "record_delivered_preview", AsyncMock()) as record:
+                async def send_group(*args, on_delivered, **kwargs):
+                    await on_delivered(sent)
+                    return sent
+                with patch.object(module, "send_preview_group", AsyncMock(side_effect=send_group)), \
+                        patch.object(patrol, "record_delivered_preview", AsyncMock()) as record:
                     await getattr(module, send_name)(message(), preview, original_url="https://example.invalid/share/Demo",
                                                      commentary="", spoiler=False)
                 self.assertEqual(record.await_args.kwargs["url"], resolved)
@@ -198,7 +201,7 @@ class DuplicatePreviewIntegrationTests(unittest.IsolatedAsyncioTestCase):
             embed=discord.Embed(title="Example", url="https://www.threads.com/@demo/post/Demo001"), files=[])
         preview.embed.set_author(name="Example")
         with patch.object(threads_preview, "send_preview_group", AsyncMock(side_effect=RuntimeError("synthetic failure"))), \
-                patch.object(threads_preview, "record_delivered_preview", AsyncMock()) as record:
+                patch.object(patrol, "record_delivered_preview", AsyncMock()) as record:
             with self.assertRaises(RuntimeError):
                 await threads_preview._send_threads_preview(message(), preview, original_url=preview.embed.url,
                                                             commentary="", spoiler=False)
@@ -215,10 +218,14 @@ class DuplicatePreviewIntegrationTests(unittest.IsolatedAsyncioTestCase):
             operations.append("record")
         async def cleanup(*args, **kwargs):
             operations.append("cleanup")
+        async def send_group(*args, on_delivered, **kwargs):
+            sent = [SimpleNamespace(id=1200)]
+            await on_delivered(sent)
+            return sent
         with patch.object(instagram_preview, "build_instagram_preview", AsyncMock(return_value=preview)), \
                 patch.object(instagram_preview, "notify_preview_failure", AsyncMock()), \
-                patch.object(instagram_preview, "send_preview_group", AsyncMock(return_value=[SimpleNamespace(id=1200)])), \
-                patch.object(instagram_preview, "record_delivered_preview", AsyncMock(side_effect=record)) as registered, \
+                patch.object(instagram_preview, "send_preview_group", AsyncMock(side_effect=send_group)), \
+                patch.object(patrol, "record_delivered_preview", AsyncMock(side_effect=record)) as registered, \
                 patch.object(instagram_preview, "cleanup_source_message", AsyncMock(side_effect=cleanup)):
             self.assertTrue(await instagram_preview.handle_instagram_in_message(source))
         self.assertEqual(operations, ["record", "cleanup"])
