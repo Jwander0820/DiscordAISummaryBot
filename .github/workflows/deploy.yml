@@ -32,10 +32,16 @@ jobs:
           bash -n tools/deploy/install-deploy.sh
       - name: Build Linux amd64 image
         run: |
-          docker build --platform linux/amd64 \
+          docker build --pull --no-cache --platform linux/amd64 \
             --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
             --label "org.opencontainers.image.revision=$GITHUB_SHA" \
             -t "$IMAGE" .
+      - name: Verify image CA bundles and dependency consistency offline
+        run: |
+          docker run --rm --network none --entrypoint python \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/tools,target=/app/tools,readonly" \
+            "$IMAGE" tools/verify_image_trust.py
+          docker run --rm --network none --entrypoint python "$IMAGE" -m pip check
       - name: Test the built image without network or production credentials
         run: |
           docker run --rm --network none --entrypoint python \

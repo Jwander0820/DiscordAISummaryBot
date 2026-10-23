@@ -4,6 +4,25 @@
 
 此設定對應本專案的既有 VPS Docker Compose。Portainer 僅查看容器，不接管 Stack。首次安裝、GitHub Secrets、GHCR 登入完成後，推送 main 會觸發部署，也可在 main 手動執行 workflow。本文描述部署流程，不代表已驗證目前 VPS 的掛載、log 保留或運作狀態。
 
+## 憑證事件修補與離線驗收（2026-10-23）
+
+依 [Python 官方公告](https://discuss.python.org/t/information-for-python-users-regarding-emudhra-emsign-ca-certificate-security-incident/109576)，Dockerfile 先以公告所附 SHA256 的 pip 26.2.2 wheel 引導更新，再安裝應用依賴；certifi 固定 2026.10.19。aiohttp 更新至已發布的 3.14.5，參見[官方變更紀錄](https://docs.aiohttp.org/en/v3.14.5/changes.html)。
+
+CI 使用 `docker build --pull --no-cache`：前者重新解析 base image，後者停用建置 layer 快取。`pip --no-cache-dir` 只控制套件快取，不能取代這兩個選項。Dockerfile 另更新系統 ca-certificates；不固定移除其他未受影響的 emSign roots。
+
+本機驗收命令（PowerShell，不啟動 Gateway、不載入 env）：
+
+```powershell
+docker build --pull --no-cache --platform linux/amd64 -t discord-bot:trust-check .
+docker run --rm --network none --entrypoint python --mount "type=bind,source=${PWD}/tools,target=/app/tools,readonly" discord-bot:trust-check tools/verify_image_trust.py
+docker run --rm --network none --entrypoint python discord-bot:trust-check -m pip check
+docker run --rm --network none --entrypoint python --mount "type=bind,source=${PWD}/tests,target=/app/tests,readonly" --mount "type=bind,source=${PWD}/tools,target=/app/tools,readonly" discord-bot:trust-check -m unittest discover -s tests -t .
+```
+
+驗收工具直接讀系統、應用 certifi、pip 內嵌 certifi 的 PEM，轉 DER 計算 SHA256，拒絕 emSign ECC Root CA - G3 指紋 `86a1ecba089c4a8d3bbe2734c612ba341d813e043cf9e8a862cd5c57a36bbe6b`（[事件資料](https://github.com/galadran/we-have-a-problem.com/blob/main/roots.json)）。空 bundle、缺檔、版本不足也會失敗，不依賴 SSLContext 預載或延遲載入的 CA 列表。CI 在發布前執行相同檢查及回歸測試。這些驗收不代表 VPS 已更新；main push 仍會觸發既有部署流程。
+
+2026-10-23 本機實際驗收：以 `--pull --no-cache` 建置 `discord-bot:trust-check`，base manifest 為 `sha256:b7a9e5f6a93d6d4a31f129bbd4bdee69efccb6ded0fb230d78aafaf37af98377`，輸出 image index 為 `sha256:ff955ef187e08dabcadb7e8fff35ffc2e2058dfda7fe10e7b8aa4cec72749107`。pip 26.2.2、certifi 2026.10.19、aiohttp 3.14.5，`pip check` 通過。系統 bundle 共 148 張、兩份 certifi 各 120 張，三者均未包含受影響指紋。系統 PEM SHA256 為 `e9c7b63ee2623386e9b0a3ee32f499d01a8ea23dc83b8383ddff9f8e749543b7`；兩份 certifi PEM 均為 `50f79f98dac192b20dbf73f35c56f0b0c557ab267ff5199d1117cc1180b70785`。映像內離線完整測試結果為 `Ran 432 tests`、`OK (skipped=1)`，另有真實 discord.py 子程序測試通過。此為本機快照，未發布映像、未部署 VPS。
+
 ## 1. 從 Windows 上傳部署工具
 
 在 Windows PowerShell 的專案根目錄執行，輸入既有 SSH 位址及 Port：
