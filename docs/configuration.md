@@ -38,13 +38,17 @@ Gemini 模型順序在 `discord_bot/integrations/gemini_client.py` 的 `SUMMARY_
 | `DB_TYPE` | `sqlite` | `sqlite`；正式部署建議 `postgres` |
 | `SQLITE_PATH` | `summaries.db` | `summaries.db`；僅 SQLite 模式使用，相對於工作目錄 |
 | `DATABASE_URL` | 無 | 留空；PostgreSQL 模式與備份工具必填，不把真實連線字串填回範本 |
-| `LOCAL_BACKUP_SQLITE_PATH` | `postgres_summaries_backup.db` | 備份工具輸出，不是 bot 的主資料庫 |
+| `LOCAL_BACKUP_SQLITE_PATH` | 全表模式未設定時為 `postgres_backup_<台北時間>.db` | SQLite 匯出位置，不是 bot 的主資料庫；預設位置已存在時另加時間戳 |
+| `BACKUP_SSH_HOST` | 無，直連 | SQLite 備份 SSH 主機或既有 alias，非空即啟用 Tunnel |
+| `BACKUP_SSH_USER`／`BACKUP_SSH_KEY` | 沿用 SSH config | SSH 使用者／本機私鑰路徑；程式不讀取私鑰內容 |
+| `BACKUP_SSH_PORT` | `0` | 0 沿用 SSH config，通常 22 |
+| `BACKUP_SSH_DB_HOST`／`BACKUP_SSH_DB_PORT` | `127.0.0.1`／`5432` | 從 SSH 伺服器看見的 DB 位址，與本機直連位址不同 |
 
 資料庫包含 `summaries`、`deepfaker_events`、`guild_social_preview_settings`、`social_share_events` 與 `guild_social_duplicate_settings`。SQLite 放在容器內預設路徑不保證跨重建保留；正式環境使用持久 PostgreSQL，或將 SQLite 檔案置於持久 volume。
 
 摘要、DeepFaker 與社群預覽設定 repository 連線失效後會冷卻 30 秒，在下一次實際 DB 需求時重新初始化；正常連線持續重用，不固定輪詢。摘要／DeepFaker 歷史寫入失敗會先 rollback；連線仍可用時讓下一次寫入繼續使用。出警 repository 發生 SQL 錯誤時關閉連線，由出警服務重建快取恢復，見下方說明。失敗／跳過的紀錄不自動補寫，commit 結果不確定時也不立即重送，避免重複資料。DB 故障與恢復通知見下節。
 
-同步工具預設只備份兩個歷史表 `summaries`、`deepfaker_events`，不包含 `social_share_events` 或兩張 guild 設定表，也不能取代 PostgreSQL 全庫備份。命令與模式見[開發與工具指南](development.md#歷史紀錄備份)。
+同步工具預設匯出所有使用者資料表到 SQLite，包含社群分享、出警事件及 guild 設定。`--table history` 保留原本兩張歷史表的增量同步。SQLite 不保存 PostgreSQL 原生結構，不能取代 pg_dump 備份。命令與模式見[開發與工具指南](development.md#歷史紀錄備份)。
 
 ## 社群預覽與出警
 

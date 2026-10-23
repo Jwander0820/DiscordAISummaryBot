@@ -1,9 +1,13 @@
 import importlib.util
+import io
 import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import call, patch
+from unittest.mock import MagicMock, call, patch
+from decimal import Decimal
+from contextlib import closing
+from uuid import UUID
 
 from discord_bot.db.schema import DEEPFAKER_EVENT_COLUMNS, SUMMARY_COLUMNS
 
@@ -132,6 +136,7 @@ class SyncPostgresSummariesToolTests(unittest.TestCase):
                 [
                     "--database-url",
                     "postgresql://demo",
+                    "--table", "history",
                     "--output",
                     "dummy.db",
                     "--dry-run",
@@ -176,6 +181,7 @@ class SyncPostgresSummariesToolTests(unittest.TestCase):
                     [
                         "--database-url",
                         "postgresql://demo",
+                        "--table", "history",
                         "--output",
                         str(sqlite_path),
                         "--dry-run",
@@ -190,6 +196,115 @@ class SyncPostgresSummariesToolTests(unittest.TestCase):
                     call("postgresql://demo", "deepfaker_events", min_id=3, limit=None),
                 ],
             )
+
+
+class AllTableExportTests(unittest.TestCase):
+    def source(self, fail=False):
+        source = MagicMock()
+        metadata = MagicMock()
+        metadata.fetchall.return_value = [('public', 'guild_settings'), ('audit', 'odd"table')]
+        cursors = []
+        for columns, batches in [
+            (['guild_id', 'settings', 'amount'], [[('42', {'enabled': True}, Decimal('1.234567890123456789'))], []]),
+            (['key'], [[],]),
+        ]:
+            cursor = MagicMock()
+            cursor.description = [(column,) for column in columns]
+            cursor.fetchmany.side_effect = batches
+            cursors.append(cursor)
+        if fail:
+            cursors[1].execute.side_effect = RuntimeError('private-error')
+        contexts = []
+        for cursor in [metadata, *cursors]:
+            context = MagicMock()
+            context.__enter__.return_value = cursor
+            contexts.append(context)
+        source.cursor.side_effect = contexts
+        return source
+
+    def test_all_schemas_empty_tables_json_decimal_and_readonly_snapshot(self):
+        source = self.source()
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'snapshot.db'
+            with patch('psycopg2.connect', return_value=source):
+                counts = sync_tool.export_all_tables('private-test', output)
+            self.assertEqual(counts, {'guild_settings': 1, 'audit.odd"table': 0})
+            with closing(sqlite3.connect(output)) as conn:
+                self.assertEqual(conn.execute('SELECT * FROM guild_settings').fetchone(),
+                                 ('42', '{"enabled": true}', '1.234567890123456789'))
+                self.assertEqual(conn.execute('SELECT COUNT(*) FROM "audit.odd""table"').fetchone(), (0,))
+                self.assertEqual(conn.execute('PRAGMA integrity_check').fetchone(), ('ok',))
+            self.assertEqual(len(list(Path(directory).iterdir())), 1)
+        source.set_session.assert_called_once_with(isolation_level='REPEATABLE READ', readonly=True, autocommit=False)
+        source.close.assert_called_once()
+
+    def test_mid_export_failure_never_publishes_partial_file(self):
+        source = self.source(fail=True)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'snapshot.db'
+            with patch('psycopg2.connect', return_value=source):
+                with self.assertRaises(RuntimeError):
+                    sync_tool.export_all_tables('private-test', output)
+            self.assertEqual(list(Path(directory).iterdir()), [])
+        source.close.assert_called_once()
+
+    def test_existing_output_is_untouched(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'snapshot.db'
+            output.write_bytes(b'existing-backup')
+            with patch('psycopg2.connect') as connect:
+                with self.assertRaises(ValueError):
+                    sync_tool.export_all_tables('private-test', output)
+                connect.assert_not_called()
+            self.assertEqual(output.read_bytes(), b'existing-backup')
+
+    def test_dry_run_does_not_create_directory_or_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'absent' / 'snapshot.db'
+            with patch('psycopg2.connect', return_value=self.source()):
+                counts = sync_tool.export_all_tables('private-test', output, dry_run=True)
+            self.assertEqual(counts['guild_settings'], 1)
+            self.assertFalse(output.parent.exists())
+
+    def test_default_cli_routes_to_all_tables(self):
+        with patch.object(sync_tool, 'load_local_env'), patch.object(
+            sync_tool, 'export_all_tables', return_value={'new_table': 2}
+        ) as export:
+            self.assertEqual(sync_tool.main(['--database-url', 'private-test', '--dry-run']), 0)
+        self.assertEqual(export.call_args.kwargs, {'dry_run': True, 'limit': None})
+
+    def test_extra_values_are_sqlite_compatible(self):
+        self.assertEqual(sync_tool._coerce_sqlite_value(memoryview(b'abc')), b'abc')
+        self.assertEqual(sync_tool._coerce_sqlite_value(2**80), str(2**80))
+        value = UUID('00000000-0000-0000-0000-000000000001')
+        self.assertEqual(sync_tool._coerce_sqlite_value(value), str(value))
+
+    def test_configured_existing_default_gets_new_filename(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'previous.db'
+            output.write_bytes(b'existing')
+            with patch.dict('os.environ', {'LOCAL_BACKUP_SQLITE_PATH': str(output)}):
+                args = sync_tool.parse_args([])
+                self.assertNotEqual(Path(args.output), output)
+                self.assertEqual(Path(args.output).parent, output.parent)
+                explicit = sync_tool.parse_args(['--output', str(output)])
+                self.assertEqual(Path(explicit.output), output)
+
+    def test_all_incremental_is_rejected_before_connecting(self):
+        with patch.object(sync_tool, 'load_local_env'), patch.object(sync_tool, 'export_all_tables') as export:
+            self.assertEqual(sync_tool.main(['--database-url', 'private-test', '--mode', 'incremental']), 2)
+        export.assert_not_called()
+
+    def test_raw_export_and_legacy_errors_do_not_leak_secrets(self):
+        for table, helper in [('all', 'export_all_tables'), ('history', 'fetch_table')]:
+            with self.subTest(table=table):
+                error_output = io.StringIO()
+                with patch.object(sync_tool, 'load_local_env'), patch.object(
+                    sync_tool, helper, side_effect=ValueError('fixture-password-and-host')
+                ), patch('sys.stderr', error_output):
+                    result = sync_tool.main(['--database-url', 'private-test', '--table', table, '--dry-run'])
+                self.assertEqual(result, 1)
+                self.assertNotIn('fixture-password-and-host', error_output.getvalue())
 
 
 if __name__ == "__main__":

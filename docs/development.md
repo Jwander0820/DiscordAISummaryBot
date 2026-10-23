@@ -191,7 +191,27 @@ Webhook V2 使用 `wait=true&with_components=true` 與 `flags=32768`，
 
 ## 歷史紀錄備份
 
-`tools/sync_postgres_summaries_to_sqlite.py` 預設同步 PostgreSQL 的 `summaries` 與 `deepfaker_events` 到本機 SQLite。需要 `DATABASE_URL`，輸出由 `LOCAL_BACKUP_SQLITE_PATH` 或 `--output` 決定。這個工具會連線資料庫；先用 dry run 確認範圍：
+完整 PostgreSQL 單一資料庫備份使用 `tools/backup_postgres.py`，不轉成 SQLite、不限定資料表。它從既有 `.env` 載入 `DATABASE_URL`，不輸出連線資訊，也不將連線字串放進子程序命令列。需要安裝 `pg_dump` 與 `pg_restore`（建議與來源 PostgreSQL 相同 major 版本；pg_dump 不支援較新的來源 server）。
+
+```powershell
+.\.venv\Scripts\python.exe tools/backup_postgres.py
+# 用戶端不在 PATH 時，以下安裝路徑僅為範例：
+.\.venv\Scripts\python.exe tools/backup_postgres.py --pg-bin "C:\Program Files\PostgreSQL\18\bin"
+```
+
+預設輸出 `backups/postgres_<台北時間>.dump`，可用 `--output` 指定新檔；不覆蓋既有備份。Custom archive 包含可匯出的 schema、所有資料表資料、索引、約束、sequence、大型物件與 ownership/ACL，未來新增資料表也會納入。不包含 cluster 共用的角色／tablespace 定義、其他 DB、伺服器設定或 WAL；角色等全域物件需另用 `pg_dumpall --globals-only` 管理。本工具不自動執行此操作。
+
+完成條件為 pg_dump 成功且無診斷、archive 非空、pg_restore 清單與完整解碼成功，之後才發布檔案並輸出 SHA256。失敗清理暫存；不顯示可能含主機資訊的原始錯誤。此驗證不代表實際還原成功。輸出與暫存屬敏感資料，已由 Git ignore 排除；儲存目錄請限制本機存取。
+
+需還原時，先準備**獨立、空的 PostgreSQL 資料庫**與必要 extensions，再手動執行；以下僅為範例，工具不會執行還原：
+
+```powershell
+pg_restore --exit-on-error --single-transaction --no-owner --no-privileges --dbname local_restore_test backups/postgres_example.dump
+```
+
+此範例使用本機既有 libpq 認證設定，略過來源 ownership/ACL 以方便搬移；若要完整重現權限，需先建立對應角色再保留 ownership/ACL 還原。Extension 執行檔等外部依賴仍需另裝。勿指向正式 DB；本工具不提供自動覆寫或刪庫功能。官方說明：[pg_dump](https://www.postgresql.org/docs/current/app-pgdump.html)、[pg_restore](https://www.postgresql.org/docs/current/app-pgrestore.html)。
+
+`tools/sync_postgres_summaries_to_sqlite.py` 預設將 PostgreSQL **所有使用者資料表與欄位**轉存 SQLite，包含 guild 設定、社群分享、出警事件及未來新增的表。需要 `DATABASE_URL`，輸出由 `--output`、`LOCAL_BACKUP_SQLITE_PATH` 決定；都沒指定時使用 `postgres_backup_<台北時間>.db`。預設位置已存在時另加時間戳，不改舊檔；明確指定 `--output` 的既有檔則拒絕覆蓋。這個工具會連線資料庫；可先用 dry run 確認範圍：
 
 ```powershell
 .\.venv\Scripts\python.exe tools/sync_postgres_summaries_to_sqlite.py --dry-run
@@ -200,12 +220,27 @@ Webhook V2 使用 `wait=true&with_components=true` 與 `flags=32768`，
 
 | 選項 | 行為 |
 | --- | --- |
-| `--table all` | 預設，兩個歷史表各自同步；不含社群分享歷史或 guild 設定 |
+| `--table all` | 預設，全使用者資料表的全量新快照，不依賴 id 或主鍵 |
+| `--table history` | 原本兩張歷史表，保留增量同步模式 |
 | `--table summaries`／`--table deepfaker_events` | 只同步指定表 |
-| `--mode incremental` | 預設，各表按本機最大 `id` 取得新增資料，不修正舊列 |
-| `--mode upsert` | 重新取得資料，以 id 更新或加入本機紀錄 |
-| `--mode replace` | 重建選定的本機資料表，先備份原 SQLite |
+| `--mode incremental` | 僅 history／單張歷史表適用且為其預設，各表按本機最大 id 取得新增資料；all 禁用 |
+| `--mode upsert` | history／單表以 id 更新或加入；all 一律匯出全量新快照 |
+| `--mode replace` | history／單表重建本機選定表，使用前另存舊檔；all 一律匯出全量新快照 |
 | `--limit`、`--output` | 限制每表讀取數量、指定輸出檔 |
+
+全表模式以單一唯讀 REPEATABLE READ transaction 取得一致資料，逐批寫入暫存 SQLite，完整性檢查成功後才發布；任一表失敗即不發布。權限不足或 RLS 會明確失敗，不靜默省略。`public` 保留原表名，其餘以 `schema.table` 命名；SQLite 大小寫不敏感的名稱碰撞會失敗。分割表透過根表讀取，不重複匯出子表。Foreign table 也會讀取，遠端來源的一致性仍受該來源限制。
+
+若 DBeaver 需要 SSH 才能存取 DB，這個工具也可自動建立 Tunnel，不需開放 PostgreSQL 公網埠。以下為虛構 alias 與私鑰路徑，換成自己的設定：
+
+```powershell
+.\.venv\Scripts\python.exe tools/sync_postgres_summaries_to_sqlite.py --ssh-host example-db --ssh-key "$HOME\.ssh\example-db.pem"
+```
+
+`--ssh-host` 可用既有 SSH config alias；`--ssh-user`、`--ssh-port` 可另指定，預設沿用 config。`--ssh-db-host`／`--ssh-db-port` 是從 SSH 主機可連到的 DB，預設 `127.0.0.1:5432`；Docker DB 必須已發布在遠端 loopback，若只在 Docker network，請填 SSH 主機實際可達的位址。也可手動設定上述 `BACKUP_SSH_*` 到本機 `.env`，之後原指令直接執行即可；真實設定不寫回文件或範本。
+
+私鑰由 OpenSSH 的 `-i` 使用，Python 不讀取／複製／輸出內容；無需把鑰匙放進專案。SSH 子程序不接收 DATABASE_URL。只綁本機 loopback，備份成功或失敗都會關閉 Tunnel；`DATABASE_URL` 原檔不變，TLS 模式與原 hostname 保留，只覆寫 libpq hostaddr／port。預設 `StrictHostKeyChecking=yes`，不自動接受未知主機；新主機需先由你核對指紋並建立 known_hosts。加密私鑰請先載入本機 ssh-agent；BatchMode 不會在背景提示密碼。原生 pg_dump 工具目前不使用此 Tunnel 選項。
+
+JSON／陣列保存為 JSON text；Decimal、UUID、日期時間及超出 SQLite 64-bit 的整數保存為 text；bytea 保存 blob，NULL 保留。這是資料匯出，**不保存 PostgreSQL 原生型別定義、索引、約束、預設值、sequence 狀態、角色、view／materialized view、函式與大型物件**；完整原生備份請使用上面的 pg_dump 工具。`--limit` 是部分資料匯出，不可當成完整備份。
 
 DeepFaker 的穩定識別用 `channel_id`；`channel_name` 是事件發生時的名稱快照。完整事件統計使用 `deepfaker_events`，不由相容用的 `summaries` 推算。
 

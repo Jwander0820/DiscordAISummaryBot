@@ -75,6 +75,11 @@ render.yaml
 !discord_bot/assets/social_preview/alarm_dog.jpg
 !discord_bot/assets/social_preview/message_police.jpg
 *.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.dump
+*.dump.partial
 *.json
 
 # Local scratch files

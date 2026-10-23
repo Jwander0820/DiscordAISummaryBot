@@ -2,16 +2,21 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sqlite3
 import sys
-from datetime import date, datetime
+import tempfile
+from datetime import date, datetime, time, timedelta, timezone
+from decimal import Decimal
+from uuid import UUID
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+from tools.postgres_ssh import add_ssh_arguments, database_connection
 
 from discord_bot.db.schema import (
     CREATE_DEEPFAKER_EVENT_INDEXES_SQL,
@@ -62,9 +67,10 @@ def load_local_env() -> None:
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     """Parse CLI arguments for the backup tool."""
-    default_output = os.getenv("LOCAL_BACKUP_SQLITE_PATH", "postgres_summaries_backup.db")
+    stamp = datetime.now(timezone(timedelta(hours=8))).strftime('%Y%m%d_%H%M%S_%f')
+    default_output = os.getenv("LOCAL_BACKUP_SQLITE_PATH", f"postgres_backup_{stamp}.db")
     parser = argparse.ArgumentParser(
-        description="Copy PostgreSQL history tables into a local SQLite database."
+        description="Export all PostgreSQL user tables to a new SQLite snapshot."
     )
     parser.add_argument(
         "--database-url",
@@ -74,21 +80,22 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--output",
         default=default_output,
-        help="SQLite output path. Defaults to LOCAL_BACKUP_SQLITE_PATH or postgres_summaries_backup.db.",
+        help="New SQLite output path. Defaults to LOCAL_BACKUP_SQLITE_PATH or a timestamped file.",
     )
     parser.add_argument(
         "--table",
-        choices=("all", *SYNC_TABLES),
+        choices=("all", "history", *SYNC_TABLES),
         default="all",
-        help="Table to sync. Defaults to all supported history tables.",
+        help="all exports every user table; history selects only the two legacy history tables.",
     )
     parser.add_argument(
         "--mode",
         choices=("incremental", "replace", "upsert"),
-        default="incremental",
+        default=None,
         help=(
-            "incremental fetches rows newer than the local max id; "
-            "replace recreates selected tables; upsert fetches all rows and INSERT OR REPLACE by id."
+            "all always creates a full new snapshot (incremental is rejected). "
+            "For history/single legacy table: incremental is the default; "
+            "replace recreates tables; upsert updates rows by id."
         ),
     )
     parser.add_argument(
@@ -102,14 +109,125 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Connect and count fetched rows without writing SQLite.",
     )
-    return parser.parse_args(argv)
+    add_ssh_arguments(parser)
+    args = parser.parse_args(argv)
+    supplied = list(sys.argv[1:] if argv is None else argv)
+    if args.table == 'all' and Path(args.output).exists() and not any(
+        item == '--output' or item.startswith('--output=') for item in supplied
+    ):
+        configured = Path(args.output)
+        args.output = str(configured.with_name(f'{configured.stem}_{stamp}{configured.suffix}'))
+    return args
 
 
 def _coerce_sqlite_value(value):
     """Convert database-native values into SQLite-friendly scalar values."""
-    if isinstance(value, (datetime, date)):
+    if isinstance(value, (datetime, date, time)):
         return value.isoformat()
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, default=str)
+    if isinstance(value, memoryview):
+        return bytes(value)
+    if isinstance(value, (Decimal, UUID, timedelta)):
+        return str(value)
+    if isinstance(value, int) and not -(2**63) <= value < 2**63:
+        return str(value)
+    if value is not None and not isinstance(value, (str, int, float, bytes)):
+        return str(value)
     return value
+
+
+def _quote_identifier(value: str) -> str:
+    return '"' + value.replace('"', '""') + '"'
+
+
+class ExportValidationError(ValueError):
+    """A fixed diagnostic that is safe to display without source data."""
+
+
+def export_all_tables(database_url: str, output: Path, *, dry_run=False, limit=None):
+    """Stream one read-only repeatable-read snapshot into a new SQLite file."""
+    import psycopg2
+    from psycopg2 import sql
+
+    if limit is not None and limit <= 0:
+        raise ExportValidationError('--limit must be greater than 0')
+    output = output.resolve()
+    if not dry_run and output.exists():
+        raise ExportValidationError('Output exists; choose a new --output path to preserve the previous backup.')
+    temporary = None
+    target = None
+    counts = {}
+    try:
+        if not dry_run:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            fd, filename = tempfile.mkstemp(dir=output.parent, suffix='.db', prefix='.postgres-export-')
+            os.close(fd)
+            temporary = Path(filename)
+            target = sqlite3.connect(temporary)
+            target.execute('BEGIN')
+        source = psycopg2.connect(database_url, connect_timeout=10)
+        try:
+            source.set_session(isolation_level='REPEATABLE READ', readonly=True, autocommit=False)
+            with source.cursor() as metadata:
+                # Fail for insufficient privileges/RLS rather than silently exporting a subset.
+                metadata.execute('SET LOCAL row_security = off')
+                metadata.execute("""
+                    SELECT n.nspname, c.relname FROM pg_catalog.pg_class c
+                    JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                    WHERE c.relkind IN ('r', 'p', 'f') AND NOT c.relispartition
+                      AND n.nspname <> 'information_schema'
+                      AND n.nspname NOT LIKE 'pg\\_%' ESCAPE '\\'
+                    ORDER BY n.nspname, c.relname
+                """)
+                tables = metadata.fetchall()
+            names = set()
+            for index, (schema, table) in enumerate(tables):
+                name = table if schema == 'public' else f'{schema}.{table}'
+                if name.casefold() in names or name.casefold().startswith('sqlite_'):
+                    raise ExportValidationError('SQLite table naming collision; export requires PostgreSQL native backup.')
+                names.add(name.casefold())
+                query = sql.SQL('SELECT * FROM {}.{}').format(sql.Identifier(schema), sql.Identifier(table))
+                if limit is not None:
+                    query += sql.SQL(' LIMIT {}').format(sql.Literal(limit))
+                with source.cursor(name=f'sqlite_export_{index}') as cursor:
+                    cursor.execute(query)
+                    batch = cursor.fetchmany(1000)
+                    # Named cursor description is available after the initial fetch, even for empty tables.
+                    columns = [column[0] for column in cursor.description]
+                    if len({column.casefold() for column in columns}) != len(columns):
+                        raise ExportValidationError('SQLite column naming collision; use a PostgreSQL native backup.')
+                    if not columns:
+                        raise ExportValidationError('SQLite cannot represent a zero-column table.')
+                    if target is not None:
+                        # No type affinity: preserve Python scalars without SQLite numeric coercion.
+                        target.execute(f'CREATE TABLE {_quote_identifier(name)} (' +
+                                       ', '.join(_quote_identifier(column) for column in columns) + ')')
+                    count = 0
+                    while batch:
+                        if target is not None:
+                            target.executemany(f'INSERT INTO {_quote_identifier(name)} VALUES (' +
+                                               ', '.join('?' for _ in columns) + ')',
+                                               (_coerce_row(row) for row in batch))
+                        count += len(batch)
+                        batch = cursor.fetchmany(1000)
+                    counts[name] = count
+            source.rollback()
+        finally:
+            source.close()
+        if target is not None:
+            target.commit()
+            if target.execute('PRAGMA integrity_check').fetchall() != [('ok',)]:
+                raise ExportValidationError('SQLite integrity check failed.')
+            target.close()
+            target = None
+            os.link(temporary, output)  # Atomic publication; never overwrite a racing writer.
+        return counts
+    finally:
+        if target is not None:
+            target.close()
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def _coerce_row(row: Sequence[object]) -> tuple[object, ...]:
@@ -249,7 +367,7 @@ def write_summaries_to_sqlite(rows: Iterable[Sequence[object]], sqlite_path: Pat
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    """CLI entry point for syncing supported cloud history tables to SQLite."""
+    """Export all user tables, or explicitly sync legacy history tables."""
     load_local_env()
     args = parse_args(argv)
 
@@ -258,8 +376,38 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("DATABASE_URL is not set. Add it to .env / discord_bot/.env or pass --database-url.", file=sys.stderr)
         return 2
 
+    try:
+        with database_connection(database_url, args) as connected_url:
+            return _run_export(args, connected_url)
+    except Exception as exc:
+        print(f'Backup connection failed ({type(exc).__name__}); private details suppressed.', file=sys.stderr)
+        if isinstance(exc, ValueError) and str(exc).startswith(('SSH ', 'Invalid SSH', 'OpenSSH ', 'SSH backup')):
+            print(str(exc), file=sys.stderr)
+        return 1
+
+
+def _run_export(args, database_url):
     output = Path(args.output)
-    selected_tables = list(SYNC_TABLES) if args.table == "all" else [args.table]
+    if args.table == 'all':
+        if args.mode == 'incremental':
+            print('All-table export is a full snapshot. Use --table history for incremental sync.', file=sys.stderr)
+            return 2
+        try:
+            counts = export_all_tables(database_url, output, dry_run=args.dry_run, limit=args.limit)
+        except Exception as exc:
+            print(f'All-table export failed ({type(exc).__name__}); connection/data details suppressed.', file=sys.stderr)
+            if isinstance(exc, ExportValidationError):
+                print(str(exc), file=sys.stderr)
+            return 1
+        for table, count in counts.items():
+            print(f'{table}: {count} row(s)')
+        print('Dry run: no SQLite file written.' if args.dry_run else f'SQLite snapshot: {output.resolve()} (integrity_check: ok)')
+        if args.limit:
+            print('WARNING: --limit was used; this is a partial export.')
+        print('Data export only: PostgreSQL indexes, constraints, roles, views and functions are not preserved.')
+        return 0
+    args.mode = args.mode or 'incremental'
+    selected_tables = list(SYNC_TABLES) if args.table == "history" else [args.table]
     rows_by_table: dict[str, list[tuple[object, ...]]] = {}
     for table in selected_tables:
         min_id = None
@@ -274,7 +422,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         try:
             rows = fetch_table(database_url, table, min_id=min_id, limit=args.limit)
         except Exception as exc:
-            print(f"Failed to fetch PostgreSQL {table}: {exc}", file=sys.stderr)
+            print(f"Failed to fetch PostgreSQL {table} ({type(exc).__name__}); private details suppressed.", file=sys.stderr)
             return 1
         rows_by_table[table] = rows
         print(f"Fetched {len(rows)} row(s) from PostgreSQL {table}.")
@@ -286,7 +434,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         written = write_tables_to_sqlite(rows_by_table, output, mode=args.mode)
     except Exception as exc:
-        print(f"Failed to write SQLite backup: {exc}", file=sys.stderr)
+        print(f"Failed to write SQLite backup ({type(exc).__name__}); private details suppressed.", file=sys.stderr)
         return 1
 
     for table, count in written.items():
