@@ -191,15 +191,49 @@ Webhook V2 使用 `wait=true&with_components=true` 與 `flags=32768`，
 
 ## 歷史紀錄備份
 
+### 統一入口：一次產生 SQLite 與 PostgreSQL 原生備份
+
+以原有 `tools/backup_postgres.py` 為主入口，預設 `--format both`。有 `--ssh-host` 時，原生 archive 沿用遠端容器匯出，SQLite 沿用既有 SSH Tunnel 全表匯出；不需本機 pg_dump。以下為虛構連線與鑰匙範例：
+
+```powershell
+.\.venv\Scripts\python.exe tools/backup_postgres.py --ssh-host example-db --ssh-key "$HOME\.ssh\example-db.pem" --sudo
+```
+
+`--sudo` 只用於遠端 Docker 操作；SQLite Tunnel 不使用 sudo。`DATABASE_URL` 仍供 SQLite 的 DB 認證使用，兩格式會沿用其中的 DB 名稱；`--database` 可一起覆寫。SSH 遠端容器與 `--ssh-db-host/--ssh-db-port` 應指向同一來源。沒有 SSH 時則以本機 pg_dump 與直接 DB 連線執行；`--native-source local/remote` 可明確選擇。
+
+每次建立新的 `backups/<台北時間>/`，內含 `database.dump`、`database.sqlite3` 與 `manifest.json`。可用 `--output-dir` 指定新的資料夾；若已存在會拒絕。Manifest 記錄兩份檔案的狀態、時間、大小、SHA256，以及 SQLite 各表筆數；不放主機、連線字串、key 路徑、密碼或原始錯誤。兩格式各自取得快照，並非完全同一瞬間，紀錄中會標示 independent。
+
+一種格式失敗時，仍會嘗試另一種並保留成功檔，Manifest 標示 `partial_success`；全部失敗為 `failed`，兩者 exit code 皆為 1；全部成功 exit 0。不自動還原。`--format sqlite`／`--format postgres` 可只做其中一種。
+
+舊 `--output FILE` 呼叫保持原生單檔模式；例如 `--output example.dump --pg-bin ...`。可搭配 `--format sqlite --output example.sqlite3` 輸出單個 SQLite 檔，單檔模式不產生 Manifest。`--output` 不可與 both 或 `--output-dir` 混用。
+
+### 透過 SSH 從遠端容器下載 PostgreSQL 原生備份
+
+`tools/backup_postgres.py --format postgres --native-source remote` 在遠端 DB 容器內使用該版本的 `pg_dump`，經 SSH 二進位串流將單一 DB 的 custom archive 存到本機，不需本機 PostgreSQL 用戶端、`DATABASE_URL` 或對外開放 5432。遠端實作已整合至原入口，無需另外的 remote 程式。以下 alias 與私鑰路徑為虛構範例：
+
+```powershell
+.\.venv\Scripts\python.exe tools/backup_postgres.py --format postgres --native-source remote --ssh-host example-db --ssh-key "$HOME\.ssh\example-db.pem"
+```
+
+沿用 `BACKUP_SSH_HOST/USER/KEY/PORT` 的本機設定；SSH host 或 key 也可直接使用既有 SSH config。私鑰只在本機由 OpenSSH 使用，Python 不讀取內容，不複製到遠端。預設只在遠端恰好有一個 Compose `service=db` 的 running container 時自動選擇；否則指定 `--container example-db-1`。可用 `--sudo` 明確啟用 `sudo -n docker`；SSH 使用者需有對應 Docker 權限。
+
+預設備份容器 `POSTGRES_DB` 指向的 DB（未設定則用 `POSTGRES_USER`），以容器 postgres OS user 經本機 socket 執行；必要時只在遠端使用既有 `POSTGRES_PASSWORD`，不傳回憑證。`--database`、`--db-user` 可明確指定名稱。此工具不備份其他 DB、cluster 角色／tablespace、WAL 或伺服器設定，不自動還原。
+
+預設儲存於**專案根目錄**的 `backups/<台北時間>/database.dump` 並附 Manifest，`--output` 可指定單一新檔。遠端暫存使用 umask 077，匯出後先做 `pg_restore --list` 與完整解碼，再串流下載。本機檢查 PGDMP 標頭並比對遠端／本機 SHA256，通過後才不覆蓋地發布。任何非零退出、未知診斷、傳輸截斷或雜湊錯誤都不發布；不顯示可能含憑證的原始遠端錯誤。
+
+正常完成或 shell 收到可處理訊號會清理工具建立的遠端暫存。預設整體逾時 600 秒，可用 `--timeout` 調整；強制終止／斷線時無法保證遠端清理，恢復連線後需檢查 `/tmp/pg-backup.*.dump`，不要任意刪除其他檔案。未停用 host key 驗證，未知主機要先人工核對指紋。Archive 驗證不代表實際還原成功；還原方式見下方 pg_restore 範例。
+
+### 本機 pg_dump 備份與 SQLite 資料匯出
+
 完整 PostgreSQL 單一資料庫備份使用 `tools/backup_postgres.py`，不轉成 SQLite、不限定資料表。它從既有 `.env` 載入 `DATABASE_URL`，不輸出連線資訊，也不將連線字串放進子程序命令列。需要安裝 `pg_dump` 與 `pg_restore`（建議與來源 PostgreSQL 相同 major 版本；pg_dump 不支援較新的來源 server）。
 
 ```powershell
-.\.venv\Scripts\python.exe tools/backup_postgres.py
+.\.venv\Scripts\python.exe tools/backup_postgres.py --format postgres --native-source local
 # 用戶端不在 PATH 時，以下安裝路徑僅為範例：
-.\.venv\Scripts\python.exe tools/backup_postgres.py --pg-bin "C:\Program Files\PostgreSQL\18\bin"
+.\.venv\Scripts\python.exe tools/backup_postgres.py --format postgres --native-source local --pg-bin "C:\Program Files\PostgreSQL\18\bin"
 ```
 
-預設輸出 `backups/postgres_<台北時間>.dump`，可用 `--output` 指定新檔；不覆蓋既有備份。Custom archive 包含可匯出的 schema、所有資料表資料、索引、約束、sequence、大型物件與 ownership/ACL，未來新增資料表也會納入。不包含 cluster 共用的角色／tablespace 定義、其他 DB、伺服器設定或 WAL；角色等全域物件需另用 `pg_dumpall --globals-only` 管理。本工具不自動執行此操作。
+預設輸出 `backups/<台北時間>/database.dump` 與 Manifest，可用 `--output` 指定原生單檔；不覆蓋既有備份。Custom archive 包含可匯出的 schema、所有資料表資料、索引、約束、sequence、大型物件與 ownership/ACL，未來新增資料表也會納入。不包含 cluster 共用的角色／tablespace 定義、其他 DB、伺服器設定或 WAL；角色等全域物件需另用 `pg_dumpall --globals-only` 管理。本工具不自動執行此操作。
 
 完成條件為 pg_dump 成功且無診斷、archive 非空、pg_restore 清單與完整解碼成功，之後才發布檔案並輸出 SHA256。失敗清理暫存；不顯示可能含主機資訊的原始錯誤。此驗證不代表實際還原成功。輸出與暫存屬敏感資料，已由 Git ignore 排除；儲存目錄請限制本機存取。
 
@@ -238,7 +272,7 @@ pg_restore --exit-on-error --single-transaction --no-owner --no-privileges --dbn
 
 `--ssh-host` 可用既有 SSH config alias；`--ssh-user`、`--ssh-port` 可另指定，預設沿用 config。`--ssh-db-host`／`--ssh-db-port` 是從 SSH 主機可連到的 DB，預設 `127.0.0.1:5432`；Docker DB 必須已發布在遠端 loopback，若只在 Docker network，請填 SSH 主機實際可達的位址。也可手動設定上述 `BACKUP_SSH_*` 到本機 `.env`，之後原指令直接執行即可；真實設定不寫回文件或範本。
 
-私鑰由 OpenSSH 的 `-i` 使用，Python 不讀取／複製／輸出內容；無需把鑰匙放進專案。SSH 子程序不接收 DATABASE_URL。只綁本機 loopback，備份成功或失敗都會關閉 Tunnel；`DATABASE_URL` 原檔不變，TLS 模式與原 hostname 保留，只覆寫 libpq hostaddr／port。預設 `StrictHostKeyChecking=yes`，不自動接受未知主機；新主機需先由你核對指紋並建立 known_hosts。加密私鑰請先載入本機 ssh-agent；BatchMode 不會在背景提示密碼。原生 pg_dump 工具目前不使用此 Tunnel 選項。
+私鑰由 OpenSSH 的 `-i` 使用，Python 不讀取／複製／輸出內容；無需把鑰匙放進專案。SSH 子程序不接收 DATABASE_URL。只綁本機 loopback，備份成功或失敗都會關閉 Tunnel；`DATABASE_URL` 原檔不變，TLS 模式與原 hostname 保留，只覆寫 libpq hostaddr／port。預設 `StrictHostKeyChecking=yes`，不自動接受未知主機；新主機需先由你核對指紋並建立 known_hosts。加密私鑰請先載入本機 ssh-agent；BatchMode 不會在背景提示密碼。統一入口的 `--native-source local` 也可使用此 Tunnel，auto 則優先使用遠端容器匯出。
 
 JSON／陣列保存為 JSON text；Decimal、UUID、日期時間及超出 SQLite 64-bit 的整數保存為 text；bytea 保存 blob，NULL 保留。這是資料匯出，**不保存 PostgreSQL 原生型別定義、索引、約束、預設值、sequence 狀態、角色、view／materialized view、函式與大型物件**；完整原生備份請使用上面的 pg_dump 工具。`--limit` 是部分資料匯出，不可當成完整備份。
 
