@@ -44,7 +44,7 @@ Gemini 模型順序在 `discord_bot/integrations/gemini_client.py` 的 `SUMMARY_
 | `BACKUP_SSH_PORT` | `0` | 0 沿用 SSH config，通常 22 |
 | `BACKUP_SSH_DB_HOST`／`BACKUP_SSH_DB_PORT` | `127.0.0.1`／`5432` | 從 SSH 伺服器看見的 DB 位址，與本機直連位址不同 |
 
-資料庫包含 `summaries`、`deepfaker_events`、`guild_social_preview_settings`、`social_share_events` 與 `guild_social_duplicate_settings`。SQLite 放在容器內預設路徑不保證跨重建保留；正式環境使用持久 PostgreSQL，或將 SQLite 檔案置於持久 volume。
+資料庫包含 `summaries`、`deepfaker_events`、`guild_social_preview_settings`、`social_share_events`、`social_patrol_events`、`guild_social_duplicate_settings`、`guild_social_cross_channel_settings`，以及月報的 `guild_social_monthly_report_settings`、`social_monthly_report_runs`。SQLite 放在容器內預設路徑不保證跨重建保留；正式環境使用持久 PostgreSQL，或將 SQLite 檔案置於持久 volume。
 
 摘要、DeepFaker 與社群預覽設定 repository 連線失效後會冷卻 30 秒，在下一次實際 DB 需求時重新初始化；正常連線持續重用，不固定輪詢。摘要／DeepFaker 歷史寫入失敗會先 rollback；連線仍可用時讓下一次寫入繼續使用。出警 repository 發生 SQL 錯誤時關閉連線，由出警服務重建快取恢復，見下方說明。失敗／跳過的紀錄不自動補寫，commit 結果不確定時也不立即重送，避免重複資料。DB 故障與恢復通知見下節。
 
@@ -77,6 +77,8 @@ Guild 管理者可用 `/社群預覽設定` 即時覆蓋全域預設，包括在
 分享歷史永久留在 DB，不保存正文或媒體。啟動時按各 guild 最近 N 天重建記憶體索引；期間只增量記錄，不逐次檢查期限、不排程清理。重啟前即使略超過 N 天仍可出警；長期不重啟時記憶體及判重範圍會增加。改設定會即時重建該 guild 快取。關閉時不記錄新分享，既有 DB 歷史保留；重開不回掃 Discord 歷史。
 
 出警 DB 工作在 worker 執行，連線重用；啟動恢復失敗／寫入故障時暫停出警並每 30 秒重試重建，正常時不輪詢。此恢復流程不依賴容器重啟排程。失聯期間未保存的事件不自動補寫；出警失敗不影響預覽送達與原訊息清理。分享歷史與出警設定不在現有兩表同步工具範圍內，需另做全庫備份。
+
+出警月報沒有環境變數。每個伺服器預設停用，由該伺服器管理者用 `/社群月報設定` 同時指定頻道並啟用；哪些伺服器已啟用只記錄在 DB。月報設定與結算紀錄存在 `guild_social_monthly_report_settings`、`social_monthly_report_runs`，正式環境同樣需要持久 DB。行為說明見[社群預覽指南](social-preview.md#社群出警月報)。
 
 防雷和前四項混合媒體不另設 env 開關。手動 `||連結||` 遮全部正文與媒體；Threads 原生防雷依取得的文字片段／單一媒體標記顯示。互動刪除按鈕未跨 bot 重啟恢復，`0` 不代表永久有效。Cookie 取得與保存規則見[社群預覽指南](social-preview.md)。
 

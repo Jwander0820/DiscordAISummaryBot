@@ -194,6 +194,27 @@ CREATE_SOCIAL_DUPLICATE_TABLES_SQL = (
     "CREATE INDEX IF NOT EXISTS idx_social_share_events_guild_time ON social_share_events (guild_id, occurred_at);",
 ) + CREATE_SOCIAL_PATROL_TABLES_SQL
 
+MONTHLY_REPORT_RUN_STATUSES = ("pending", "sent", "empty", "failed", "unknown")
+
+CREATE_SOCIAL_MONTHLY_REPORT_TABLES_SQL = (
+    """CREATE TABLE IF NOT EXISTS guild_social_monthly_report_settings (
+        guild_id TEXT PRIMARY KEY, enabled INTEGER NOT NULL, channel_id TEXT,
+        first_report_month TEXT NOT NULL,
+        updated_by TEXT, updated_at DOUBLE PRECISION NOT NULL
+    );""",
+    """CREATE TABLE IF NOT EXISTS social_monthly_report_runs (
+        guild_id TEXT NOT NULL, report_month TEXT NOT NULL, report_id TEXT NOT NULL,
+        period_start DOUBLE PRECISION NOT NULL, period_end DOUBLE PRECISION NOT NULL,
+        channel_id TEXT,
+        status TEXT NOT NULL CHECK (status IN ('pending', 'sent', 'empty', 'failed', 'unknown')),
+        pages_json TEXT, message_ids_json TEXT, sending_page INTEGER,
+        attempts INTEGER NOT NULL, claim_token TEXT, lease_expires_at DOUBLE PRECISION,
+        error_type TEXT, created_at DOUBLE PRECISION NOT NULL, updated_at DOUBLE PRECISION NOT NULL,
+        sent_at DOUBLE PRECISION,
+        PRIMARY KEY (guild_id, report_month)
+    );""",
+)
+
 CREATE_DEEPFAKER_EVENT_INDEXES_SQL = (
     "CREATE INDEX IF NOT EXISTS idx_deepfaker_events_guild_time "
     "ON deepfaker_events (guild_id, occurred_at);",

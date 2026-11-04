@@ -64,23 +64,26 @@ class SocialDuplicateRepository:
             with self.conn:
                 cursor = self.conn.cursor()
                 try:
-                    for sql in CREATE_SOCIAL_DUPLICATE_TABLES_SQL:
-                        cursor.execute(sql)
-                    if self.backend == "postgres":
-                        for name in ("taunt_text", "taunt_source", "reference_channel_id"):
-                            cursor.execute(f"ALTER TABLE social_patrol_events ADD COLUMN IF NOT EXISTS {name} TEXT")
-                    else:
-                        cursor.execute("PRAGMA table_info(social_patrol_events)")
-                        columns = {row[1] for row in cursor.fetchall()}
-                        for name in ("taunt_text", "taunt_source", "reference_channel_id"):
-                            if name not in columns:
-                                cursor.execute(f"ALTER TABLE social_patrol_events ADD COLUMN {name} TEXT")
+                    self._initialize_schema(cursor)
                 finally:
                     cursor.close()
         except Exception:
             self.close()
             self._last_failure = time.monotonic()
             raise
+
+    def _initialize_schema(self, cursor):
+        for sql in CREATE_SOCIAL_DUPLICATE_TABLES_SQL:
+            cursor.execute(sql)
+        if self.backend == "postgres":
+            for name in ("taunt_text", "taunt_source", "reference_channel_id"):
+                cursor.execute(f"ALTER TABLE social_patrol_events ADD COLUMN IF NOT EXISTS {name} TEXT")
+        else:
+            cursor.execute("PRAGMA table_info(social_patrol_events)")
+            columns = {row[1] for row in cursor.fetchall()}
+            for name in ("taunt_text", "taunt_source", "reference_channel_id"):
+                if name not in columns:
+                    cursor.execute(f"ALTER TABLE social_patrol_events ADD COLUMN {name} TEXT")
 
     def _execute(self, sql, params=(), *, write=False):
         with self._lock:

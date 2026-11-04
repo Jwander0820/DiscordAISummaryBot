@@ -16,7 +16,7 @@ NOTIFICATION_TIMEOUT_SECONDS = 5
 def format_database_event(event: DatabaseEvent) -> str:
     labels = {"summaries": "summaries", "deepfaker_events": "deepfaker_events",
               "guild_social_preview_settings": "guild 社群設定", "social_share_events": "社群分享歷史／出警設定",
-              "social_patrol_events": "社群出警事件紀錄"}
+              "social_patrol_events": "社群出警事件紀錄", "social_monthly_report_runs": "社群出警月報"}
     repository = labels.get(event.repository, "DB")
     backend = event.backend if event.backend in {"sqlite", "postgres"} else "unknown"
     operation = {"initialize": "初始化／重連", "read": "讀取", "write": "寫入"}.get(event.operation, "操作")
@@ -30,6 +30,8 @@ def format_database_event(event: DatabaseEvent) -> str:
         lines.append(f"錯誤類型: `{error}`（詳細 traceback 請看 Server log）")
         if event.repository == "social_share_events":
             lines.append("出警已暫停，背景每 30 秒嘗試重新載入 DB 與快取；正常時不輪詢。")
+        elif event.repository == "social_monthly_report_runs":
+            lines.append("月報排程約 5 分鐘後重試本期；已確認送達的頁面不會重送。")
         else:
             lines.append("連線不可用：冷卻 30 秒後，等下一次 DB 需求再重連。" if event.unavailable
                          else "本次操作失敗，已 rollback；下一次寫入仍會使用現有連線。")

@@ -6,7 +6,7 @@
 
 Bot 使用 Message Content Intent，應用程式也須開啟；邀請時包含 `bot` 與 `applications.commands`。依功能配置檢視頻道、讀取訊息歷史、傳送訊息、嵌入連結與附加檔案權限。Webhook 代發需管理 Webhook；清理使用者原始連結需管理訊息。缺少 Webhook 權限時社群預覽可由 bot 備援發送。
 
-`/社群預覽設定`、`/社群出警設定` 要求管理伺服器權限。出警開關／天數與快取恢復見[社群預覽指南](social-preview.md#同頻道重複分享出警)，`/社群出警狀態` 可確認是否就緒。不要把 `WORLDLINE_ADMIN_IDS` 當成授權名單，它只影響世界線事件機率。
+`/社群預覽設定`、`/社群出警設定` 與 `/社群月報設定` 要求管理伺服器權限；月報頻道需要檢視頻道、傳送訊息與讀取訊息歷史。出警開關／天數與快取恢復見[社群預覽指南](social-preview.md#同頻道重複分享出警)，`/社群出警狀態` 可確認是否就緒。不要把 `WORLDLINE_ADMIN_IDS` 當成授權名單，它只影響世界線事件機率。
 
 ## 指令與訊息範圍
 
@@ -33,12 +33,15 @@ Bot 使用 Message Content Intent，應用程式也須開啟；邀請時包含 `
 | `discord_bot/features/notifications/`、`deepfaker/` | 通知派送及 DeepFaker 事件組裝 |
 | `discord_bot/features/social_preview/` | 各平台抓取、Cookie、共用 Gallery／V2 view、發送與重複分享判定（含 X） |
 | `discord_bot/integrations/` | google-genai、local LLM、Gmail |
-| `discord_bot/db/` | SQLite／PostgreSQL 的 summaries、DeepFaker、社群分享歷史與 guild 設定 |
+| `discord_bot/features/monthly_report/` | 出警月報的月界、聚合、渲染、排程與 Discord 送達比對 |
+| `discord_bot/db/` | SQLite／PostgreSQL 的 summaries、DeepFaker、社群分享歷史、月報紀錄與 guild 設定 |
 | `app.py` | 獨立 Flask `/`、`/health`；不啟動 Discord bot |
 
 `python bot.py` 只啟動 Discord bot。若本機另需 health server，可在另一個終端執行 `python app.py`；它不自行載入 `.env`，改 port 時先設定程序環境，例如 PowerShell 的 `$env:PORT='8081'`。Docker 入口會啟動兩者並使用注入的環境。`/health` 正常不代表 Discord Gateway 或 LLM 已通過功能驗證。
 
 DB 層的 `health.py` 只收集去識別化故障／恢復事件；`features/notifications/database.py` 的單一 consumer 由 bot lifecycle 管理，等待 ready 後發送 botlog，關閉 bot 時取消。這條路徑不輪詢 DB、不呼叫 Gmail，也不把通知寫回 DB。
+
+`social_report_cog.py` 每個程序啟動一個月報排程（只處理 DB 中已啟用的伺服器），並提供 `/社群月報設定`；聚合與渲染不依賴 Discord，送達與頻道比對放在 `monthly_report/delivery.py`。
 
 `social_duplicate_cog.py` 獨立接收 X／Twitter 與 YouTube 原留言並管理出警設定；三平台則由既有預覽流程在完整送達後登記分享。YouTube 影片 ID／網址正規化放在 `youtube_links.py`，不抓取頁面。判重與持久資料放在 `duplicate_service.py`／`social_duplicate_repository.py`，關閉出警不會停用三平台預覽。
 
@@ -77,6 +80,13 @@ Parser 或預覽變更時先跑對應回歸，例如：
 .\.venv\Scripts\python.exe -m unittest tests.test_social_duplicate_service tests.test_social_duplicate_patrol tests.test_social_duplicate_webhook tests.test_x_duplicate_links tests.test_x_duplicate_patrol
 .\.venv\Scripts\python.exe -m unittest tests.test_cross_channel_patrol tests.test_cross_channel_patrol_view
 .\.venv\Scripts\python.exe -m unittest tests.test_youtube_duplicate_links tests.test_youtube_duplicate_patrol
+```
+
+出警月報的 focused tests：
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest tests.test_monthly_report_periods tests.test_monthly_report_aggregation tests.test_monthly_report_render
+.\.venv\Scripts\python.exe -m unittest tests.test_monthly_report_repository tests.test_monthly_report_service tests.test_monthly_report_delivery
 ```
 
 部署腳本測試需要 Bash，透過 fake Docker 執行，不操作實際 Docker daemon。Windows 若誤選 WSL Bash，改用已安裝的 Git for Windows Bash；以此工作區的安裝路徑為例，僅在本次終端調整：
