@@ -22,11 +22,13 @@ Threads、Facebook、Instagram 使用 Components V2 卡片，圖片與影片依�
 
 ## 異常訊息與 botlog
 
-Threads／Facebook／Instagram 遇到最終存取限制、Cookie 失敗、無可用內容或未預期處理／發送錯誤時，公開提示統一為「平台名預覽失敗 爛meta」。卡片保留評論、防雷及原連結；無法送出卡片時以同樣的固定文字回覆，原訊息保留。
+Threads／Facebook／Instagram 遇到最終存取限制、Cookie 失敗、無可用內容或未預期處理／發送錯誤時，一律由 bot 回覆原訊息，固定文字為「平台名預覽失敗 爛meta」；原連結包在 `||` 防雷內時，回覆也包上防雷。原訊息不刪除、不代發，Discord 原生的連結預覽仍可見；回覆不 ping 原作者。已分類的失敗回應後不再交給同訊息內的其他平台；未預期例外則讓其他平台的連結繼續處理。
 
 詳細原因只轉發既有 `DISCORD_NOTIFY_FORWARD_CHANNEL_ID`（botlog），可用 `DISCORD_NOTIFY_FORWARD_GUILD_ID` 指定其他伺服器。使用者與來源頻道優先顯示「名稱（ID）」；社群通知使用來源訊息已有的名稱，其他數字 ID 只查現成快取，名稱缺失時保留 ID，不額外呼叫 Discord API。通知另包含固定分類、時間、去除 tracking 的原連結，以及可用的錯誤類型／HTTP 狀態／Discord code／IG trace ID，不包含 Cookie、HTML、貼文正文、媒體簽名網址或原始例外字串；此通知不寄 Gmail、不寫歷史表。
 
-通知未設定、送達失敗或等待超過 5 秒時，伺服器仍保留安全的原因紀錄，公開卡片不改顯示診斷資訊；通知逾時就停止等待，繼續公開處理。成功備援與可用的部分內容維持既有呈現；若卡片已送出但來源清理發生未預期例外，只通知 botlog，不再追加失敗回覆。
+Threads `/share/...` 短連結會先解析成標準貼文網址。Threads 回 429、5xx、200 分享頁（沒有轉址的 JavaScript 頁面），或請求逾時／連線失敗時，約 2 秒後改用手機 UA 重試一次；導向登入頁、帶 `error` 參數的錯誤頁、非 Threads 網域或其他路徑時不重試。仍失敗則分類為 `share_unresolved`，botlog 附上 `http_status`（最後收到的狀態）、`share_outcome`（最後一次結果：`share_page`、`rate_limited`、`server_error`、`timeout`、`network_error`、`login_redirect`、`error_redirect`、`external_redirect`、`unexpected_redirect`、`unexpected_status`、`redirect_limit`）、`share_statuses`（每次嘗試的狀態，以 `-` 分隔，`none` 表示沒有回應）與 `share_attempts`。伺服器 log 另記 `Threads share link unresolved` WARNING；重試後成功則記 `Threads share link resolved after retry` INFO，可用來觀察重試的效果。短連結解析失敗時還沒有貼文網址，因此不會使用 Threads Cookie。
+
+通知未設定、送達失敗或等待超過 5 秒時，伺服器仍保留安全的原因紀錄，公開回覆不顯示診斷資訊；通知逾時就停止等待，繼續公開處理。成功備援與可用的部分內容維持既有呈現；若卡片已送出但來源清理發生未預期例外，只通知 botlog，不再追加失敗回覆。
 
 ## 兩種防雷
 
@@ -61,7 +63,7 @@ Cookie 是登入憑證，三平台分別設定。以下流程中的「重啟」�
 
 Cookie 相當於登入憑證，只保留在自己的環境設定與本機受保護的 Cookie 儲存檔；不要貼進聊天、log、截圖或 Git。登入備援不保證每篇都成功：過期、驗證挑戰、限流、需執行 JavaScript 或頁面格式變動仍會失敗。
 
-觀看限制、登入驗證、限流與 Cookie 備援失敗時，公開卡片統一顯示「Threads預覽失敗 爛meta」；通知行為見上方「異常訊息與 botlog」。
+觀看限制、登入驗證、限流與 Cookie 備援失敗時，bot 統一回覆「Threads預覽失敗 爛meta」並保留原訊息；通知行為見上方「異常訊息與 botlog」。
 
 管理員可依 botlog 的原因處理：
 
@@ -100,7 +102,7 @@ FACEBOOK_COOKIE='在這裡貼上複製的整段 Cookie 值'
 
 外層單引號保留，整段維持同一行；不要包含 `Cookie:` 字樣，也不要提供 `Set-Cookie`。填妥後套用設定，重新貼文測試。Cookie 只送到 `https://www.facebook.com`，不跟隨登入請求的轉址、不送至媒體 CDN、不使用 Threads Cookie，也不會寫進 log、Git 或 HTML 除錯檔。
 
-登入回應只接受與目標貼文綁定、且 privacy 欄位能確認為公開的內容。私人、朋友、自訂或無法確認的範圍不轉發；有匿名封面時即使 Cookie 失敗也保留原本預覽。沒有匿名內容且登入也不可用時，沿用既有失敗卡片與原連結。
+登入回應只接受與目標貼文綁定、且 privacy 欄位能確認為公開的內容。私人、朋友、自訂或無法確認的範圍不轉發；有匿名封面時即使 Cookie 失敗也保留原本預覽。沒有匿名內容且登入也不可用時，回覆固定失敗文字並保留原訊息。
 
 需手動診斷時，使用已解析的一般貼文、Reel 或影片網址（不要使用 `/share/...` 短連結）：
 
@@ -116,7 +118,7 @@ FACEBOOK_COOKIE='在這裡貼上複製的整段 Cookie 值'
 
 Instagram 優先自行抓取官方資料。先匿名讀取官方貼文頁；若只取得公開 OG 首圖或未取得完整媒體，且設定了 `INSTAGRAM_COOKIE`，優先追加一次同網域目標媒體 API 請求。匿名已取得完整輪播或 Reel 影片則不帶 Cookie。正文優先採用 `caption.text`，不把圖片替代描述當成貼文正文。
 
-公開 Reel／TV 在官方頁面與已設定的 Cookie 都未取得影片時，才以 KKInstagram 作最後備援，最多一次無登入請求，僅接受可信 Meta CDN 的完整 MP4 直連；不向 Discord 貼第三方 embed 網址。已知私人、404、限流或沒有可用公開內容時不走第三方，也不猜測一般多圖貼文中缺失影片的位置。備援失敗仍保留公開文字與封面；完全沒有內容則顯示失敗卡片與原連結。留言、防雷、Webhook 代發、Bot 備援及整組刪除與其他平台一致。
+公開 Reel／TV 在官方頁面與已設定的 Cookie 都未取得影片時，才以 KKInstagram 作最後備援，最多一次無登入請求，僅接受可信 Meta CDN 的完整 MP4 直連；不向 Discord 貼第三方 embed 網址。已知私人、404、限流或沒有可用公開內容時不走第三方，也不猜測一般多圖貼文中缺失影片的位置。備援失敗仍保留公開文字與封面；完全沒有內容則回覆固定失敗文字並保留原訊息。留言、防雷、Webhook 代發、Bot 備援及整組刪除與其他平台一致。
 
 取得 Instagram Cookie：
 
@@ -140,7 +142,7 @@ Cookie 只傳給 HTTPS `www.instagram.com` 的目標媒體 API，不跟隨轉址
 
 每行由 logging 加上時間、等級與 logger 名稱。這是連結偵測紀錄，不是預覽送達或 DB 寫入證明；三平台在抓取前記錄，可能仍是 Facebook share 網址。一般活動行只有顯示名稱與頻道名稱，不含 guild／channel／user ID、來源或預覽訊息 ID，不能直接還原 `social_share_events`。回補流程見[開發指南](development.md#一次性社群分享歷史回補)，檔案持久性見[部署指南](../tools/deploy/README.md#log-保留與容器更新)。
 
-Instagram 成功階段、完整成功摘要與 V2 發送成功的詳細診斷均為 DEBUG，預設不輸出；Cookie 例行保存成功也為 DEBUG。HTTP 失敗、驗證挑戰、KK 接手、Reel 仍無影片、媒體下載略過或錯誤卡片才輸出 WARNING，組裝／發送失敗輸出 ERROR。匿名內容不足但 Cookie 正常補回是預期備援；前四項限制省略後續媒體也不算異常。
+Instagram 成功階段、完整成功摘要與 V2 發送成功的詳細診斷均為 DEBUG，預設不輸出；Cookie 例行保存成功也為 DEBUG。HTTP 失敗、驗證挑戰、KK 接手、Reel 仍無影片、媒體下載略過或失敗回覆（`outcome=error_reply`）才輸出 WARNING，組裝／發送失敗輸出 ERROR。匿名內容不足但 Cookie 正常補回是預期備援；前四項限制省略後續媒體也不算異常。
 
 詳細紀錄以 `instagram_diagnostic` 開頭，後接單行 JSON；同次預覽沿用 `trace_id`，`shortcode` 用來辨認貼文。診斷不記錄 Cookie、回應內容、正文或完整媒體網址。
 
@@ -149,7 +151,7 @@ Instagram 成功階段、完整成功摘要與 V2 發送成功的詳細診斷均
 | `fetch_stage` | `stage=anonymous/cookie/kkinstagram`、`http_status`、固定 `result`／`reason`、`elapsed_ms`、抓到的媒體數；可分辨 `checkpoint_required`、`rate_limited`、`timeout` 等原因。 |
 | `fallback` | 切換到 Cookie 或 KK 的原因，例如 `missing_video`；切換 KK 時附上 `cookie_result`。 |
 | `fetch_complete` | 每次抓取一筆摘要；正常為 DEBUG、異常為 WARNING。記錄最終 `source`、`cookie_result`、`kk_result`、`outcome` 與總耗時。Reel 的 `images_only` 代表仍只有封面，不能算影片補抓成功。 |
-| `preview_prepared` | V2 準備結果、選入／保留／略過的媒體數、防雷及準備耗時（含抓取與圖片下載）；`outcome=error_card` 表示錯誤提示卡片。 |
+| `preview_prepared` | V2 準備結果、選入／保留／略過的媒體數、防雷及準備耗時（含抓取與圖片下載）；`outcome=error_reply` 表示改以固定文字回覆失敗、不送卡片。 |
 | `preview_delivery` | Discord V2 `result=sent/failed`、`phase`、頁數與該階段耗時；失敗記例外類型及可取得的 HTTP status／Discord error code，不記原始錯誤內容。 |
 
 篩選方式（在自己的專案目錄手動執行，不外貼完整 log）：

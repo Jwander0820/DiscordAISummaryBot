@@ -101,7 +101,7 @@ async def build_instagram_preview(url, *, reupload_image=True, spoiler=False, tr
     def finish():
         images = len(preview.files) + len(preview.image_urls)
         rendered = len(preview.media_urls or [])
-        preview.outcome = "error_card" if error else "content"
+        preview.outcome = "error_reply" if error else "content"
         preview.preview_error = error
         log_event("preview_prepared", trace_id=preview.trace_id, shortcode=post.shortcode,
                   source=preview.fetch_source, result=error or "success", outcome=preview.outcome,
@@ -141,6 +141,10 @@ async def handle_instagram_in_message(message, *, bot_client=None):
         preview = await build_instagram_preview(url, spoiler=spoiler, trace_id=trace_id)
         await notify_preview_failure(message, platform="Instagram", url=url, reason=preview.preview_error,
                                      bot_client=bot_client, trace_id=preview.trace_id)
+        if preview.preview_error:
+            # 失敗只回覆固定文字並保留原訊息，讓 Discord 原生連結預覽仍可見。
+            await reply_preview_failure(message, platform="Instagram", spoiler=spoiler)
+            return True
         views = build_social_preview_views(
             original_url=url, title=preview.embed.title or "Instagram", author=preview.embed.author.name or "Instagram",
             text=preview.embed.description or "", commentary=_extract_instagram_commentary(message.content or "", url),

@@ -3,8 +3,10 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from discord_bot.features.social_preview.threads_fetch import (
+    UA_MOBILE,
     ThreadsMedia,
     ThreadsPost,
+    ThreadsShareUnresolved,
     _best_src_from_srcset,
     _extract_dom_text,
     _is_probable_profile_image,
@@ -13,6 +15,13 @@ from discord_bot.features.social_preview.threads_fetch import (
     _video_mime_from_url,
     fetch_threads_post,
 )
+
+SLEEP = "discord_bot.features.social_preview.threads_fetch.time.sleep"
+
+
+def share_response(url, status, location=None):
+    return SimpleNamespace(url=url, status_code=status, headers={"Location": location} if location else {},
+                           close=Mock())
 
 
 class FakeNode:
@@ -223,11 +232,139 @@ class ThreadsFetchTests(unittest.TestCase):
         )
         requests_stub = SimpleNamespace(get=Mock(return_value=response))
 
-        with patch.dict("sys.modules", {"requests": requests_stub}):
-            with self.assertRaisesRegex(ValueError, "非 Threads 網域"):
+        with patch.dict("sys.modules", {"requests": requests_stub}), patch(SLEEP) as sleep, \
+                self.assertLogs("discord_digest_bot", level="WARNING"):
+            with self.assertRaises(ThreadsShareUnresolved) as raised:
                 _resolve_threads_share_url(share_url)
 
+        self.assertEqual(raised.exception.outcome, "external_redirect")
+        self.assertEqual(raised.exception.statuses, (302,))
+        requests_stub.get.assert_called_once()
+        sleep.assert_not_called()
         response.close.assert_called_once()
+
+    def test_resolve_threads_share_url_retries_transient_response_with_mobile_ua(self):
+        share_url = "https://www.threads.com/share/TEST_retry_1"
+        for status, outcome in ((200, "share_page"), (429, "rate_limited"), (503, "server_error")):
+            transient = share_response(share_url, status)
+            redirect = share_response(share_url, 302, "https://www.threads.com/@example_user/post/TEST_post_1?xmt=t")
+            requests_stub = SimpleNamespace(get=Mock(side_effect=[transient, redirect]))
+            with self.subTest(status=status), patch.dict("sys.modules", {"requests": requests_stub}), \
+                    patch(SLEEP) as sleep, self.assertLogs("discord_digest_bot", level="INFO") as logs:
+                resolved = _resolve_threads_share_url(share_url)
+
+            self.assertEqual(resolved, "https://www.threads.com/@example_user/post/TEST_post_1")
+            first, second = requests_stub.get.call_args_list
+            self.assertNotIn("User-Agent", first.kwargs["headers"])
+            self.assertEqual(second.kwargs["headers"]["User-Agent"], UA_MOBILE)
+            self.assertEqual(second.args[0], share_url)
+            sleep.assert_called_once()
+            transient.close.assert_called_once()
+            redirect.close.assert_called_once()
+            output = " ".join(logs.output)
+            self.assertIn(f"first_outcome={outcome}", output)
+            self.assertIn(f"statuses={status}-302", output)
+            self.assertNotIn("TEST_retry_1", output)
+
+    def test_resolve_threads_share_url_reports_statuses_after_retry_is_exhausted(self):
+        share_url = "https://www.threads.com/share/TEST_retry_2"
+        responses = [share_response(share_url, 429), share_response(share_url, 200)]
+        requests_stub = SimpleNamespace(get=Mock(side_effect=responses))
+
+        with patch.dict("sys.modules", {"requests": requests_stub}), patch(SLEEP), \
+                self.assertLogs("discord_digest_bot", level="WARNING") as logs:
+            with self.assertRaises(ThreadsShareUnresolved) as raised:
+                _resolve_threads_share_url(share_url)
+
+        error = raised.exception
+        self.assertIsInstance(error, ValueError)
+        self.assertEqual(error.outcome, "share_page")
+        self.assertEqual(error.statuses, (429, 200))
+        self.assertEqual(error.status, 200)
+        self.assertEqual(error.diagnostics(), {
+            "share_outcome": "share_page", "share_statuses": "429-200",
+            "share_attempts": 2, "share_http_status": 200,
+        })
+        self.assertEqual(requests_stub.get.call_count, 2)
+        for response in responses:
+            response.close.assert_called_once()
+        output = " ".join(logs.output)
+        self.assertIn("outcome=share_page attempts=2 statuses=429-200", output)
+        self.assertNotIn("TEST_retry_2", output + str(error))
+
+    def test_resolve_threads_share_url_retries_transport_errors_without_url_details(self):
+        class ReadTimeout(Exception):
+            pass
+
+        share_url = "https://www.threads.com/share/TEST_retry_3"
+        cases = (
+            ([ReadTimeout(share_url), ConnectionError(share_url)], "network_error", "none-none"),
+            ([share_response(share_url, 503), ReadTimeout(share_url)], "timeout", "503-none"),
+        )
+        for side_effect, outcome, statuses in cases:
+            requests_stub = SimpleNamespace(get=Mock(side_effect=side_effect))
+            with self.subTest(outcome=outcome), patch.dict("sys.modules", {"requests": requests_stub}), \
+                    patch(SLEEP), self.assertLogs("discord_digest_bot", level="WARNING") as logs:
+                with self.assertRaises(ThreadsShareUnresolved) as raised:
+                    _resolve_threads_share_url(share_url)
+            self.assertEqual(raised.exception.outcome, outcome)
+            self.assertEqual(raised.exception.status_text, statuses)
+            self.assertEqual(requests_stub.get.call_count, 2)
+            self.assertNotIn("TEST_retry_3", " ".join(logs.output) + str(raised.exception))
+
+    def test_resolve_threads_share_url_does_not_retry_definitive_redirects(self):
+        share_url = "https://www.threads.com/share/TEST_final_1"
+        cases = (
+            ("https://www.threads.com/login?next=%2Fshare%2FTEST_final_1", "login_redirect"),
+            ("https://www.threads.com/?error=invalid_post", "error_redirect"),
+            ("https://www.threads.com/explore", "unexpected_redirect"),
+        )
+        for location, outcome in cases:
+            response = share_response(share_url, 302, location)
+            requests_stub = SimpleNamespace(get=Mock(return_value=response))
+            with self.subTest(outcome=outcome), patch.dict("sys.modules", {"requests": requests_stub}), \
+                    patch(SLEEP) as sleep, self.assertLogs("discord_digest_bot", level="WARNING"):
+                with self.assertRaises(ThreadsShareUnresolved) as raised:
+                    _resolve_threads_share_url(share_url)
+            self.assertEqual(raised.exception.outcome, outcome)
+            self.assertEqual(raised.exception.statuses, (302,))
+            requests_stub.get.assert_called_once()
+            sleep.assert_not_called()
+            response.close.assert_called_once()
+
+    def test_resolve_threads_share_url_does_not_retry_unexpected_status(self):
+        share_url = "https://www.threads.com/share/TEST_final_2"
+        requests_stub = SimpleNamespace(get=Mock(return_value=share_response(share_url, 404)))
+        with patch.dict("sys.modules", {"requests": requests_stub}), patch(SLEEP) as sleep, \
+                self.assertLogs("discord_digest_bot", level="WARNING"):
+            with self.assertRaises(ThreadsShareUnresolved) as raised:
+                _resolve_threads_share_url(share_url)
+        self.assertEqual((raised.exception.outcome, raised.exception.status), ("unexpected_status", 404))
+        requests_stub.get.assert_called_once()
+        sleep.assert_not_called()
+
+    @patch("discord_bot.features.social_preview.threads_fetch._try_oembed_fill")
+    @patch("discord_bot.features.social_preview.threads_fetch._try_requests")
+    @patch("discord_bot.features.social_preview.threads_fetch._resolve_threads_share_url")
+    def test_fetch_threads_post_classifies_unresolved_share_url_without_cookie(
+        self, mock_resolve_share_url, mock_try_requests, mock_try_oembed_fill,
+    ):
+        share_url = "https://www.threads.com/share/TEST_final_3"
+        mock_resolve_share_url.side_effect = ThreadsShareUnresolved("rate_limited", [429, 429])
+
+        with patch.dict("os.environ", {"THREADS_COOKIE": "sessionid=example"}), \
+                patch("discord_bot.features.social_preview.threads_cookie.try_cookie_fallback") as cookie:
+            post = fetch_threads_post(share_url + "/?xmt=tracking")
+
+        self.assertEqual(post.url, share_url)
+        self.assertEqual(post.preview_error, "share_unresolved")
+        self.assertEqual(post.debug, {
+            "share_outcome": "rate_limited", "share_statuses": "429-429",
+            "share_attempts": 2, "share_http_status": 429,
+        })
+        mock_try_requests.assert_not_called()
+        mock_try_oembed_fill.assert_not_called()
+        cookie.assert_not_called()
 
     def test_resolve_threads_share_url_stops_before_canonical_post_redirects_to_error(self):
         share_url = "https://www.threads.com/share/TEST_share_123"

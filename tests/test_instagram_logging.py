@@ -58,7 +58,7 @@ class InstagramLoggingTests(unittest.TestCase):
             ("fetch_complete", {"result": "success", "cookie_result": "checkpoint_required", "kk_result": "unavailable"}, "WARNING"),
             ("fetch_complete", {"result": "success", "kind": "reel", "outcome": "images_only"}, "WARNING"),
             ("preview_prepared", {"result": "success", "dropped_count": 1}, "WARNING"),
-            ("preview_prepared", {"result": "fetch_failed", "outcome": "error_card"}, "WARNING"),
+            ("preview_prepared", {"result": "fetch_failed", "outcome": "error_reply"}, "WARNING"),
             ("preview_delivery", {"result": "failed", "http_status": 400, "error_code": 50035}, "ERROR"),
         ]
         with self.assertLogs(diagnostic.logger, level="WARNING") as logs:

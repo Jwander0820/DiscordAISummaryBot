@@ -11,7 +11,7 @@ from discord_bot.features.social_preview import facebook_preview, instagram_prev
 from discord_bot.features.social_preview import failure_notifications as failures
 from discord_bot.features.social_preview.facebook_fetch import FacebookMedia, FacebookPostData
 from discord_bot.features.social_preview.instagram_fetch import InstagramMedia, InstagramPost
-from discord_bot.features.social_preview.threads_fetch import ThreadsMedia, ThreadsPost
+from discord_bot.features.social_preview.threads_fetch import ThreadsMedia, ThreadsPost, ThreadsShareUnresolved
 
 load_tests = isolated_discord_suite(__name__)
 
@@ -37,7 +37,7 @@ def successful_preview(model, platform, url):
 
 
 class PreviewFailureTests(unittest.IsolatedAsyncioTestCase):
-    async def test_stalled_botlog_is_cancelled_and_public_preview_still_completes(self):
+    async def test_stalled_botlog_is_cancelled_and_public_reply_still_completes(self):
         for platform, key, module, model, url in CASES:
             cancelled = asyncio.Event()
 
@@ -62,9 +62,10 @@ class PreviewFailureTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(handled)
                 self.assertTrue(cancelled.is_set())
                 notify.assert_awaited_once()
-                send.assert_awaited_once()
-                cleanup.assert_awaited_once()
-                message.reply.assert_not_awaited()
+                message.reply.assert_awaited_once()
+                self.assertEqual(message.reply.await_args.args[0], f"||{platform}預覽失敗 爛meta||")
+                send.assert_not_awaited()
+                cleanup.assert_not_awaited()
                 self.assertIn("TimeoutError", " ".join(logs.output))
 
     async def test_unexpected_prepare_error_is_private_for_every_platform(self):
@@ -85,15 +86,11 @@ class PreviewFailureTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(notify.await_args.kwargs["record"]["channel_id"], "20")
                 self.assertIn("prepare_failed", notify.await_args.kwargs["error"])
                 self.assertIn("RuntimeError", notify.await_args.kwargs["record"]["summary"])
-                if platform == "Facebook":
-                    self.assertTrue(handled)
-                    public = str(send.await_args.kwargs["view"].to_components())
-                    cleanup.assert_awaited_once()
-                else:
-                    self.assertFalse(handled)
-                    public = message.reply.await_args.args[0]
-                    cleanup.assert_not_awaited()
-                self.assertIn(f"||{platform}預覽失敗 爛meta||", public)
+                self.assertFalse(handled)
+                public = message.reply.await_args.args[0]
+                send.assert_not_awaited()
+                cleanup.assert_not_awaited()
+                self.assertEqual(f"||{platform}預覽失敗 爛meta||", public)
                 self.assertNotIn("private-marker", public + str(notify.await_args) + " ".join(logs.output))
 
     async def test_delivery_error_reports_once_and_preserves_source_even_if_reply_fails(self):
@@ -129,7 +126,7 @@ class PreviewFailureTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("cleanup_failed", notify.await_args.kwargs["error"])
                 message.reply.assert_not_awaited()
 
-    async def test_empty_content_and_unrenderable_media_generate_failure_card_and_notification(self):
+    async def test_empty_content_and_unrenderable_media_reply_and_keep_source(self):
         for platform, key, module, model, url in CASES:
             for media_fails in (False, True):
                 media_url = "https://scontent.xx.fbcdn.net/photo.jpg"
@@ -143,12 +140,15 @@ class PreviewFailureTests(unittest.IsolatedAsyncioTestCase):
                     patch.object(module.asyncio, "to_thread", new=AsyncMock(return_value=post))
                 with self.subTest(platform=platform, media_fails=media_fails), fetch_patch, \
                         patch.object(module, "_download_bytes", new=AsyncMock(return_value=None)), \
-                        patch.object(module, "cleanup_source_message", new_callable=AsyncMock), \
+                        patch.object(module, "cleanup_source_message", new_callable=AsyncMock) as cleanup, \
                         patch("discord_bot.features.social_preview.sender.send_preview_as_author", new=AsyncMock(return_value=types.SimpleNamespace(id=100))) as send, \
                         patch.object(failures, "forward_notify_to_channel", new_callable=AsyncMock) as notify:
-                    self.assertTrue(await getattr(module, f"handle_{key}_in_message")(source(url)))
+                    message = source(url)
+                    self.assertTrue(await getattr(module, f"handle_{key}_in_message")(message))
                     notify.assert_awaited_once()
-                    self.assertIn(f"||{platform}預覽失敗 爛meta||", str(send.await_args.kwargs["view"].to_components()))
+                    self.assertEqual(message.reply.await_args.args[0], f"||{platform}預覽失敗 爛meta||")
+                    send.assert_not_awaited()
+                    cleanup.assert_not_awaited()
 
     async def test_success_has_no_failure_notification(self):
         for platform, key, module, model, url in CASES:
@@ -190,6 +190,50 @@ class PreviewFailureTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("使用者: `demo（10）`", channel.send.await_args.args[0])
                 self.assertIn("來源頻道: `general（20）`", channel.send.await_args.args[0])
                 self.assertEqual(channel.send.await_args.kwargs["allowed_mentions"].to_dict()["parse"], [])
+
+    async def test_unresolved_threads_share_link_reports_statuses_instead_of_prepare_failed(self):
+        url = "https://www.threads.com/share/Example_share_1"
+        unresolved = ThreadsShareUnresolved("share_page", [200, 200])
+        with patch("discord_bot.features.social_preview.threads_fetch._resolve_threads_share_url",
+                   side_effect=unresolved), \
+                patch("discord_bot.features.social_preview.threads_fetch._try_requests") as fetch_page, \
+                patch("discord_bot.features.social_preview.sender.send_preview_as_author",
+                      new=AsyncMock(return_value=types.SimpleNamespace(id=100))) as send, \
+                patch.object(threads_preview, "cleanup_source_message", new_callable=AsyncMock) as cleanup, \
+                patch.object(failures, "forward_notify_to_channel", new_callable=AsyncMock) as notify, \
+                self.assertLogs("discord_digest_bot", level="WARNING") as logs:
+            message = source(url)
+            self.assertTrue(await threads_preview.handle_threads_in_message(message))
+
+        fetch_page.assert_not_called()
+        notify.assert_awaited_once()
+        error = notify.await_args.kwargs["error"]
+        self.assertTrue(error.startswith("share_unresolved: "), error)
+        self.assertNotIn("prepare_failed", error)
+        record = notify.await_args.kwargs["record"]
+        self.assertEqual(record["summary"],
+                         "http_status=200 share_outcome=share_page share_statuses=200-200 share_attempts=2")
+        self.assertEqual(record["question"], url)
+        self.assertIn("reason=share_unresolved http_status=200 share_outcome=share_page", " ".join(logs.output))
+        message.reply.assert_awaited_once()
+        self.assertEqual(message.reply.await_args.args[0], "||Threads預覽失敗 爛meta||")
+        send.assert_not_awaited()
+        cleanup.assert_not_awaited()
+
+    async def test_failure_details_only_forward_safe_fixed_codes(self):
+        url = "https://www.threads.com/share/Example_share_2"
+        with patch.object(failures, "forward_notify_to_channel", new_callable=AsyncMock) as notify:
+            await failures.notify_preview_failure(
+                source(url), platform="Threads", url=url, reason="share_unresolved", http_status=429,
+                details={
+                    "share_outcome": "rate_limited", "share_attempts": 2, "share_statuses": "429\nprivate-body",
+                    "http_status": 999, "Bad Key": "private-key", "share_flag": True, "share_note": None,
+                },
+            )
+        notify.assert_awaited_once()
+        self.assertEqual(notify.await_args.kwargs["record"]["summary"],
+                         "http_status=429 share_outcome=rate_limited share_attempts=2")
+        self.assertNotIn("private-", str(notify.await_args))
 
     async def test_excess_tracking_parameters_do_not_prevent_failure_notification(self):
         url = "https://www.facebook.com/demo/posts/123"

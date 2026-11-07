@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import sys
@@ -12,6 +13,8 @@ from typing import List, Optional, Dict, Any
 from urllib.parse import parse_qs, unquote, urljoin, urlparse, urlunparse, urlencode
 
 from .text import TextSpan, coalesce_text_spans, trim_text_spans
+
+logger = logging.getLogger("discord_digest_bot")
 
 # =============== 配置 ===============
 REQUEST_TIMEOUT = 15
@@ -48,6 +51,13 @@ THREADS_SHARE_RE = re.compile(
 )
 THREADS_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 THREADS_SHARE_MAX_REDIRECTS = 5
+THREADS_HOSTS = {"threads.net", "www.threads.net", "threads.com", "www.threads.com"}
+# One retry for responses that can change between requests. The first attempt
+# keeps the requests default UA; the retry uses the mobile UA, which also gets
+# the HTTP redirect. Desktop browser UAs receive a 200 JavaScript shell instead.
+THREADS_SHARE_ATTEMPTS = 2
+THREADS_SHARE_RETRY_OUTCOMES = {"share_page", "rate_limited", "server_error", "timeout", "network_error"}
+THREADS_LOGIN_PATH_RE = re.compile(r"/(?:login|accounts/login|challenge|checkpoint)(?:/|$)", re.IGNORECASE)
 
 
 # =============== 資料結構 ===============
@@ -85,64 +95,139 @@ def _strip_tracking_query(url: str) -> str:
     return urlunparse((parsed.scheme or "https", parsed.netloc, path, "", "", ""))
 
 
+class ThreadsShareUnresolved(ValueError):
+    """A share URL did not lead to a post. Holds fixed codes only, never URLs."""
+
+    def __init__(self, outcome: str, statuses: List[Optional[int]]):
+        self.outcome = outcome
+        self.statuses = tuple(statuses)
+        super().__init__(f"Threads 分享 URL 未導向標準貼文：outcome={outcome} statuses={self.status_text}")
+
+    @property
+    def status(self) -> Optional[int]:
+        """Last HTTP status received from Threads, if any attempt got a response."""
+        return next((status for status in reversed(self.statuses) if status is not None), None)
+
+    @property
+    def status_text(self) -> str:
+        return _format_share_statuses(self.statuses)
+
+    def diagnostics(self) -> Dict[str, Any]:
+        return {
+            "share_outcome": self.outcome,
+            "share_statuses": self.status_text,
+            "share_attempts": len(self.statuses),
+            "share_http_status": self.status,
+        }
+
+
+def _format_share_statuses(statuses) -> str:
+    """One token per attempt; ``none`` means no HTTP response (timeout/network)."""
+    return "-".join("none" if status is None else str(status) for status in statuses)
+
+
+def _share_status_outcome(status: Optional[int]) -> str:
+    if status == 200:
+        # Threads answered with its JavaScript share page instead of a redirect.
+        return "share_page"
+    if status == 429:
+        return "rate_limited"
+    if isinstance(status, int) and 500 <= status <= 599:
+        return "server_error"
+    return "unexpected_status"
+
+
+def _share_redirect_outcome(next_url: str) -> str:
+    parsed = urlparse(next_url)
+    if "error" in {key.lower() for key in parse_qs(parsed.query)}:
+        return "error_redirect"
+    if THREADS_LOGIN_PATH_RE.search(parsed.path):
+        return "login_redirect"
+    return "unexpected_redirect"
+
+
+def _share_attempt(requests, share_url: str, headers: Dict[str, str]) -> tuple[Optional[str], str, Optional[int]]:
+    """Follow one share redirect chain; return ``(post_url, outcome, last_status)``."""
+    current_url = share_url
+    status = None
+    for _ in range(THREADS_SHARE_MAX_REDIRECTS + 1):
+        try:
+            response = requests.get(
+                current_url,
+                # Do not automatically follow the canonical post URL. Threads can
+                # redirect that second request to ``/?error=invalid_post`` even
+                # though the share response already exposed the correct post URL.
+                headers=headers,
+                timeout=REQUEST_TIMEOUT,
+                allow_redirects=False,
+                stream=True,
+            )
+        except Exception as exc:
+            # Transport exceptions can embed the URL; keep only a fixed category.
+            return None, "timeout" if "Timeout" in type(exc).__name__ else "network_error", None
+        try:
+            status = getattr(response, "status_code", None)
+            response_url = getattr(response, "url", None) or current_url
+            resolved_url = _strip_tracking_query(response_url)
+            if THREADS_RE.fullmatch(resolved_url):
+                return resolved_url, "resolved", status
+
+            response_headers = getattr(response, "headers", {}) or {}
+            location = response_headers.get("Location") or response_headers.get("location")
+            if status not in THREADS_REDIRECT_STATUSES or not location:
+                return None, _share_status_outcome(status), status
+
+            next_url = urljoin(response_url, location)
+            parsed_next = urlparse(next_url)
+            next_host = parsed_next.netloc.lower().split(":", 1)[0]
+            if parsed_next.scheme not in {"http", "https"} or next_host not in THREADS_HOSTS:
+                return None, "external_redirect", status
+
+            resolved_url = _strip_tracking_query(next_url)
+            if THREADS_RE.fullmatch(resolved_url):
+                return resolved_url, "resolved", status
+            if not THREADS_SHARE_RE.fullmatch(resolved_url):
+                return None, _share_redirect_outcome(next_url), status
+            current_url = resolved_url
+        finally:
+            response.close()
+    return None, "redirect_limit", status
+
+
 def _resolve_threads_share_url(url: str) -> str:
-    """Resolve a Threads ``/share/<token>`` URL to its canonical post URL."""
+    """Resolve a Threads ``/share/<token>`` URL to its canonical post URL.
+
+    Raises ``ThreadsShareUnresolved`` with per-attempt HTTP statuses when Threads
+    does not redirect to a post. Only transient outcomes are retried, once.
+    """
     import requests
 
     share_url = _strip_tracking_query(url)
     if not THREADS_SHARE_RE.fullmatch(share_url):
         raise ValueError(f"不是 Threads 分享 URL：{url}")
 
-    current_url = share_url
-    last_url = share_url
+    statuses: List[Optional[int]] = []
+    outcomes: List[str] = []
+    for attempt in range(THREADS_SHARE_ATTEMPTS):
+        headers = {"Accept": DEFAULT_ACCEPT, "Accept-Language": DEFAULT_LANG}
+        if attempt:
+            time.sleep(RETRY_BACKOFF)
+            headers["User-Agent"] = UA_MOBILE
+        post_url, outcome, status = _share_attempt(requests, share_url, headers)
+        statuses.append(status)
+        outcomes.append(outcome)
+        if post_url:
+            if attempt:
+                logger.info("Threads share link resolved after retry: first_outcome=%s attempts=%d statuses=%s",
+                            outcomes[0], len(statuses), _format_share_statuses(statuses))
+            return post_url
+        if outcome not in THREADS_SHARE_RETRY_OUTCOMES:
+            break
 
-    for _ in range(THREADS_SHARE_MAX_REDIRECTS + 1):
-        response = requests.get(
-            current_url,
-            # Do not automatically follow the canonical post URL. Threads can
-            # redirect that second request to ``/?error=invalid_post`` even
-            # though the share response already exposed the correct post URL.
-            headers={"Accept": DEFAULT_ACCEPT, "Accept-Language": DEFAULT_LANG},
-            timeout=REQUEST_TIMEOUT,
-            allow_redirects=False,
-            stream=True,
-        )
-        try:
-            response_url = getattr(response, "url", None) or current_url
-            resolved_url = _strip_tracking_query(response_url)
-            if THREADS_RE.fullmatch(resolved_url):
-                return resolved_url
-
-            status_code = getattr(response, "status_code", None)
-            headers = getattr(response, "headers", {}) or {}
-            location = headers.get("Location") or headers.get("location")
-            if status_code not in THREADS_REDIRECT_STATUSES or not location:
-                last_url = resolved_url
-                break
-
-            next_url = urljoin(response_url, location)
-            parsed_next = urlparse(next_url)
-            next_host = parsed_next.netloc.lower().split(":", 1)[0]
-            if parsed_next.scheme not in {"http", "https"} or next_host not in {
-                "threads.net",
-                "www.threads.net",
-                "threads.com",
-                "www.threads.com",
-            }:
-                raise ValueError("Threads 分享 URL 導向非 Threads 網域")
-
-            resolved_url = _strip_tracking_query(next_url)
-            if THREADS_RE.fullmatch(resolved_url):
-                return resolved_url
-            if not THREADS_SHARE_RE.fullmatch(resolved_url):
-                last_url = resolved_url
-                break
-            current_url = resolved_url
-            last_url = resolved_url
-        finally:
-            response.close()
-
-    raise ValueError(f"Threads 分享 URL 未導向標準 Threads 貼文：{last_url}")
+    error = ThreadsShareUnresolved(outcomes[-1], statuses)
+    logger.warning("Threads share link unresolved: outcome=%s attempts=%d statuses=%s",
+                   error.outcome, len(statuses), error.status_text)
+    raise error
 
 
 def build_candidate_urls(url: str) -> list[str]:
@@ -1194,7 +1279,11 @@ def fetch_threads_post(url: str) -> ThreadsPost:
     """Threads parser 對外主入口。"""
     clean_url = _strip_tracking_query(url)
     if THREADS_SHARE_RE.fullmatch(clean_url):
-        clean_url = _resolve_threads_share_url(clean_url)
+        try:
+            clean_url = _resolve_threads_share_url(clean_url)
+        except ThreadsShareUnresolved as exc:
+            # No post URL means no post-bound page or Cookie request can follow.
+            return ThreadsPost(url=clean_url, preview_error="share_unresolved", debug=exc.diagnostics())
 
     # 1) requests（多 UA、多網域變體）
     post = _try_requests(clean_url)

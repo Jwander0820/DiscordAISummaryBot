@@ -474,22 +474,20 @@ class FacebookPreviewAsyncTests(unittest.IsolatedAsyncioTestCase):
     @patch("discord_bot.features.social_preview.facebook_preview.cleanup_source_message", new_callable=AsyncMock)
     @patch("discord_bot.features.social_preview.sender.send_preview_as_author", new_callable=AsyncMock)
     @patch("discord_bot.features.social_preview.facebook_preview.build_facebook_preview", new_callable=AsyncMock)
-    async def test_failed_spoiler_preview_masks_failure_but_keeps_commentary_and_controls(self, build, send, cleanup):
+    async def test_failed_spoiler_preview_replies_masked_failure_and_keeps_source(self, build, send, cleanup):
         url = "https://www.facebook.com/post/123"
         build.side_effect = RuntimeError("login wall")
-        send.return_value = types.SimpleNamespace(id=123)
         message = types.SimpleNamespace(
             author=types.SimpleNamespace(bot=False, nick="demo", global_name="demo"),
-            channel=types.SimpleNamespace(name="general"), content=f"留言 ||{url}||",
+            channel=types.SimpleNamespace(name="general"), content=f"留言 ||{url}||", reply=AsyncMock(),
         )
         with self.assertLogs("discord_digest_bot", level="ERROR"):
-            self.assertTrue(await handle_facebook_in_message(message))
-        view = send.await_args.kwargs["view"]
-        self.assertEqual(view.children[0].content, "留言")
-        card = next(item for item in view.children if isinstance(item, discord.ui.Container))
-        self.assertFalse(card.spoiler)
-        self.assertIn("||Facebook預覽失敗 爛meta||", [item.content for item in card.children if isinstance(item, discord.ui.TextDisplay)])
-        self.assertTrue(any(isinstance(item, discord.ui.ActionRow) for item in card.children))
+            self.assertFalse(await handle_facebook_in_message(message))
+        message.reply.assert_awaited_once()
+        self.assertEqual(message.reply.await_args.args[0], "||Facebook預覽失敗 爛meta||")
+        self.assertFalse(message.reply.await_args.kwargs["mention_author"])
+        send.assert_not_awaited()
+        cleanup.assert_not_awaited()
 
     @patch("discord_bot.features.social_preview.facebook_preview.cleanup_source_message", new_callable=AsyncMock)
     @patch("discord_bot.features.social_preview.sender.send_preview_as_author", new_callable=AsyncMock)
@@ -654,7 +652,7 @@ class FacebookPreviewAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(post.status, 200)
         self.assertEqual(session.requested_urls, [first_url, second_url])
 
-    async def test_handler_uses_threads_style_fallback_preview_instead_of_reply(self):
+    async def test_handler_replies_to_classified_failure_and_keeps_source(self):
         url = "https://www.facebook.com/share/p/14kUyp62jLg/"
         message = types.SimpleNamespace(
             author=types.SimpleNamespace(bot=False, nick="Jwander", global_name="Jwander"),
@@ -687,15 +685,10 @@ class FacebookPreviewAsyncTests(unittest.IsolatedAsyncioTestCase):
         notify.assert_awaited_once()
         self.assertIn("login_required", notify.await_args.kwargs["error"])
         self.assertIn("http_status=403", notify.await_args.kwargs["record"]["summary"])
-        message.reply.assert_not_awaited()
-        send_preview.assert_awaited_once()
-        sent_kwargs = send_preview.await_args.kwargs
-        view = sent_kwargs["view"]
-        self.assertFalse(set(sent_kwargs) & {"content", "embed", "files"})
-        self.assertTrue(view.has_components_v2())
-        self.assertIn("Facebook預覽失敗 爛meta", [item.content for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay)])
-        self.assertTrue(any(getattr(item, "url", None) == url for item in view.walk_children()))
-        cleanup_source.assert_awaited_once_with(message, platform="Facebook", url=url)
+        message.reply.assert_awaited_once()
+        self.assertEqual(message.reply.await_args.args[0], "Facebook預覽失敗 爛meta")
+        send_preview.assert_not_awaited()
+        cleanup_source.assert_not_awaited()
 
 
 if __name__ == "__main__":

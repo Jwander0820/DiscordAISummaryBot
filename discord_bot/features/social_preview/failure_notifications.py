@@ -14,6 +14,8 @@ from ..notifications.discord_forwarder import forward_notify_to_channel
 logger = logging.getLogger("discord_digest_bot")
 NOTIFICATION_TIMEOUT_SECONDS = 5
 _SAFE_CODE = re.compile(r"[A-Za-z0-9_-]{1,100}\Z")
+_DETAIL_KEY = re.compile(r"[a-z][a-z0-9_]{0,39}\Z")
+_RESERVED_DETAIL_KEYS = {"error_type", "http_status", "error_code", "trace_id"}
 COMMON_DIAGNOSTICS = {
     "prepare_failed": "預覽抓取或組裝發生未預期錯誤。",
     "send_failed": "Discord 預覽發送失敗，原始訊息保留。",
@@ -26,6 +28,7 @@ COMMON_DIAGNOSTICS = {
 PLATFORM_DIAGNOSTICS = {
     "Threads": {
         "invalid_post": "Threads 未提供有效貼文，請確認原連結。",
+        "share_unresolved": "Threads 分享短連結未導向貼文（可能是限流、分享頁、登入牆或暫時性錯誤），請依 share_outcome／share_statuses 排查，或直接開啟原連結。",
         "restricted_content": "Threads 限制這則貼文的觀看權限，請直接開啟原連結。",
         "cookie_restricted_content": "Threads 登入備援仍收到限制觀看頁，請用提供 Cookie 的帳號開啟原連結確認。",
         "cookie_login_required": "Threads 要求重新登入或驗證，請管理員確認登入狀態並更新 Cookie 設定，或直接開啟原連結。",
@@ -96,7 +99,9 @@ def _notification_url(url: str) -> str:
 async def notify_preview_failure(
     message, *, platform: str, url: str, reason: str | None, bot_client=None,
     exception: Exception | None = None, http_status: int | None = None, trace_id: str | None = None,
+    details: dict | None = None,
 ) -> None:
+    """``details`` adds fixed diagnostic codes; unsafe keys or values are dropped."""
     if not reason:
         return
     try:
@@ -114,6 +119,11 @@ async def notify_preview_failure(
                 context.append(f"{key}={value}")
         if isinstance(trace_id, str) and _SAFE_CODE.fullmatch(trace_id):
             context.append(f"trace_id={trace_id}")
+        for key, value in (details.items() if isinstance(details, dict) else ()):
+            if not isinstance(key, str) or not _DETAIL_KEY.fullmatch(key) or key in _RESERVED_DETAIL_KEYS:
+                continue
+            if type(value) is int or (isinstance(value, str) and _SAFE_CODE.fullmatch(value)):
+                context.append(f"{key}={value}")
         logger.log(logging.ERROR if exception is not None else logging.WARNING,
                    "%s preview unavailable: reason=%s %s", platform, reason, " ".join(context))
         record = build_summary_record(

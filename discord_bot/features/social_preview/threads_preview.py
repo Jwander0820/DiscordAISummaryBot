@@ -83,6 +83,12 @@ class PreviewResult:
     media_spoilers: Optional[List[bool]] = None
     text_spans: Optional[List[TextSpan]] = None
     preview_error: Optional[str] = None
+    # 只放固定分類與狀態碼，供 botlog 排查；不含網址、正文或回應內容。
+    http_status: Optional[int] = None
+    diagnostics: Optional[dict] = None
+
+
+SHARE_DIAGNOSTIC_KEYS = ("share_outcome", "share_statuses", "share_attempts")
 
 
 # --- URL 擷取 ---
@@ -179,7 +185,9 @@ async def build_threads_preview(
     if error:
         embed = discord.Embed(title="Threads", description=THREADS_INVALID_POST_MESSAGE, url=url)
         embed.set_author(name="Threads")
-        return PreviewResult(embed=embed, files=[], preview_error=error)
+        diagnostics = {key: post.debug[key] for key in SHARE_DIAGNOSTIC_KEYS if key in post.debug}
+        return PreviewResult(embed=embed, files=[], preview_error=error,
+                             http_status=post.debug.get("share_http_status"), diagnostics=diagnostics or None)
 
     # Embed 僅作為內部資料容器；Discord 訊息由共用 V2 view 組裝。
     title = f"Threads @{post.author_username or ''}".strip() or "Threads 貼文"
@@ -270,7 +278,13 @@ async def handle_threads_in_message(
 
         preview = await build_threads_preview(url, reupload_image=True, spoiler=use_spoiler)
         await notify_preview_failure(message, platform="Threads", url=url,
-                                     reason=preview.preview_error, bot_client=bot_client)
+                                     reason=preview.preview_error, bot_client=bot_client,
+                                     http_status=preview.http_status, details=preview.diagnostics)
+        if preview.preview_error:
+            # 失敗只回覆固定文字並保留原訊息，讓 Discord 原生連結預覽仍可見。
+            # 回傳 True：這則訊息已回應，不再交給其他平台處理。
+            await reply_preview_failure(message, platform="Threads", spoiler=use_spoiler)
+            return True
         phase = "send"
         await _send_threads_preview(
             message, preview, original_url=url, commentary=user_commentary, spoiler=use_spoiler,

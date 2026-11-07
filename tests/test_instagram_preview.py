@@ -130,24 +130,23 @@ class InstagramPreviewTests(unittest.IsolatedAsyncioTestCase):
     @patch("discord_bot.features.social_preview.sender.send_preview_as_author", new_callable=AsyncMock)
     @patch.object(preview.asyncio, "to_thread")
     @patch("discord_bot.features.social_preview.failure_notifications.forward_notify_to_channel", new_callable=AsyncMock)
-    async def test_errors_are_v2_with_original_link_and_no_third_party(self, notify, fetch, send, cleanup):
+    async def test_errors_reply_fixed_text_and_keep_source(self, notify, fetch, send, cleanup):
         for error in preview.ERROR_MESSAGES:
             with self.subTest(error=error):
                 notify.reset_mock()
                 fetch.return_value = InstagramPost(url=URL, shortcode="ABC123", preview_error=error)
-                send.return_value = types.SimpleNamespace(id=123)
-                self.assertTrue(await preview.handle_instagram_in_message(source(f"說明 ||{URL}||")))
-                view = send.await_args.kwargs["view"]
-                texts = " ".join(x.content for x in view.walk_children() if isinstance(x, discord.ui.TextDisplay))
-                self.assertIn("Instagram預覽失敗 爛meta", texts)
-                self.assertNotIn(preview.ERROR_MESSAGES[error], texts)
-                self.assertIn("說明", texts)
-                self.assertNotIn("kkinstagram", str(view.to_components()))
-                self.assertEqual(gallery(view), [])
+                message = source(f"說明 ||{URL}||")
+                self.assertTrue(await preview.handle_instagram_in_message(message))
+                message.reply.assert_awaited_once()
+                public = message.reply.await_args.args[0]
+                self.assertEqual(public, "||Instagram預覽失敗 爛meta||")
+                self.assertNotIn(preview.ERROR_MESSAGES[error], public)
+                self.assertEqual(message.reply.await_args.kwargs["allowed_mentions"].to_dict()["parse"], [])
+                send.assert_not_awaited()
+                cleanup.assert_not_awaited()
                 notify.assert_awaited_once()
                 self.assertIn(error, notify.await_args.kwargs["error"])
                 self.assertIn(preview.ERROR_MESSAGES[error], notify.await_args.kwargs["error"])
-                self.assertEqual(next(x.url for x in view.walk_children() if getattr(x, "label", None) == "原連結"), URL)
 
     @patch.object(preview, "_download_bytes", new_callable=AsyncMock)
     @patch.object(preview.asyncio, "to_thread")
@@ -161,7 +160,7 @@ class InstagramPreviewTests(unittest.IsolatedAsyncioTestCase):
 
     @patch.object(preview, "_download_bytes", new_callable=AsyncMock)
     @patch.object(preview.asyncio, "to_thread")
-    async def test_failed_image_downloads_log_error_card_and_dropped_count(self, fetch, download):
+    async def test_failed_image_downloads_log_error_reply_and_dropped_count(self, fetch, download):
         fetch.return_value = InstagramPost(url=URL, shortcode="ABC123", trace_id="synthetictrace", fetch_source="cookie",
                                            media=[InstagramMedia("image", u) for u in IMAGES[:2]])
         download.return_value = None
@@ -169,9 +168,9 @@ class InstagramPreviewTests(unittest.IsolatedAsyncioTestCase):
             result = await preview.build_instagram_preview(URL)
         event = json.loads(logs.records[-1].getMessage().split(" ", 1)[1])
         self.assertEqual((event["selected_count"], event["rendered_count"], event["dropped_count"]), (2, 0, 2))
-        self.assertEqual(event["outcome"], "error_card")
+        self.assertEqual(event["outcome"], "error_reply")
         self.assertEqual(event["result"], "fetch_failed")
-        self.assertEqual(result.outcome, "error_card")
+        self.assertEqual(result.outcome, "error_reply")
 
     @patch.object(preview, "_download_bytes", new_callable=AsyncMock)
     @patch.object(preview.asyncio, "to_thread")

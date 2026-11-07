@@ -534,9 +534,13 @@ async def handle_facebook_in_message(message: discord.Message, *, bot_client=Non
             message, platform="Facebook", url=url, bot_client=bot_client, exception=exc,
             reason=exc.reason if isinstance(exc, FacebookPreviewUnavailable) else "prepare_failed",
         )
-        embed = discord.Embed(title="Facebook", description=FACEBOOK_INVALID_POST_MESSAGE, url=url)
-        embed.set_author(name="Facebook")
-        preview = FacebookPreview(embed=embed, files=[], preview_error="prepare_failed")
+        await reply_preview_failure(message, platform="Facebook", spoiler=use_spoiler)
+        # 已分類的抓取失敗與 preview_error 一致；只有未預期例外回傳 False。
+        return isinstance(exc, FacebookPreviewUnavailable)
+    if preview.preview_error:
+        # 失敗只回覆固定文字並保留原訊息，讓 Discord 原生連結預覽仍可見。
+        await reply_preview_failure(message, platform="Facebook", spoiler=use_spoiler)
+        return True
 
     phase = "send"
     try:
