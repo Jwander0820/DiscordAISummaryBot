@@ -29,6 +29,7 @@ PLATFORM_DIAGNOSTICS = {
     "Threads": {
         "invalid_post": "Threads 未提供有效貼文，請確認原連結。",
         "share_unresolved": "Threads 分享短連結未導向貼文（可能是限流、分享頁、登入牆或暫時性錯誤），請依 share_outcome／share_statuses 排查，或直接開啟原連結。",
+        "rate_limited": "Threads 貼文頁回應 429 限流，等待後重試一次仍被限流（或要求等待過久），已停止這則預覽的其餘匿名請求；請依 requests_retry_after 排查，稍後再試或直接開啟原連結。",
         "restricted_content": "Threads 限制這則貼文的觀看權限，請直接開啟原連結。",
         "cookie_restricted_content": "Threads 登入備援仍收到限制觀看頁，請用提供 Cookie 的帳號開啟原連結確認。",
         "cookie_login_required": "Threads 要求重新登入或驗證，請管理員確認登入狀態並更新 Cookie 設定，或直接開啟原連結。",

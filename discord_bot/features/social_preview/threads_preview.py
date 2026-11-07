@@ -88,7 +88,24 @@ class PreviewResult:
     diagnostics: Optional[dict] = None
 
 
-SHARE_DIAGNOSTIC_KEYS = ("share_outcome", "share_statuses", "share_attempts")
+DIAGNOSTIC_KEYS = (
+    "share_outcome", "share_statuses", "share_attempts", "share_retry_after", "share_rate_limit_wait",
+    "requests_attempts", "requests_retry_after", "requests_rate_limit_wait",
+)
+# 匿名頁面狀態只在這些分類下有意義；Cookie 類失敗另有自己的狀態來源。
+PAGE_STATUS_ERRORS = {"rate_limited", "no_content"}
+
+_fetch_gate: Optional[asyncio.Lock] = None
+_fetch_gate_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+def _threads_fetch_gate() -> asyncio.Lock:
+    """One Threads fetch at a time per event loop, so bursts queue instead of racing."""
+    global _fetch_gate, _fetch_gate_loop
+    loop = asyncio.get_running_loop()
+    if _fetch_gate is None or _fetch_gate_loop is not loop:
+        _fetch_gate, _fetch_gate_loop = asyncio.Lock(), loop
+    return _fetch_gate
 
 
 # --- URL 擷取 ---
@@ -179,15 +196,20 @@ async def build_threads_preview(
     :return: PreviewResult
     """
     # fetch_threads_post() 仍是同步 parser，這裡轉到 thread 避免卡住 bot event loop。
-    post = await asyncio.to_thread(fetch_threads_post, url)
+    # 同時多則 Threads 連結時依序抓取，寧可排隊也不要同時打 Threads 被限流。
+    async with _threads_fetch_gate():
+        post = await asyncio.to_thread(fetch_threads_post, url)
 
     error = failure_reason("Threads", post.preview_error or ("no_content" if not (post.text or post.media) else None))
     if error:
         embed = discord.Embed(title="Threads", description=THREADS_INVALID_POST_MESSAGE, url=url)
         embed.set_author(name="Threads")
-        diagnostics = {key: post.debug[key] for key in SHARE_DIAGNOSTIC_KEYS if key in post.debug}
+        diagnostics = {key: post.debug[key] for key in DIAGNOSTIC_KEYS if key in post.debug}
+        http_status = post.debug.get("share_http_status")
+        if http_status is None and error in PAGE_STATUS_ERRORS:
+            http_status = post.debug.get("requests_last_status")
         return PreviewResult(embed=embed, files=[], preview_error=error,
-                             http_status=post.debug.get("share_http_status"), diagnostics=diagnostics or None)
+                             http_status=http_status, diagnostics=diagnostics or None)
 
     # Embed 僅作為內部資料容器；Discord 訊息由共用 V2 view 組裝。
     title = f"Threads @{post.author_username or ''}".strip() or "Threads 貼文"

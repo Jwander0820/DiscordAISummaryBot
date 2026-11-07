@@ -1,8 +1,12 @@
 import unittest
+from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from discord_bot.features.social_preview.threads_fetch import (
+    RATE_LIMIT_DEFAULT_WAIT,
+    RETRY_BACKOFF,
     UA_MOBILE,
     ThreadsMedia,
     ThreadsPost,
@@ -10,7 +14,9 @@ from discord_bot.features.social_preview.threads_fetch import (
     _best_src_from_srcset,
     _extract_dom_text,
     _is_probable_profile_image,
+    _rate_limit_wait,
     _resolve_threads_share_url,
+    _retry_after_seconds,
     _try_requests,
     _video_mime_from_url,
     fetch_threads_post,
@@ -88,9 +94,110 @@ class ThreadsFetchTests(unittest.TestCase):
         cookie_env.start()
         self.addCleanup(cookie_env.stop)
 
+    def test_first_page_attempt_uses_mobile_ua_on_www_host(self):
+        url = "https://threads.net/@demo/post/abc"
+        get = Mock(return_value=SimpleNamespace(status_code=200, url="https://www.threads.com/@demo/post/abc",
+                                                text="<html>post</html>"))
+        with patch.dict("sys.modules", {"requests": SimpleNamespace(get=get)}), patch(
+            "discord_bot.features.social_preview.threads_fetch._parse_html",
+            side_effect=lambda parsed_url, _html: ThreadsPost(url=parsed_url, text="正文"),
+        ):
+            post = _try_requests(url)
+        self.assertEqual(post.text, "正文")
+        get.assert_called_once()
+        self.assertEqual(get.call_args.args[0], "https://www.threads.com/@demo/post/abc")
+        self.assertEqual(get.call_args.kwargs["headers"]["User-Agent"], UA_MOBILE)
+
+    def test_page_rate_limit_waits_then_repeats_same_request_once(self):
+        url = "https://www.threads.com/@demo/post/abc"
+        limited = lambda **headers: SimpleNamespace(status_code=429, url=url, text="", headers=headers)
+        for earlier in ([], [SimpleNamespace(status_code=403, url=url, text="")]):
+            with self.subTest(earlier_attempts=len(earlier)):
+                get = Mock(side_effect=[*earlier, limited(), limited(),
+                                        SimpleNamespace(status_code=200, url=url, text="<html>post</html>")])
+                with patch.dict("sys.modules", {"requests": SimpleNamespace(get=get)}),                         patch(SLEEP) as sleep,                         self.assertLogs("discord_digest_bot", level="INFO") as logs:
+                    post = _try_requests(url)
+                self.assertEqual(get.call_count, len(earlier) + 2)
+                retry_call, first_call = get.call_args_list[-1], get.call_args_list[-2]
+                self.assertEqual(retry_call.args, first_call.args)
+                self.assertEqual(retry_call.kwargs["headers"], first_call.kwargs["headers"])
+                sleep.assert_called_once_with(RATE_LIMIT_DEFAULT_WAIT)
+                self.assertEqual(post.preview_error, "rate_limited")
+                self.assertEqual(post.debug["requests_last_status"], 429)
+                self.assertEqual(post.debug["requests_attempts"], len(earlier) + 2)
+                self.assertEqual(post.debug["requests_retry_after"], "none")
+                self.assertEqual(post.debug["requests_rate_limit_wait"], RATE_LIMIT_DEFAULT_WAIT)
+                self.assertNotIn("demo", " ".join(logs.output))
+
+    def test_page_rate_limit_retry_can_succeed(self):
+        url = "https://www.threads.com/@demo/post/abc"
+        get = Mock(side_effect=[
+            SimpleNamespace(status_code=429, url=url, text="", headers={"Retry-After": "4"}),
+            SimpleNamespace(status_code=200, url=url, text="<html>post</html>"),
+        ])
+        with patch.dict("sys.modules", {"requests": SimpleNamespace(get=get)}), patch(SLEEP) as sleep,                 patch("discord_bot.features.social_preview.threads_fetch._parse_html",
+                      side_effect=lambda parsed_url, _html: ThreadsPost(url=parsed_url, text="正文")),                 self.assertLogs("discord_digest_bot", level="INFO") as logs:
+            post = _try_requests(url)
+        self.assertEqual(post.text, "正文")
+        sleep.assert_called_once_with(4)
+        self.assertEqual(get.call_count, 2)
+        self.assertIn("fetched after rate-limit retry: attempts=2", " ".join(logs.output))
+
+    def test_page_rate_limit_with_long_retry_after_stops_without_waiting(self):
+        url = "https://www.threads.com/@demo/post/abc"
+        get = Mock(return_value=SimpleNamespace(status_code=429, url=url, text="", headers={"Retry-After": "60"}))
+        with patch.dict("sys.modules", {"requests": SimpleNamespace(get=get)}), patch(SLEEP) as sleep,                 self.assertLogs("discord_digest_bot", level="WARNING") as logs:
+            post = _try_requests(url)
+        get.assert_called_once()
+        sleep.assert_not_called()
+        self.assertEqual(post.preview_error, "rate_limited")
+        self.assertEqual(post.debug["requests_retry_after"], 60)
+        self.assertNotIn("requests_rate_limit_wait", post.debug)
+        self.assertIn("retry_after=60", " ".join(logs.output))
+
+    def test_retry_after_parsing_and_wait_rule(self):
+        future = format_datetime(datetime.now(timezone.utc) + timedelta(seconds=20), usegmt=True)
+        cases = (
+            ({}, "none", RATE_LIMIT_DEFAULT_WAIT),
+            ({"Retry-After": "7"}, 7, 7),
+            ({"retry-after": "0"}, 0, 1),
+            ({"Retry-After": "15"}, 15, 15),
+            ({"Retry-After": "16"}, 16, None),
+            ({"Retry-After": "soon"}, "invalid", RATE_LIMIT_DEFAULT_WAIT),
+        )
+        for headers, parsed, wait in cases:
+            with self.subTest(headers=headers):
+                value = _retry_after_seconds(SimpleNamespace(headers=headers))
+                self.assertEqual(value, parsed)
+                self.assertEqual(_rate_limit_wait(value), wait)
+        from_date = _retry_after_seconds(SimpleNamespace(headers={"Retry-After": future}))
+        self.assertTrue(18 <= from_date <= 21, from_date)
+        self.assertIsNone(_rate_limit_wait(from_date))
+
+    def test_rate_limited_page_skips_anonymous_embed_and_oembed(self):
+        url = "https://www.threads.com/@demo/post/abc"
+        get = Mock(return_value=SimpleNamespace(status_code=429, url=url, text="", close=Mock()))
+        with patch.dict("sys.modules", {"requests": SimpleNamespace(get=get)}), patch(SLEEP):
+            post = fetch_threads_post(url)
+        self.assertEqual(get.call_count, 2)  # The page request and its single slow retry.
+        self.assertTrue(all("/embed" not in c.args[0] and "oembed" not in c.args[0] for c in get.call_args_list))
+        self.assertEqual(post.preview_error, "rate_limited")
+
+    def test_rate_limited_page_keeps_single_cookie_fallback(self):
+        url = "https://www.threads.com/@demo/post/abc"
+        get = Mock(return_value=SimpleNamespace(status_code=429, url=url, text="", close=Mock()))
+        authenticated = ThreadsPost(url=url, text="登入後正文")
+        with patch.dict("sys.modules", {"requests": SimpleNamespace(get=get)}), patch(SLEEP),                 patch.dict("os.environ", {"THREADS_COOKIE": "sessionid=example"}),                 patch("discord_bot.features.social_preview.threads_cookie.try_cookie_fallback",
+                      return_value=authenticated) as cookie:
+            post = fetch_threads_post(url)
+        self.assertEqual(get.call_count, 2)
+        cookie.assert_called_once()
+        self.assertEqual(post.text, "登入後正文")
+        self.assertEqual(post.debug["requests_last_status"], 429)
+
     def test_page_attempt_budget_limits_retryable_statuses_and_exceptions(self):
         url = "https://www.threads.com/@demo/post/abc"
-        for result in (429, 503, RuntimeError("network unavailable")):
+        for result in (503, RuntimeError("network unavailable")):
             with self.subTest(result=result):
                 get = Mock(side_effect=result) if isinstance(result, Exception) else Mock(
                     return_value=SimpleNamespace(status_code=result, url=url, text="")
@@ -258,7 +365,8 @@ class ThreadsFetchTests(unittest.TestCase):
             self.assertNotIn("User-Agent", first.kwargs["headers"])
             self.assertEqual(second.kwargs["headers"]["User-Agent"], UA_MOBILE)
             self.assertEqual(second.args[0], share_url)
-            sleep.assert_called_once()
+            # A 429 waits the rate-limit pause; other transient outcomes keep the short backoff.
+            sleep.assert_called_once_with(RATE_LIMIT_DEFAULT_WAIT if status == 429 else RETRY_BACKOFF)
             transient.close.assert_called_once()
             redirect.close.assert_called_once()
             output = " ".join(logs.output)
@@ -284,13 +392,48 @@ class ThreadsFetchTests(unittest.TestCase):
         self.assertEqual(error.diagnostics(), {
             "share_outcome": "share_page", "share_statuses": "429-200",
             "share_attempts": 2, "share_http_status": 200,
+            "share_retry_after": "none", "share_rate_limit_wait": RATE_LIMIT_DEFAULT_WAIT,
         })
         self.assertEqual(requests_stub.get.call_count, 2)
         for response in responses:
             response.close.assert_called_once()
         output = " ".join(logs.output)
-        self.assertIn("outcome=share_page attempts=2 statuses=429-200", output)
+        self.assertIn("outcome=share_page attempts=2 statuses=429-200 retry_after=none", output)
         self.assertNotIn("TEST_retry_2", output + str(error))
+
+    def test_resolve_threads_share_url_follows_retry_after_for_rate_limits(self):
+        share_url = "https://www.threads.com/share/TEST_retry_4"
+        limited = lambda value: SimpleNamespace(url=share_url, status_code=429, headers={"Retry-After": value},
+                                                close=Mock())
+        responses = [limited("3"), limited("12")]
+        requests_stub = SimpleNamespace(get=Mock(side_effect=responses))
+        with patch.dict("sys.modules", {"requests": requests_stub}), patch(SLEEP) as sleep, \
+                self.assertLogs("discord_digest_bot", level="INFO") as logs:
+            with self.assertRaises(ThreadsShareUnresolved) as raised:
+                _resolve_threads_share_url(share_url)
+
+        sleep.assert_called_once_with(3)
+        diagnostics = raised.exception.diagnostics()
+        self.assertEqual(diagnostics["share_statuses"], "429-429")
+        self.assertEqual(diagnostics["share_retry_after"], 12)  # The latest 429 wins.
+        self.assertEqual(diagnostics["share_rate_limit_wait"], 3)
+        self.assertIn("rate limited, retrying once: retry_after=3 wait=3s", " ".join(logs.output))
+
+    def test_resolve_threads_share_url_long_retry_after_gives_up_without_waiting(self):
+        share_url = "https://www.threads.com/share/TEST_retry_5"
+        response = SimpleNamespace(url=share_url, status_code=429, headers={"Retry-After": "120"}, close=Mock())
+        requests_stub = SimpleNamespace(get=Mock(return_value=response))
+        with patch.dict("sys.modules", {"requests": requests_stub}), patch(SLEEP) as sleep, \
+                self.assertLogs("discord_digest_bot", level="WARNING"):
+            with self.assertRaises(ThreadsShareUnresolved) as raised:
+                _resolve_threads_share_url(share_url)
+
+        requests_stub.get.assert_called_once()
+        sleep.assert_not_called()
+        diagnostics = raised.exception.diagnostics()
+        self.assertEqual(diagnostics["share_statuses"], "429")
+        self.assertEqual(diagnostics["share_retry_after"], 120)
+        self.assertNotIn("share_rate_limit_wait", diagnostics)
 
     def test_resolve_threads_share_url_retries_transport_errors_without_url_details(self):
         class ReadTimeout(Exception):

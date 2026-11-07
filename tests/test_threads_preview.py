@@ -286,6 +286,54 @@ class ThreadsPreviewTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(preview.files, [])
         self.assertIsNone(preview.video_url)
 
+    @patch("discord_bot.features.social_preview.threads_preview.asyncio.to_thread")
+    async def test_rate_limited_page_reports_status_and_attempts(self, mock_to_thread):
+        url = "https://www.threads.com/@demo/post/abc"
+        mock_to_thread.return_value = ThreadsPost(
+            url=url, preview_error="rate_limited",
+            debug={"requests_last_status": 429, "requests_attempts": 2, "requests_last_url": url,
+                   "requests_retry_after": "none", "requests_rate_limit_wait": 10},
+        )
+
+        preview = await build_threads_preview(url)
+
+        self.assertEqual(preview.preview_error, "rate_limited")
+        self.assertEqual(preview.http_status, 429)
+        self.assertEqual(preview.diagnostics, {"requests_attempts": 2, "requests_retry_after": "none",
+                                               "requests_rate_limit_wait": 10})
+
+    @patch("discord_bot.features.social_preview.threads_preview.asyncio.to_thread")
+    async def test_cookie_failure_does_not_borrow_anonymous_page_status(self, mock_to_thread):
+        url = "https://www.threads.com/@demo/post/abc"
+        mock_to_thread.return_value = ThreadsPost(
+            url=url, preview_error="cookie_login_required", debug={"requests_last_status": 200},
+        )
+
+        preview = await build_threads_preview(url)
+
+        self.assertEqual(preview.preview_error, "cookie_login_required")
+        self.assertIsNone(preview.http_status)
+
+    async def test_concurrent_previews_fetch_threads_one_at_a_time(self):
+        import asyncio
+
+        active = peak = 0
+
+        async def slow_fetch(_func, url):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0.01)
+            active -= 1
+            return ThreadsPost(url=url, preview_error="invalid_post")
+
+        urls = [f"https://www.threads.com/@demo/post/abc{index}" for index in range(3)]
+        with patch("discord_bot.features.social_preview.threads_preview.asyncio.to_thread", new=slow_fetch):
+            previews = await asyncio.gather(*(build_threads_preview(url) for url in urls))
+
+        self.assertEqual(peak, 1)
+        self.assertEqual([preview.preview_error for preview in previews], ["invalid_post"] * 3)
+
     @patch("discord_bot.features.social_preview.threads_preview.cleanup_source_message", new_callable=AsyncMock)
     @patch("discord_bot.features.social_preview.sender.send_preview_as_author", new_callable=AsyncMock)
     @patch("discord_bot.features.social_preview.threads_preview.asyncio.to_thread")

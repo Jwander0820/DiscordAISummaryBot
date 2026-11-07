@@ -220,6 +220,33 @@ class PreviewFailureTests(unittest.IsolatedAsyncioTestCase):
         send.assert_not_awaited()
         cleanup.assert_not_awaited()
 
+    async def test_rate_limited_threads_page_reports_429_and_keeps_source(self):
+        url = "https://www.threads.com/@demo/post/Example_post_1"
+        limited = ThreadsPost(url=url, preview_error="rate_limited",
+                              debug={"requests_last_status": 429, "requests_attempts": 2,
+                                     "requests_retry_after": 12, "requests_rate_limit_wait": 10})
+        with patch("discord_bot.features.social_preview.threads_fetch._try_requests", return_value=limited), \
+                patch("discord_bot.features.social_preview.threads_fetch._try_embed_fill") as embed, \
+                patch("discord_bot.features.social_preview.threads_fetch._try_oembed_fill") as oembed, \
+                patch.dict("os.environ", {"THREADS_COOKIE": ""}), \
+                patch("discord_bot.features.social_preview.sender.send_preview_as_author",
+                      new=AsyncMock(return_value=types.SimpleNamespace(id=100))) as send, \
+                patch.object(threads_preview, "cleanup_source_message", new_callable=AsyncMock) as cleanup, \
+                patch.object(failures, "forward_notify_to_channel", new_callable=AsyncMock) as notify:
+            message = source(url)
+            self.assertTrue(await threads_preview.handle_threads_in_message(message))
+
+        embed.assert_not_called()
+        oembed.assert_not_called()
+        error = notify.await_args.kwargs["error"]
+        self.assertTrue(error.startswith("rate_limited: "), error)
+        self.assertEqual(notify.await_args.kwargs["record"]["summary"],
+                         "http_status=429 requests_attempts=2 requests_retry_after=12 requests_rate_limit_wait=10")
+        # source() wraps the link in a spoiler, so the reply is spoilered too.
+        self.assertEqual(message.reply.await_args.args[0], "||Threads預覽失敗 爛meta||")
+        send.assert_not_awaited()
+        cleanup.assert_not_awaited()
+
     async def test_failure_details_only_forward_safe_fixed_codes(self):
         url = "https://www.threads.com/share/Example_share_2"
         with patch.object(failures, "forward_notify_to_channel", new_callable=AsyncMock) as notify:

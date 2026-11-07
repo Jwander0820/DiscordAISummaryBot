@@ -8,8 +8,11 @@ import re
 import sys
 import time
 import html
+import math
 from dataclasses import dataclass, field
-from typing import List, Optional, Dict, Any
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+from typing import List, Optional, Dict, Any, Union
 from urllib.parse import parse_qs, unquote, urljoin, urlparse, urlunparse, urlencode
 
 from .text import TextSpan, coalesce_text_spans, trim_text_spans
@@ -58,6 +61,10 @@ THREADS_HOSTS = {"threads.net", "www.threads.net", "threads.com", "www.threads.c
 THREADS_SHARE_ATTEMPTS = 2
 THREADS_SHARE_RETRY_OUTCOMES = {"share_page", "rate_limited", "server_error", "timeout", "network_error"}
 THREADS_LOGIN_PATH_RE = re.compile(r"/(?:login|accounts/login|challenge|checkpoint)(?:/|$)", re.IGNORECASE)
+# A 429 gets one slow retry. Threads limits by server IP, so a short pause or a
+# different UA does not help; a longer Retry-After means give up immediately.
+RATE_LIMIT_DEFAULT_WAIT = 10
+RATE_LIMIT_MAX_WAIT = 15
 
 
 # =============== 資料結構 ===============
@@ -95,12 +102,40 @@ def _strip_tracking_query(url: str) -> str:
     return urlunparse((parsed.scheme or "https", parsed.netloc, path, "", "", ""))
 
 
+def _retry_after_seconds(response) -> Union[int, str]:
+    """Retry-After as whole seconds, or the botlog-safe codes ``none``/``invalid``."""
+    headers = getattr(response, "headers", None) or {}
+    raw = headers.get("Retry-After") or headers.get("retry-after")
+    if raw is None:
+        return "none"
+    raw = str(raw).strip()
+    if raw.isdigit() and len(raw) <= 9:
+        return int(raw)
+    try:
+        when = parsedate_to_datetime(raw)
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        return max(0, math.ceil((when - datetime.now(timezone.utc)).total_seconds()))
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return "invalid"
+
+
+def _rate_limit_wait(retry_after: Union[int, str]) -> Optional[int]:
+    """Seconds to wait before the single 429 retry; ``None`` means do not retry."""
+    if not isinstance(retry_after, int):
+        return RATE_LIMIT_DEFAULT_WAIT
+    if retry_after > RATE_LIMIT_MAX_WAIT:
+        return None
+    return max(1, retry_after)
+
+
 class ThreadsShareUnresolved(ValueError):
     """A share URL did not lead to a post. Holds fixed codes only, never URLs."""
 
-    def __init__(self, outcome: str, statuses: List[Optional[int]]):
+    def __init__(self, outcome: str, statuses: List[Optional[int]], extras: Optional[Dict[str, Any]] = None):
         self.outcome = outcome
         self.statuses = tuple(statuses)
+        self.extras = dict(extras or {})
         super().__init__(f"Threads 分享 URL 未導向標準貼文：outcome={outcome} statuses={self.status_text}")
 
     @property
@@ -118,6 +153,7 @@ class ThreadsShareUnresolved(ValueError):
             "share_statuses": self.status_text,
             "share_attempts": len(self.statuses),
             "share_http_status": self.status,
+            **self.extras,
         }
 
 
@@ -146,8 +182,12 @@ def _share_redirect_outcome(next_url: str) -> str:
     return "unexpected_redirect"
 
 
-def _share_attempt(requests, share_url: str, headers: Dict[str, str]) -> tuple[Optional[str], str, Optional[int]]:
-    """Follow one share redirect chain; return ``(post_url, outcome, last_status)``."""
+def _share_attempt(requests, share_url: str, headers: Dict[str, str]
+                   ) -> tuple[Optional[str], str, Optional[int], Optional[Union[int, str]]]:
+    """Follow one share redirect chain; return ``(post_url, outcome, last_status, retry_after)``.
+
+    ``retry_after`` is only set for a 429 response.
+    """
     current_url = share_url
     status = None
     for _ in range(THREADS_SHARE_MAX_REDIRECTS + 1):
@@ -164,41 +204,43 @@ def _share_attempt(requests, share_url: str, headers: Dict[str, str]) -> tuple[O
             )
         except Exception as exc:
             # Transport exceptions can embed the URL; keep only a fixed category.
-            return None, "timeout" if "Timeout" in type(exc).__name__ else "network_error", None
+            return None, "timeout" if "Timeout" in type(exc).__name__ else "network_error", None, None
         try:
             status = getattr(response, "status_code", None)
             response_url = getattr(response, "url", None) or current_url
             resolved_url = _strip_tracking_query(response_url)
             if THREADS_RE.fullmatch(resolved_url):
-                return resolved_url, "resolved", status
+                return resolved_url, "resolved", status, None
 
             response_headers = getattr(response, "headers", {}) or {}
             location = response_headers.get("Location") or response_headers.get("location")
             if status not in THREADS_REDIRECT_STATUSES or not location:
-                return None, _share_status_outcome(status), status
+                retry_after = _retry_after_seconds(response) if status == 429 else None
+                return None, _share_status_outcome(status), status, retry_after
 
             next_url = urljoin(response_url, location)
             parsed_next = urlparse(next_url)
             next_host = parsed_next.netloc.lower().split(":", 1)[0]
             if parsed_next.scheme not in {"http", "https"} or next_host not in THREADS_HOSTS:
-                return None, "external_redirect", status
+                return None, "external_redirect", status, None
 
             resolved_url = _strip_tracking_query(next_url)
             if THREADS_RE.fullmatch(resolved_url):
-                return resolved_url, "resolved", status
+                return resolved_url, "resolved", status, None
             if not THREADS_SHARE_RE.fullmatch(resolved_url):
-                return None, _share_redirect_outcome(next_url), status
+                return None, _share_redirect_outcome(next_url), status, None
             current_url = resolved_url
         finally:
             response.close()
-    return None, "redirect_limit", status
+    return None, "redirect_limit", status, None
 
 
 def _resolve_threads_share_url(url: str) -> str:
     """Resolve a Threads ``/share/<token>`` URL to its canonical post URL.
 
     Raises ``ThreadsShareUnresolved`` with per-attempt HTTP statuses when Threads
-    does not redirect to a post. Only transient outcomes are retried, once.
+    does not redirect to a post. Only transient outcomes are retried, once; a 429
+    waits for Retry-After (or a fixed pause) before that retry.
     """
     import requests
 
@@ -208,12 +250,14 @@ def _resolve_threads_share_url(url: str) -> str:
 
     statuses: List[Optional[int]] = []
     outcomes: List[str] = []
+    extras: Dict[str, Any] = {}
+    wait: float = RETRY_BACKOFF
     for attempt in range(THREADS_SHARE_ATTEMPTS):
         headers = {"Accept": DEFAULT_ACCEPT, "Accept-Language": DEFAULT_LANG}
         if attempt:
-            time.sleep(RETRY_BACKOFF)
+            time.sleep(wait)
             headers["User-Agent"] = UA_MOBILE
-        post_url, outcome, status = _share_attempt(requests, share_url, headers)
+        post_url, outcome, status, retry_after = _share_attempt(requests, share_url, headers)
         statuses.append(status)
         outcomes.append(outcome)
         if post_url:
@@ -221,12 +265,23 @@ def _resolve_threads_share_url(url: str) -> str:
                 logger.info("Threads share link resolved after retry: first_outcome=%s attempts=%d statuses=%s",
                             outcomes[0], len(statuses), _format_share_statuses(statuses))
             return post_url
-        if outcome not in THREADS_SHARE_RETRY_OUTCOMES:
+        if outcome == "rate_limited":
+            extras["share_retry_after"] = retry_after
+        if outcome not in THREADS_SHARE_RETRY_OUTCOMES or attempt + 1 >= THREADS_SHARE_ATTEMPTS:
             break
+        if outcome == "rate_limited":
+            rate_limit_wait = _rate_limit_wait(retry_after)
+            if rate_limit_wait is None:
+                break
+            wait = extras["share_rate_limit_wait"] = rate_limit_wait
+            logger.info("Threads share link rate limited, retrying once: retry_after=%s wait=%ds",
+                        retry_after, rate_limit_wait)
+        else:
+            wait = RETRY_BACKOFF
 
-    error = ThreadsShareUnresolved(outcomes[-1], statuses)
-    logger.warning("Threads share link unresolved: outcome=%s attempts=%d statuses=%s",
-                   error.outcome, len(statuses), error.status_text)
+    error = ThreadsShareUnresolved(outcomes[-1], statuses, extras)
+    logger.warning("Threads share link unresolved: outcome=%s attempts=%d statuses=%s retry_after=%s",
+                   error.outcome, len(statuses), error.status_text, extras.get("share_retry_after", "-"))
     raise error
 
 
@@ -237,7 +292,9 @@ def build_candidate_urls(url: str) -> list[str]:
         p = p._replace(scheme="https")
 
     path = p.path.rstrip("/")
-    hosts = ["threads.net", "threads.com"]
+    # www.threads.com answers directly; threads.net costs an extra 301 hop and
+    # stays only as a fallback host.
+    hosts = ["www.threads.com", "threads.net"]
     queries = ["", "hl=en"]  # 先不帶，再帶 hl=en
 
     candidates = []
@@ -1118,13 +1175,15 @@ def _parse_html(url: str, html_text: str) -> ThreadsPost:
 
 # =============== 抓取（requests） ===============
 def _try_requests(url: str) -> ThreadsPost:
-    """用 requests + 多 UA/host 重試抓 Threads 頁面。"""
+    """用 requests 依序嘗試多 UA/host 抓 Threads 頁面；429 等待後重試一次，仍 429 就停止。"""
     import requests
 
+    # Ordered by observed success: mobile and Instagram UAs receive the full
+    # server-rendered post, the desktop UA only a JavaScript shell without post data.
     headers_list = [
-        {"User-Agent": UA_DESKTOP, "Accept": DEFAULT_ACCEPT, "Accept-Language": DEFAULT_LANG},
         {"User-Agent": UA_MOBILE, "Accept": DEFAULT_ACCEPT, "Accept-Language": DEFAULT_LANG},
         {"User-Agent": UA_INSTAGRAM, "Accept": DEFAULT_ACCEPT, "Accept-Language": DEFAULT_LANG},
+        {"User-Agent": UA_DESKTOP, "Accept": DEFAULT_ACCEPT, "Accept-Language": DEFAULT_LANG},
     ]
 
     variants = build_candidate_urls(url)
@@ -1150,6 +1209,8 @@ def _try_requests(url: str) -> ThreadsPost:
     ]
     completed_pairs = set()
     attempts = 0
+    rate_limit_retried = False
+    rate_limit_debug: Dict[str, Any] = {}
     for index, (vurl, header_index, retry_index) in enumerate(plan):
         if attempts >= MAX_PAGE_ATTEMPTS:
             break
@@ -1160,6 +1221,20 @@ def _try_requests(url: str) -> ThreadsPost:
         retryable = False
         try:
             resp = requests.get(vurl, headers=headers_list[header_index], timeout=REQUEST_TIMEOUT, allow_redirects=True)
+            if resp.status_code == 429 and not rate_limit_retried and attempts < MAX_PAGE_ATTEMPTS:
+                # Threads limits by server IP: wait once, then repeat the same
+                # request. Switching host or UA right away would only add hits.
+                rate_limit_retried = True
+                retry_after = rate_limit_debug["requests_retry_after"] = _retry_after_seconds(resp)
+                wait = _rate_limit_wait(retry_after)
+                if wait is not None:
+                    rate_limit_debug["requests_rate_limit_wait"] = wait
+                    logger.info("Threads page rate limited, retrying once: retry_after=%s wait=%ds",
+                                retry_after, wait)
+                    time.sleep(wait)
+                    attempts += 1
+                    resp = requests.get(vurl, headers=headers_list[header_index], timeout=REQUEST_TIMEOUT,
+                                        allow_redirects=True)
             last_status = resp.status_code
             last_url = resp.url
             redirect_error = _threads_error_from_url(resp.url)
@@ -1174,10 +1249,21 @@ def _try_requests(url: str) -> ThreadsPost:
                     post.debug["requests_attempts"] = attempts
                     return post
                 if post.text or post.media:
+                    if "requests_rate_limit_wait" in rate_limit_debug:
+                        logger.info("Threads page fetched after rate-limit retry: attempts=%d", attempts)
                     return post
                 last_html = resp.text
                 completed_pairs.add(pair)
-            elif resp.status_code in (429, 500, 502, 503, 504):
+            elif resp.status_code == 429:
+                # Still limited after the single slow retry (or Retry-After asks
+                # for longer than we wait): stop instead of extending the block.
+                rate_limit_debug["requests_retry_after"] = _retry_after_seconds(resp)
+                logger.warning("Threads page rate limited: attempts=%d retry_after=%s",
+                               attempts, rate_limit_debug["requests_retry_after"])
+                p = ThreadsPost(url=_normalize(url), preview_error="rate_limited")
+                p.debug.update(requests_last_status=429, requests_attempts=attempts, **rate_limit_debug)
+                return p
+            elif resp.status_code in (500, 502, 503, 504):
                 retryable = True
             else:
                 last_html = resp.text
@@ -1192,6 +1278,7 @@ def _try_requests(url: str) -> ThreadsPost:
     p.debug["requests_last_status"] = last_status
     p.debug["requests_last_url"] = last_url
     p.debug["requests_attempts"] = attempts
+    p.debug.update(rate_limit_debug)
     if last_html and not p.preview_error:
         path = _save_debug_html("requests_last.html", last_html)
         p.debug["requests_last_html_path"] = path
