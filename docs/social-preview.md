@@ -26,7 +26,7 @@ Threads／Facebook／Instagram 遇到最終存取限制、Cookie 失敗、無可
 
 詳細原因只轉發既有 `DISCORD_NOTIFY_FORWARD_CHANNEL_ID`（botlog），可用 `DISCORD_NOTIFY_FORWARD_GUILD_ID` 指定其他伺服器。使用者與來源頻道優先顯示「名稱（ID）」；社群通知使用來源訊息已有的名稱，其他數字 ID 只查現成快取，名稱缺失時保留 ID，不額外呼叫 Discord API。通知另包含固定分類、時間、去除 tracking 的原連結，以及可用的錯誤類型／HTTP 狀態／Discord code／IG trace ID，不包含 Cookie、HTML、貼文正文、媒體簽名網址或原始例外字串；此通知不寄 Gmail、不寫歷史表。
 
-Threads `/share/...` 短連結會先解析成標準貼文網址。Threads 回 5xx、200 分享頁（沒有轉址的 JavaScript 頁面），或請求逾時／連線失敗時，約 2 秒後改用手機 UA 重試一次；回 429 時改照下方的 429 等待規則，再以手機 UA 重試一次。導向登入頁、帶 `error` 參數的錯誤頁、非 Threads 網域或其他路徑時不重試。仍失敗則分類為 `share_unresolved`，botlog 附上 `http_status`（最後收到的狀態）、`share_outcome`（最後一次結果：`share_page`、`rate_limited`、`server_error`、`timeout`、`network_error`、`login_redirect`、`error_redirect`、`external_redirect`、`unexpected_redirect`、`unexpected_status`、`redirect_limit`）、`share_statuses`（每次嘗試的狀態，以 `-` 分隔，`none` 表示沒有回應）與 `share_attempts`；遇過 429 時再附 `share_retry_after`，實際有等待則附 `share_rate_limit_wait`。伺服器 log 另記 `Threads share link unresolved` WARNING；重試後成功則記 `Threads share link resolved after retry` INFO，可用來觀察重試的效果。短連結解析失敗時還沒有貼文網址，因此不會使用 Threads Cookie。
+未設定 Cookie 時，Threads `/share/...` 短連結會先解析成標準貼文網址。Threads 回 5xx、200 分享頁（沒有轉址的 JavaScript 頁面），或請求逾時／連線失敗時，約 2 秒後改用手機 UA 重試一次；回 429 時改照下方的 429 等待規則，再以手機 UA 重試一次。導向登入頁、帶 `error` 參數的錯誤頁、非 Threads 網域或其他路徑時不重試。仍失敗則分類為 `share_unresolved`，botlog 附上 `http_status`（最後收到的狀態）、`share_outcome`（最後一次結果：`share_page`、`rate_limited`、`server_error`、`timeout`、`network_error`、`login_redirect`、`error_redirect`、`external_redirect`、`unexpected_redirect`、`unexpected_status`、`redirect_limit`）、`share_statuses`（每次嘗試的狀態，以 `-` 分隔，`none` 表示沒有回應）與 `share_attempts`；遇過 429 時再附 `share_retry_after`，實際有等待則附 `share_rate_limit_wait`。伺服器 log 另記 `Threads share link unresolved` WARNING；重試後成功則記 `Threads share link resolved after retry` INFO，可用來觀察重試的效果。已設定 Cookie 的流程見下方「Threads Cookie 優先抓取」。
 
 標準貼文頁一次只發一個請求，依成功率排序：先以手機 UA 直接請求 `www.threads.com`。桌面 UA 只會拿到不含貼文資料的 JavaScript 外殼頁，所以排在最後。沒有內容時才依序改用 Instagram／桌面 UA、`hl=en` 與 `threads.net` 變體，最多 6 次；遇到 5xx 或逾時會先等待再重試。一般情況下，短連結預覽對 Threads 只發 2 個請求（短連結＋貼文頁），標準連結只發 1 個。
 
@@ -36,7 +36,7 @@ Threads `/share/...` 短連結會先解析成標準貼文網址。Threads 回 5x
 - 沒帶或格式無法解析時，固定等待 10 秒。
 - 要求等待超過 15 秒時不重試，直接停止。
 
-重試後仍是 429 就停止，這則預覽不再發出其他匿名請求，包含官方 embed 與 oEmbed。貼文頁的這類失敗分類為 `rate_limited`，botlog 附上 `http_status=429`、`requests_attempts`、`requests_retry_after`（數字為秒數；`none` 表示沒帶，`invalid` 表示無法解析）與實際等待的 `requests_rate_limit_wait`。伺服器 log 會記錄 `Threads page rate limited, retrying once` INFO、重試成功時的 `Threads page fetched after rate-limit retry` INFO，以及最後停止時的 `Threads page rate limited` WARNING。已設定 `THREADS_COOKIE` 時，仍依下方規則嘗試一次登入備援。`no_content` 同樣附上最後一次貼文頁狀態與 `requests_attempts`。
+重試後仍是 429 就停止，這則預覽不再發出其他匿名請求，包含官方 embed 與 oEmbed。貼文頁的這類失敗分類為 `rate_limited`，botlog 附上 `http_status=429`、`requests_attempts`、`requests_retry_after`（數字為秒數；`none` 表示沒帶，`invalid` 表示無法解析）與實際等待的 `requests_rate_limit_wait`。伺服器 log 會記錄 `Threads page rate limited, retrying once` INFO、重試成功時的 `Threads page fetched after rate-limit retry` INFO，以及最後停止時的 `Threads page rate limited` WARNING。已設定 `THREADS_COOKIE` 時改走下方 Cookie 優先路徑。`no_content` 同樣附上最後一次貼文頁狀態與 `requests_attempts`。
 
 同時有多則 Threads 連結時，bot 一次只抓一則，其餘排隊等候。等待 429 期間也不放行其他連結，相當於整個 bot 暫停打 Threads，所以排在後面的預覽會跟著延後；圖片下載走 CDN，不受排隊影響。最壞情況下，短連結和貼文頁各等一次，同一則預覽約延遲 20 秒以上。
 
@@ -53,9 +53,13 @@ Threads `/share/...` 短連結會先解析成標準貼文網址。Threads 回 5x
 
 Cookie 是登入憑證，三平台分別設定。以下流程中的「重啟」指本機 Python 程序；Docker 的 `env_file` 更新必須依[部署指南](../tools/deploy/README.md#修改環境設定)重建 Bot，單按 Restart 不會套用。
 
-## Threads Cookie 備援
+## Threads Cookie 優先抓取
 
-預設先匿名抓取；匿名流程仍無有效正文或媒體時，才使用 `THREADS_COOKIE` 嘗試一次。Cookie 只送到 `https://www.threads.com` 的目標貼文頁，不跟隨跳轉，也不會送到圖片／影片 CDN、oEmbed、Facebook 或 Instagram。登入 HTML 不寫入 `_threads_debug`，log 只記錄固定失敗分類、HTTP 狀態與解析計數。
+已設定 `THREADS_COOKIE` 時，短連結解析與貼文頁從第一個請求就使用 Cookie，優先載入對應環境初始值的保存檔。短連結逐跳檢查，只向 `https://www.threads.com` 發送 Cookie；拒絕 HTTP、外部主機與非貼文／分享路徑，不自動跟隨轉址。貼文沿用目標綁定與公開內容檢查，不另打匿名頁、embed 或 oEmbed。Cookie 不送到圖片／影片 CDN、Facebook 或 Instagram。登入 HTML 不寫入 `_threads_debug`。
+
+以上 Cookie 優先規則取代舊版「匿名失敗後才使用 Cookie」的流程；上方匿名貼文頁重試規則僅在未設定 Cookie 時適用。Cookie 短連結 429 依原等待規則最多重試一次，其他失敗直接回報；Cookie 貼文頁仍只請求一次。Cookie 更新僅在成功驗證的貼文回應保存，短連結的轉址回應不保存。Cookie 過期、429 或內容限制仍可能失敗，不自動降級匿名或重新登入。
+
+Cookie 短連結診斷的 `share_statuses` 逐次列出 HTTP 請求結果（包含 share→share 轉址），`share_attempts` 為該清單長度；匿名路徑仍按整條轉址鏈的一次嘗試計數。貼文解析保留既有目標綁定與私人標記檢查，不代表網站每次都提供明確的公開狀態欄位。
 
 在 Chrome 取得 Cookie：
 

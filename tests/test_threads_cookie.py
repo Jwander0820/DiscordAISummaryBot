@@ -114,13 +114,15 @@ class ThreadsCookieTests(unittest.TestCase):
                 self.session.get.return_value.iter_content.assert_not_called()
                 self.assertNotIn(location, repr(post.debug))
 
-    def test_anonymous_text_or_media_never_uses_cookie(self):
+    def test_cookie_is_used_before_anonymous_text_or_media(self):
         for post in (tf.ThreadsPost(url=URL, text="匿名正文"),
                      tf.ThreadsPost(url=URL, media=[tf.ThreadsMedia("image", IMAGE)]),
                      tf.ThreadsPost(url=URL, media=[tf.ThreadsMedia("video", VIDEO)])):
             with self.subTest(post=post):
-                self.assertIs(self.fetch(post), post)
-        self.requests.Session.assert_not_called()
+                self.session.get.return_value = response(page({"data": target()}))
+                self.assertEqual(self.fetch(post).text, "目標正文")
+        self.assertEqual(self.session.get.call_count, 3)
+        self.requests.get.assert_not_called()
 
     def test_audience_restriction_notice_does_not_bypass_cookie_fallback(self):
         post = self.fetch(tf._parse_html(URL, AUDIENCE_HTML))
@@ -157,7 +159,8 @@ class ThreadsCookieTests(unittest.TestCase):
                 post = tf._parse_html(URL, body)
                 self.assertIsNone(post.preview_error)
                 self.assertIn("available to everyone", post.text)
-                self.assertIs(self.fetch(post), post)
+                with patch.dict(os.environ, {"THREADS_COOKIE": ""}):
+                    self.assertIs(self.fetch(post), post)
         self.requests.Session.assert_not_called()
 
     def test_verified_restriction_stops_anonymous_ua_retries(self):
@@ -188,27 +191,75 @@ class ThreadsCookieTests(unittest.TestCase):
         self.assertEqual(post.text, "目標正文")
         self.session.get.assert_called_once()
 
-    def test_anonymous_budget_is_unchanged_and_cookie_never_reaches_other_requests(self):
+    def test_cookie_first_skips_anonymous_and_embed_requests(self):
         self.requests.get.return_value = response("", 503)
         self.requests.get.return_value.url = URL
         self.requests.get.return_value.text = ""
         with patch.object(tf, "_try_embed_fill", EMBED_FILL), patch.object(tf, "_try_oembed_fill", OEMBED_FILL), patch.object(tf.time, "sleep"):
             post = tf.fetch_threads_post(URL)
         self.assertEqual(post.text, "目標正文")
-        self.assertEqual(self.requests.get.call_count, 8)
+        self.assertEqual(self.requests.get.call_count, 0)
         self.session.get.assert_called_once()
         for call in self.requests.get.call_args_list:
             self.assertNotIn("Cookie", call.kwargs["headers"])
-        self.assertEqual(post.debug["requests_attempts"], 6)
+        self.assertNotIn("requests_attempts", post.debug)
         self.assertEqual(post.debug["cookie_attempts"], 1)
 
-    def test_share_resolution_stays_anonymous_and_cookie_uses_canonical_https_host(self):
-        canonical = URL.replace("https://www.threads.com", "http://threads.net")
-        with patch.object(tf, "_resolve_threads_share_url", return_value=canonical) as resolve:
+    def test_share_and_post_both_use_cookie_on_canonical_https_host(self):
+        self.session.get.side_effect = [response("", 302, Location=URL), response(page({"data": target()}))]
+        with patch.object(tf, "_resolve_threads_share_url") as resolve:
             post = self.fetch(url="https://www.threads.com/share/share-token")
-        resolve.assert_called_once_with("https://www.threads.com/share/share-token")
+        resolve.assert_not_called()
+        for call in self.session.get.call_args_list:
+            self.assertEqual(call.kwargs["headers"]["Cookie"], COOKIE)
+            self.assertFalse(call.kwargs["allow_redirects"])
         self.assertEqual(self.session.get.call_args.args, (URL + "?hl=en",))
         self.assertEqual(post.url, URL)
+
+    def test_authenticated_share_rejects_external_insecure_and_login_redirects(self):
+        for location in ("https://example.com/share/x", "http://www.threads.com/share/x", "/login"):
+            with self.subTest(location=location):
+                self.session.get.reset_mock()
+                self.session.get.return_value = response("", 302, Location=location)
+                post = self.fetch(url="https://www.threads.com/share/example")
+                self.assertEqual(post.preview_error, "share_unresolved")
+                self.session.get.assert_called_once()
+                self.requests.get.assert_not_called()
+
+    def test_authenticated_share_429_retries_once_without_anonymous_fallback(self):
+        self.session.get.return_value = response("", 429)
+        with patch("discord_bot.features.social_preview.threads_cookie.time.sleep") as sleep:
+            post = self.fetch(url="https://www.threads.com/share/example")
+        sleep.assert_called_once_with(10)
+        self.assertEqual(post.debug["share_statuses"], "429-429")
+        self.assertEqual(self.session.get.call_count, 2)
+        self.requests.get.assert_not_called()
+
+    def test_share_uses_saved_cookie_and_does_not_save_redirect_cookie(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
+            "SOCIAL_PREVIEW_COOKIE_AUTO_SAVE": "1", "SOCIAL_PREVIEW_COOKIE_STORE_DIR": directory,
+        }):
+            self.session.get.return_value = response(page({"data": target()}), **{
+                "Set-Cookie": "sessionid=saved-test; Path=/; Secure"})
+            self.fetch()
+            self.session.get.reset_mock()
+            self.session.get.side_effect = [
+                response("", 302, Location="https://threads.net/share/next", **{
+                    "Set-Cookie": "sessionid=unverified-test; Path=/; Secure"}),
+                response("", 302, Location=URL), response(page({"data": target()})),
+            ]
+            post = self.fetch(url="https://threads.net/share/example")
+            self.assertEqual(post.text, "目標正文")
+            for call in self.session.get.call_args_list:
+                self.assertTrue(call.args[0].startswith("https://www.threads.com/"))
+                self.assertIn("sessionid=saved-test", call.kwargs["headers"]["Cookie"])
+                self.assertNotIn("unverified-test", call.kwargs["headers"]["Cookie"])
+
+    def test_share_redirect_loop_has_bounded_requests(self):
+        self.session.get.return_value = response("", 302, Location="/share/example")
+        post = self.fetch(url="https://www.threads.com/share/example")
+        self.assertEqual(post.debug["share_outcome"], "redirect_limit")
+        self.assertEqual(self.session.get.call_count, tf.THREADS_SHARE_MAX_REDIRECTS + 1)
 
     def test_invalid_cookie_is_rejected_before_request_without_exposing_value(self):
         values = ["Cookie: " + COOKIE, "sessionid=fake\r\nX-Test: injection", "sessionid=假資料", "x=" + "a" * 16384]

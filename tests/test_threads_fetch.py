@@ -183,17 +183,17 @@ class ThreadsFetchTests(unittest.TestCase):
         self.assertTrue(all("/embed" not in c.args[0] and "oembed" not in c.args[0] for c in get.call_args_list))
         self.assertEqual(post.preview_error, "rate_limited")
 
-    def test_rate_limited_page_keeps_single_cookie_fallback(self):
+    def test_configured_cookie_skips_anonymous_page_requests(self):
         url = "https://www.threads.com/@demo/post/abc"
         get = Mock(return_value=SimpleNamespace(status_code=429, url=url, text="", close=Mock()))
         authenticated = ThreadsPost(url=url, text="登入後正文")
         with patch.dict("sys.modules", {"requests": SimpleNamespace(get=get)}), patch(SLEEP),                 patch.dict("os.environ", {"THREADS_COOKIE": "sessionid=example"}),                 patch("discord_bot.features.social_preview.threads_cookie.try_cookie_fallback",
                       return_value=authenticated) as cookie:
             post = fetch_threads_post(url)
-        self.assertEqual(get.call_count, 2)
+        self.assertEqual(get.call_count, 0)
         cookie.assert_called_once()
         self.assertEqual(post.text, "登入後正文")
-        self.assertEqual(post.debug["requests_last_status"], 429)
+        self.assertNotIn("requests_last_status", post.debug)
 
     def test_page_attempt_budget_limits_retryable_statuses_and_exceptions(self):
         url = "https://www.threads.com/@demo/post/abc"
@@ -495,7 +495,7 @@ class ThreadsFetchTests(unittest.TestCase):
         share_url = "https://www.threads.com/share/TEST_final_3"
         mock_resolve_share_url.side_effect = ThreadsShareUnresolved("rate_limited", [429, 429])
 
-        with patch.dict("os.environ", {"THREADS_COOKIE": "sessionid=example"}), \
+        with patch.dict("os.environ", {"THREADS_COOKIE": ""}), \
                 patch("discord_bot.features.social_preview.threads_cookie.try_cookie_fallback") as cookie:
             post = fetch_threads_post(share_url + "/?xmt=tracking")
 

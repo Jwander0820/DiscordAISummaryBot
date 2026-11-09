@@ -5,7 +5,8 @@ import html
 import json
 import logging
 import re
-from urllib.parse import urlparse
+import time
+from urllib.parse import urlparse, urljoin
 
 from .cookie_store import prepare_cookie, response_cookies, save_response_cookies
 from .download import is_trusted_media_url
@@ -20,6 +21,88 @@ from .threads_fetch import (
 logger = logging.getLogger("discord_digest_bot")
 MAX_COOKIE_BYTES = 16 * 1024
 MAX_COOKIE_PARSE_NODES = 100000
+
+
+def fetch_with_cookie(url: str, cookie: str) -> ThreadsPost:
+    """Cookie-first route; never send credentials beyond the canonical HTTPS host."""
+    from .threads_fetch import (
+        THREADS_SHARE_RE, THREADS_HOSTS, THREADS_SHARE_MAX_REDIRECTS,
+        ThreadsShareUnresolved, _retry_after_seconds, _rate_limit_wait,
+        _share_status_outcome, _share_redirect_outcome,
+    )
+    import requests
+
+    if not _valid_cookie(cookie):
+        logger.warning("Threads cookie request stopped: cookie_config_invalid")
+        return ThreadsPost(url=url, preview_error="cookie_config_invalid")
+    if not THREADS_SHARE_RE.fullmatch(url):
+        return try_cookie_fallback(url, cookie)
+    current = "https://www.threads.com" + urlparse(url).path
+    statuses = []
+    extras = {}
+    outcome = "redirect_limit"
+    retried = False
+    redirects = 0
+    try:
+        with requests.Session() as session:
+            session.trust_env = False
+            for _ in range(THREADS_SHARE_MAX_REDIRECTS + 2):
+                snapshot = prepare_cookie("threads", current, cookie)
+                if not snapshot.header:
+                    return ThreadsPost(url=url, preview_error="cookie_login_required")
+                response = None
+                try:
+                    # Do not inherit redirect response cookies before public target validation.
+                    session.cookies.clear()
+                    response = session.get(current, headers={
+                        "User-Agent": UA_MOBILE, "Accept": DEFAULT_ACCEPT,
+                        "Accept-Language": DEFAULT_LANG, "Cookie": snapshot.header,
+                    }, timeout=REQUEST_TIMEOUT, allow_redirects=False, stream=True)
+                    status = response.status_code
+                    statuses.append(status)
+                    if status == 429:
+                        retry_after = extras["share_retry_after"] = _retry_after_seconds(response)
+                        wait = _rate_limit_wait(retry_after)
+                        outcome = "rate_limited"
+                        if not retried and wait is not None:
+                            retried = True
+                            extras["share_rate_limit_wait"] = wait
+                            response.close()
+                            response = None
+                            time.sleep(wait)
+                            continue
+                        break
+                    location = response.headers.get("Location") or response.headers.get("location")
+                    if status not in THREADS_REDIRECT_STATUSES or not location:
+                        outcome = _share_status_outcome(status)
+                        break
+                    target = urljoin(current, location)
+                    parsed = urlparse(target)
+                    if parsed.scheme != "https" or parsed.netloc.lower() not in THREADS_HOSTS:
+                        outcome = "external_redirect"
+                        break
+                    clean = _strip_tracking_query(target)
+                    if THREADS_RE.fullmatch(clean):
+                        response.close()
+                        response = None
+                        return try_cookie_fallback(clean, cookie)
+                    if not THREADS_SHARE_RE.fullmatch(clean):
+                        outcome = _share_redirect_outcome(target)
+                        break
+                    if redirects >= THREADS_SHARE_MAX_REDIRECTS:
+                        outcome = "redirect_limit"
+                        break
+                    redirects += 1
+                    current = "https://www.threads.com" + urlparse(clean).path
+                finally:
+                    if response is not None:
+                        response.close()
+    except Exception as exc:
+        statuses.append(None)
+        outcome = "timeout" if "Timeout" in type(exc).__name__ else "network_error"
+    error = ThreadsShareUnresolved(outcome, statuses, extras)
+    logger.warning("Threads authenticated share unresolved: outcome=%s statuses=%s", outcome, error.status_text)
+    return ThreadsPost(url=url, preview_error="share_unresolved", debug=error.diagnostics())
 
 
 def _valid_cookie(cookie: str) -> bool:

@@ -32,7 +32,8 @@ class ThreadsNativeSpoilerTests(unittest.TestCase):
         self.assertIsNone(post.text_spans)
         self.assertEqual([(m.type, m.url, m.spoiler) for m in post.media], [("video", MEDIA_URL, True)])
         with patch.object(tf, "_try_requests", return_value=post), patch.object(tf, "_try_embed_fill") as embed, patch.object(tf, "_try_oembed_fill") as oembed:
-            self.assertIs(tf.fetch_threads_post(VIDEO_URL), post)
+            with patch.dict("os.environ", {"THREADS_COOKIE": ""}):
+                self.assertIs(tf.fetch_threads_post(VIDEO_URL), post)
         embed.assert_not_called()
         oembed.assert_not_called()
 

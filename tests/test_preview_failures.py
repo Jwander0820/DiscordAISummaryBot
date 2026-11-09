@@ -194,7 +194,7 @@ class PreviewFailureTests(unittest.IsolatedAsyncioTestCase):
     async def test_unresolved_threads_share_link_reports_statuses_instead_of_prepare_failed(self):
         url = "https://www.threads.com/share/Example_share_1"
         unresolved = ThreadsShareUnresolved("share_page", [200, 200])
-        with patch("discord_bot.features.social_preview.threads_fetch._resolve_threads_share_url",
+        with patch.dict(os.environ, {"THREADS_COOKIE": ""}), patch("discord_bot.features.social_preview.threads_fetch._resolve_threads_share_url",
                    side_effect=unresolved), \
                 patch("discord_bot.features.social_preview.threads_fetch._try_requests") as fetch_page, \
                 patch("discord_bot.features.social_preview.sender.send_preview_as_author",

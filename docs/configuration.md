@@ -64,7 +64,7 @@ YouTube 與 X 共用出警總開關、天數與跨頻道清單，只登記原留
 | `SOCIAL_PREVIEW_DELETE_TIMEOUT_SECONDS` | `0` | `0`；正數為互動刪除按鈕逾時秒數，非正數為同一程序內不自動逾時 |
 | `SOCIAL_DUPLICATE_ENABLED` | `1` | `1`；同頻道重複分享出警的全域預設，guild 可覆蓋 |
 | `SOCIAL_DUPLICATE_WINDOW_DAYS` | `7` | `7`；啟動載入最近 N 天，正整數，無效值退回七天 |
-| `THREADS_COOKIE` | 空白 | Threads 獨立登入備援，可選 |
+| `THREADS_COOKIE` | 空白 | 選填；設定後短連結與貼文均優先使用 Threads Cookie |
 | `FACEBOOK_COOKIE` | 空白 | Facebook 獨立登入備援，可選 |
 | `INSTAGRAM_COOKIE` | 空白 | Instagram 獨立登入備援，可選 |
 | `SOCIAL_PREVIEW_COOKIE_AUTO_SAVE` | `1` | `1`；有設定該平台 Cookie 才生效，`0` 停用保存檔讀寫 |

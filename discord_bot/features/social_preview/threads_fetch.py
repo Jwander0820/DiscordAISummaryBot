@@ -1365,6 +1365,10 @@ def _try_oembed_fill(post: ThreadsPost, *, allow_thumbnail: bool = True):
 def fetch_threads_post(url: str) -> ThreadsPost:
     """Threads parser 對外主入口。"""
     clean_url = _strip_tracking_query(url)
+    cookie = os.environ.get("THREADS_COOKIE", "").strip()
+    if cookie:
+        from .threads_cookie import fetch_with_cookie
+        return fetch_with_cookie(clean_url, cookie)
     if THREADS_SHARE_RE.fullmatch(clean_url):
         try:
             clean_url = _resolve_threads_share_url(clean_url)
@@ -1387,16 +1391,6 @@ def fetch_threads_post(url: str) -> ThreadsPost:
     # 若最後只剩可疑 fallback/avatar 圖，直接清掉，避免純文字貼文誤帶頭貼。
     if _has_only_fallback_media(post.media):
         post.media = []
-
-    # Optional account state is restricted to one separate, post-bound request.
-    # Never spend credentials to improve an already usable anonymous preview.
-    if not post.text and not post.media:
-        cookie = os.environ.get("THREADS_COOKIE", "")
-        if cookie.strip():
-            from .threads_cookie import try_cookie_fallback
-            authenticated = try_cookie_fallback(clean_url, cookie)
-            authenticated.debug = {**post.debug, **authenticated.debug}
-            post = authenticated
 
     return post
 
